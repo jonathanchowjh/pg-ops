@@ -66,6 +66,25 @@ export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
   return result.rows;
 }
 
+/**
+ * Show "host:port/db" without credentials — the status-bar target label.
+ * Lives in core because every runner (locks, top, sessions, home) needs it and
+ * the redaction must be identical in all of them (plan §G, Secrets handling).
+ */
+export function safeTarget(connectionString?: string): string | undefined {
+  if (!connectionString) return undefined;
+  try {
+    const u = new URL(connectionString);
+    // A URL with no host ("postgres://") parses but has nothing to show; an
+    // empty label in the status bar is worse than none.
+    if (!u.hostname) return undefined;
+    const db = u.pathname.replace(/^\//, '');
+    return `${u.hostname}${u.port ? `:${u.port}` : ''}${db ? `/${db}` : ''}`;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Close the pool cleanly on exit. */
 export async function closePool(): Promise<void> {
   if (pool) {

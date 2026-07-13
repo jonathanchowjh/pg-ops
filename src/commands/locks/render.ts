@@ -1,13 +1,6 @@
 import { formatDuration, type RootBlocker, type Waiter, waiterAppBreakdown } from './chain.js';
 import { adviseBlocker } from './advise.js';
-import { redactSecrets } from '../../core/snapshot.js';
-
-/** Shorten a query for inline display. */
-export function truncateQuery(query: string | null, max = 80): string {
-  if (!query) return '<no query>';
-  const collapsed = query.replace(/\s+/g, ' ').trim();
-  return collapsed.length > max ? `${collapsed.slice(0, max - 1)}…` : collapsed;
-}
+import { truncateQuery } from '../../core/format.js';
 
 /** Markdown body for the snapshot exporter (plan §A1: snapshots include the chain). */
 export function chainsToMarkdown(roots: RootBlocker[]): string {
@@ -26,10 +19,11 @@ export function chainsToMarkdown(roots: RootBlocker[]): string {
     if (breakdown) lines.push(`- waiting: ${breakdown}`);
     const advice = adviseBlocker(root);
     lines.push(`- advise: _${advice.text}_`);
-    // Redact BEFORE truncating (so a credential can't be split past the 200-char
-    // cut and escape the envelope's redaction), and escape backticks so a query
-    // containing one can't break out of the markdown code span.
-    const safeQuery = truncateQuery(root.query ? redactSecrets(root.query) : null, 200).replace(/`/g, "'");
+    // `truncateQuery` now redacts before it truncates (core/format.ts, I3), so a
+    // credential can't be split past the 200-char cut and escape the envelope's
+    // redaction. Escape backticks so a query containing one can't break out of
+    // the markdown code span.
+    const safeQuery = truncateQuery(root.query, 200).replace(/`/g, "'");
     lines.push(`- query: \`${safeQuery}\``);
     const walk = (waiters: Waiter[], depth: number) => {
       for (const w of waiters) {

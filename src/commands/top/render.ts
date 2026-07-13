@@ -1,3 +1,4 @@
+import { truncateQuery } from '../../core/format.js';
 import type { SortMode } from './stats.js';
 import type { QueryRow } from './stats.js';
 
@@ -14,13 +15,15 @@ const TITLES: Record<SortMode, string> = {
   cache: 'Top queries by cache hit (coldest first)',
 };
 
-/** Collapse whitespace, escape table-breaking pipes, and shorten for one cell. */
+/**
+ * Collapse whitespace, redact, shorten for one cell, and escape table-breaking
+ * pipes. Delegates to core/format.ts's `truncateQuery` so the TUI table (Top.tsx
+ * renders through this too) inherits the same redaction as every other view
+ * (deep-review I3) — the only thing top adds is the pipe escaping.
+ */
 export function cellQuery(query: string | null, max = 60): string {
-  if (!query) return '<no query>';
-  const collapsed = query.replace(/\s+/g, ' ').trim();
-  const clipped = collapsed.length > max ? `${collapsed.slice(0, max - 1)}…` : collapsed;
   // A literal `|` (e.g. the `||` concat operator) would split the markdown cell.
-  return clipped.replace(/\|/g, '\\|');
+  return truncateQuery(query, max).replace(/\|/g, '\\|');
 }
 
 function cachePct(pct: number | null): string {

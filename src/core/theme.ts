@@ -14,3 +14,17 @@ export const theme = {
 } as const;
 
 export type ThemeColor = keyof typeof theme;
+
+/**
+ * A transient status-bar line: an error, a kill outcome, a snapshot path.
+ *
+ * Lives in core, next to the palette its `color` indexes, because core PRODUCES
+ * these — `core/snapshot-file.ts`'s `saveSnapshot` returns one either way. It
+ * used to be declared in `ui/StatusBar.tsx`, which made core import from ui and
+ * inverted the layering the rest of core maintains: ui depends on core, never
+ * the reverse.
+ */
+export interface StatusMessage {
+  text: string;
+  color: ThemeColor;
+}

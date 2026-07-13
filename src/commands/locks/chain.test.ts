@@ -21,6 +21,8 @@ function edge(blocked_pid: number, blocking_pid: number, over: Partial<LockEdge>
     blocking_state: 'idle in transaction',
     blocked_for_secs: 10,
     blocking_for_secs: 60,
+    blocked_backend_start: '2026-06-26 10:05:00.000000+00',
+    blocking_backend_start: '2026-06-26 10:00:00.000000+00',
     ...over,
   };
 }
@@ -32,6 +34,14 @@ describe('buildChains', () => {
     expect(roots[0]?.pid).toBe(1);
     expect(roots[0]?.totalWaiters).toBe(1);
     expect(roots[0]?.waiters.map((w) => w.pid)).toEqual([2]);
+  });
+
+  it('threads backend_start onto the root and its waiters as the session identity', () => {
+    const roots = buildChains([
+      edge(2, 1, { blocking_backend_start: '2026-06-26 09:00:00.111111+00', blocked_backend_start: '2026-06-26 09:01:00.222222+00' }),
+    ]);
+    expect(roots[0]?.backendStart).toBe('2026-06-26 09:00:00.111111+00');
+    expect(roots[0]?.waiters[0]?.backendStart).toBe('2026-06-26 09:01:00.222222+00');
   });
 
   it('groups multiple waiters under one root blocker', () => {

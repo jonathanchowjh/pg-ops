@@ -43,6 +43,8 @@ export interface ListNavigationOptions {
   enabled?: boolean;
   /** Opt in to `/`-to-filter; omit and the key is inert (e.g. locks). */
   filter?: FilterControl;
+  /** Fired on Esc (outside filter mode) — pop back to the hub. Omit and Esc is inert. */
+  onBack?: () => void;
 }
 
 export function useListNavigation(opts: ListNavigationOptions) {
@@ -60,6 +62,10 @@ export function useListNavigation(opts: ListNavigationOptions) {
         const next = reduceFilter({ filter: opts.filter.value, filtering: true }, input, key);
         opts.filter.setValue(next.filter);
         if (!next.filtering) opts.filter.setActive(false);
+        return;
+      }
+      if (key.escape) {
+        opts.onBack?.();
         return;
       }
       if (input === 'q' || (key.ctrl && input === 'c')) {

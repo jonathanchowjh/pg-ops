@@ -91,3 +91,31 @@ describe('useListNavigation — / filter integration', () => {
     expect(lastFrame()).toContain('mode:nav');
   });
 });
+
+describe('useListNavigation — Esc-to-back', () => {
+  /** Harness that exposes onBack callback firing. */
+  function HarnessWithOnBack() {
+    const [value, setValue] = useState('');
+    const [active, setActive] = useState(false);
+    const [backCalls, setBackCalls] = useState(0);
+    const onBack = () => setBackCalls((c) => c + 1);
+    useListNavigation({ itemCount: 3, filter: { value, active, setValue, setActive }, onBack });
+    return <Text>back:{backCalls} mode:{active ? 'filter' : 'nav'}</Text>;
+  }
+
+  it('fires onBack on Esc, but not while filter mode is active', async () => {
+    const { stdin, lastFrame } = render(<HarnessWithOnBack />);
+    await mount();
+
+    await type(stdin, '/');
+    await waitForFrame(lastFrame, 'mode:filter');
+
+    await type(stdin, ESC);
+    await waitForFrame(lastFrame, 'mode:nav');
+    expect(lastFrame()).toContain('back:0'); // Esc during filter exits filter, does NOT fire onBack
+
+    await type(stdin, ESC);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(lastFrame()).toContain('back:1'); // Esc outside filter fires onBack
+  });
+});

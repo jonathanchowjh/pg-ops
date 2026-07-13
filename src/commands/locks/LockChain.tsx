@@ -2,7 +2,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../core/theme.js';
 import { adviseBlocker } from './advise.js';
 import { formatDuration, waiterAppBreakdown, type RootBlocker } from './chain.js';
-import { truncateQuery } from './render.js';
+import { truncateQuery } from '../../core/format.js';
 
 function CompactRow({ root, selected }: { root: RootBlocker; selected: boolean }) {
   return (

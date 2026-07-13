@@ -27,6 +27,10 @@ WITH lock_chain AS (
     blocked_act.query             AS blocked_query,
     blocked_act.state             AS blocked_state,
     blocking_act.state            AS blocking_state,
+    -- Session identity for the PID-reuse kill guard. Cast to text so the full
+    -- microsecond precision survives the round-trip (a JS Date is only ms).
+    blocked_act.backend_start::text  AS blocked_backend_start,
+    blocking_act.backend_start::text AS blocking_backend_start,
     EXTRACT(EPOCH FROM (now() - blocked_act.xact_start))  AS blocked_for_secs,
     EXTRACT(EPOCH FROM (now() - blocking_act.xact_start)) AS blocking_for_secs
   FROM pg_locks blocked
@@ -61,6 +65,9 @@ export interface LockEdge {
   blocked_query: string | null;
   blocked_state: string | null;
   blocking_state: string | null;
+  /** Per-backend session identity (pg_stat_activity.backend_start) as text. */
+  blocked_backend_start: string | null;
+  blocking_backend_start: string | null;
   blocked_for_secs: number | null;
   blocking_for_secs: number | null;
 }
@@ -83,6 +90,8 @@ export async function fetchLockEdges(): Promise<LockEdge[]> {
     blocked_query: (r.blocked_query as string) ?? null,
     blocked_state: (r.blocked_state as string) ?? null,
     blocking_state: (r.blocking_state as string) ?? null,
+    blocked_backend_start: (r.blocked_backend_start as string) ?? null,
+    blocking_backend_start: (r.blocking_backend_start as string) ?? null,
     blocked_for_secs: r.blocked_for_secs == null ? null : Number(r.blocked_for_secs),
     blocking_for_secs: r.blocking_for_secs == null ? null : Number(r.blocking_for_secs),
   }));

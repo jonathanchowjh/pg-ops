@@ -1,4 +1,10 @@
+import { formatDuration } from '../../core/format.js';
 import type { LockEdge } from './query.js';
+
+// Re-exported for existing consumers/tests that import formatDuration from
+// this module; the implementation now lives in core/format.js so it can be
+// shared with commands/sessions without a cross-command import.
+export { formatDuration };
 
 /**
  * Pure transform: flat wait-graph edges -> root-blocker trees (plan §A1).
@@ -26,6 +32,8 @@ export interface Waiter {
   /** True if a cycle was detected at this node (deadlock in flight). */
   cycle: boolean;
   state: string | null;
+  /** Session identity (backend_start as text) for the PID-reuse kill guard. */
+  backendStart: string | null;
 }
 
 export interface RootBlocker {
@@ -41,6 +49,8 @@ export interface RootBlocker {
   /** Transitive count of everything waiting under this root. */
   totalWaiters: number;
   state: string | null;
+  /** Session identity (backend_start as text) for the PID-reuse kill guard. */
+  backendStart: string | null;
 }
 
 /** First edge where `pid` is the blocker — used to read its held-side fields. */
@@ -78,6 +88,7 @@ function buildWaiters(edges: LockEdge[], blockerPid: number, path: Set<number>):
       waiters: childWaiters,
       cycle,
       state: edge.blocked_state,
+      backendStart: edge.blocked_backend_start,
     });
     // A cycle node is the same pid already counted higher up — don't double-count it.
     count += cycle ? 0 : 1 + childCount;
@@ -108,6 +119,7 @@ export function buildChains(edges: LockEdge[]): RootBlocker[] {
       waiters,
       totalWaiters: count,
       state: info?.blocking_state ?? null,
+      backendStart: info?.blocking_backend_start ?? null,
     });
   }
 
@@ -120,18 +132,6 @@ export function buildChains(edges: LockEdge[]): RootBlocker[] {
 export function indexForPid(roots: RootBlocker[], pid: number | undefined): number {
   if (pid === undefined) return -1;
   return roots.findIndex((r) => r.pid === pid);
-}
-
-/** Human-friendly duration, e.g. 863 -> "14m 23s". */
-export function formatDuration(secs: number | null): string {
-  // null = unknown; negative = clock skew (xact_start in the future) — both meaningless.
-  if (secs == null || secs < 0) return '—';
-  const s = Math.floor(secs % 60);
-  const m = Math.floor((secs / 60) % 60);
-  const h = Math.floor(secs / 3600);
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
 }
 
 /** Flatten the waiter tree and tally how many sessions each app has waiting. */

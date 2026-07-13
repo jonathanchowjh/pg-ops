@@ -1,13 +1,19 @@
 #!/usr/bin/env node
+import { runHome } from './commands/home/index.js';
 import { runLocks } from './commands/locks/index.js';
+import { runSessions } from './commands/sessions/index.js';
 import { runTop } from './commands/top/index.js';
 
 /**
  * Subcommand router — single entry point, multiple commands (ADR-002).
  * Each subcommand is a self-contained module under src/commands/<name>/.
  *
- * Implemented: locks, top. The rest are scaffolded in the plan and land per the
- * v0 → v3 roadmap.
+ * Bare `pgops` is not a help screen: it opens the triage cockpit (plan §M2),
+ * the front door for someone who knows "the database feels wrong" but not which
+ * subcommand to reach for. Help is still one `--help` away.
+ *
+ * Implemented: triage (bare), locks, top, sessions. The rest are scaffolded in
+ * the plan and land per the v0 → v3 roadmap.
  */
 const PLANNED = [
   'vacuum',
@@ -45,11 +51,16 @@ function printHelp(): void {
     [
       'pgops — Postgres on-call toolkit. Run it during the incident.',
       '',
-      'Usage: pgops <subcommand> [options]',
+      'Usage: pgops [subcommand] [options]',
+      '',
+      '  pgops (no subcommand)  The triage cockpit — the first five minutes on one',
+      '                         screen: sessions, blocked, long-running, connections,',
+      '                         and health. Enter drills into the view that can fix it.',
       '',
       'Subcommands:',
       '  locks            Incident lock-chain — root blocker + waiters, kill, snapshot',
       '  top              Live slow-query view over pg_stat_statements',
+      '  sessions         Live sessions — spot & kill idle-in-transaction',
       ...PLANNED.map((s) => `  ${s.padEnd(16)} (planned)`),
       '',
       'Options:',
@@ -71,9 +82,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (args.help || !args.subcommand) {
+  if (args.help) {
     printHelp();
-    if (!args.subcommand && !args.help) process.exitCode = 1;
+    return;
+  }
+
+  if (!args.subcommand) {
+    await runHome({ connectionString: args.connectionString, once: args.snapshot });
     return;
   }
 
@@ -82,7 +97,10 @@ async function main(): Promise<void> {
       await runLocks({ connectionString: args.connectionString, once: args.snapshot });
       return;
     case 'top':
-      await runTop({ connectionString: args.connectionString });
+      await runTop({ connectionString: args.connectionString, once: args.snapshot });
+      return;
+    case 'sessions':
+      await runSessions({ connectionString: args.connectionString, once: args.snapshot });
       return;
     default:
       if ((PLANNED as readonly string[]).includes(args.subcommand)) {
