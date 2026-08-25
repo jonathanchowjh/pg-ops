@@ -1,15 +1,12 @@
 import { Box } from 'ink';
-import { useCallback, useState } from 'react';
-import { runView } from '../../core/run-view.js';
+import { useCallback, useState, type ReactNode } from 'react';
 import { saveSnapshot } from '../../core/snapshot-file.js';
 import type { StatusMessage } from '../../core/theme.js';
 import { freshnessLabel } from '../../ui/freshness.js';
 import { StatusBar } from '../../ui/StatusBar.js';
 import { useListNavigation } from '../../ui/useListNavigation.js';
+import { INK_CLEAR_RESERVE, useTerminalSize } from '../../ui/useTerminalSize.js';
 import { usePoll } from '../../ui/usePoll.js';
-import { LocksApp } from '../locks/index.js';
-import { SessionsApp } from '../sessions/index.js';
-import { TopApp } from '../top/index.js';
 import { Home, PANEL_COUNT, PANEL_DRILLS, type DrillTarget } from './Home.js';
 import { fetchTriage, type PanelResult, type TriageData } from './query.js';
 import { triageToMarkdown } from './render.js';
@@ -17,10 +14,13 @@ import { triageToMarkdown } from './render.js';
 /**
  * `pgops` with no subcommand — the product's front door (plan §M2).
  *
- * `HomeApp` polls the six triage queries and presents them; `HubApp` owns
- * navigation: each panel is a door into the view that can fix that problem, and
- * Esc comes back. The cockpit itself is strictly read-only — you act from the
- * view you drilled into.
+ * `HomeApp` polls the six triage queries and presents them, and reports a panel
+ * drill upward through `onDrill`. It does NOT own navigation: RULING R-P4
+ * deleted the old `HubApp`, which held an `ActiveView`, mounted one of four
+ * views and handed each an `onBack`. That is precisely what the shell is, and
+ * two objects that both mount-one-of-four and both own `Esc` is one owner too
+ * many for a single key. The cockpit itself stays strictly read-only — you act
+ * from the view you drilled into.
  */
 
 /**
@@ -38,6 +38,17 @@ import { triageToMarkdown } from './render.js';
  * Exported so tests assert against the real cadence rather than a copy of it.
  */
 export const REFRESH_MS = 5_000;
+
+// Chrome this container renders around the panel stack, per-term the way the
+// three list views do it. The bordered StatusBar is 3 lines with no message
+// (top border, the facts/hints row, bottom border); the message that comes and
+// goes costs a flat 4th, counted at the call site, and never more because
+// StatusBar's message `<Text>` is `wrap="truncate"`.
+const STATUS_BAR_LINES = 3;
+// The tab strip, which is exactly 2 lines at every width by construction — it
+// carries a fixed `height={2}` precisely so this can be a constant.
+const TAB_STRIP_LINES = 2;
+const CHROME_LINES = STATUS_BAR_LINES + TAB_STRIP_LINES;
 
 /**
  * The unmeasured triage: what the cockpit shows before the first poll lands, and
@@ -75,13 +86,27 @@ export function connectionFailure(d: TriageData): string | undefined {
 
 export interface HomeAppProps {
   target?: string;
-  /** Fired on Enter (panel drill) and `t` (top). The hub swaps the mounted view. */
+  /** Fired on Enter (panel drill) and `t` (top). The shell swaps the mounted view. */
   onDrill?: (target: DrillTarget) => void;
+  /**
+   * The tab strip, handed down as an ELEMENT and rendered directly below this
+   * view's own `StatusBar`.
+   *
+   * The bar stays here rather than moving into the shell because its contents
+   * (subcommand, cadence, freshness, hints, the transient message) are per-view
+   * and change on every poll; flowing them upward would mean a child firing a
+   * callback from an effect into parent state that re-renders the child. So the
+   * element flows DOWN and there is no upward path at all.
+   *
+   * Optional, so a test can render this view without a shell around it.
+   */
+  strip?: ReactNode;
 }
 
-export function HomeApp({ target, onDrill }: HomeAppProps) {
+export function HomeApp({ target, onDrill, strip }: HomeAppProps) {
   const [data, setData] = useState<TriageData>(NOT_YET_POLLED);
   const [message, setMessage] = useState<StatusMessage | undefined>();
+  const terminal = useTerminalSize();
 
   // The shared poll loop owns the interval, the in-flight guard, the mount
   // cancellation, and `lastPollAt`. `unmeasured` is the cockpit's one special
@@ -114,11 +139,16 @@ export function HomeApp({ target, onDrill }: HomeAppProps) {
     onSnapshot: () => void onSnapshot(),
   });
 
+  // One value, used twice: what StatusBar shows, and what the line budget below
+  // has to pay for — the message lives inside the bar's border, so it grows it.
+  const statusMessage: StatusMessage | undefined = error ? { text: error, color: 'critical' } : message;
+
   return (
     <Box flexDirection="column">
       <StatusBar
         subcommand="triage"
         target={target}
+        width={terminal.columns}
         // Freshness WITHOUT cadence — the one deviation from the standard bar
         // (deep-review I2). The cockpit carries the most hints of any view, and
         // both labels together wrap the bar even at 100 columns, splitting
@@ -129,56 +159,33 @@ export function HomeApp({ target, onDrill }: HomeAppProps) {
         // only one fits, it is this one. (The drill-downs have room for both.)
         freshness={freshnessLabel(lastPollAt)}
         hints={['j/k panels', 'Enter drill in', 't top', 's snapshot', 'q quit']}
-        message={error ? { text: error, color: 'critical' } : message}
+        message={statusMessage}
       />
-      <Home data={data} focusedPanel={index} />
+      {strip}
+      {/*
+        The cockpit is the one view with no `Table` under it, so nothing clips
+        it and it has to spend its own budget — see `budgetHome`. No floor
+        clamp here: `budgetHome` already refuses to go below one state row, and
+        a `Math.max` would only hide the terminal being genuinely too short.
+      */}
+      {/*
+        The `statusMessage ? 1 : 0` term below is the one part of this budget
+        with no test, and not for want of trying: reaching it needs the cockpit
+        showing a transient message AND a fixture sitting exactly on
+        `budgetHome`'s spacing threshold at the same time. The cockpit's only
+        message paths are a snapshot write (which touches the filesystem) and
+        an all-panels-failed poll (which replaces the data with six `n/a`s, so
+        the panel stack shrinks to one state row and the threshold is nowhere
+        near). Every other term IS pinned — see
+        `Home.test.tsx`'s "the container spends exactly the budget it
+        computes". Named here rather than left for someone to discover.
+      */}
+      <Home
+        data={data}
+        focusedPanel={index}
+        width={terminal.columns}
+        maxLines={terminal.rows - INK_CLEAR_RESERVE - CHROME_LINES - (statusMessage ? 1 : 0)}
+      />
     </Box>
   );
-}
-
-/** Which view is mounted. The hub owns exactly one at a time. */
-type ActiveView =
-  | { name: 'home' }
-  | { name: 'locks' }
-  | { name: 'top' }
-  | { name: 'sessions'; sort: 'triage' | 'active' };
-
-/** A drill request from the cockpit becomes the view the hub mounts. */
-function viewFor(d: DrillTarget): ActiveView {
-  if (d.view === 'sessions') return { name: 'sessions', sort: d.sort ?? 'triage' };
-  if (d.view === 'locks') return { name: 'locks' };
-  return { name: 'top' };
-}
-
-export function HubApp({ target }: { target?: string }) {
-  const [view, setView] = useState<ActiveView>({ name: 'home' });
-  const back = useCallback(() => setView({ name: 'home' }), []);
-
-  if (view.name === 'locks') return <LocksApp target={target} onBack={back} />;
-  if (view.name === 'top') return <TopApp target={target} onBack={back} />;
-  if (view.name === 'sessions') return <SessionsApp target={target} initialSort={view.sort} onBack={back} />;
-  return <HomeApp target={target} onDrill={(d) => setView(viewFor(d))} />;
-}
-
-export interface HomeOptions {
-  connectionString?: string;
-  /** `--snapshot`: print the triage markdown to stdout and exit, no TUI. */
-  once?: boolean;
-}
-
-export async function runHome(opts: HomeOptions): Promise<void> {
-  await runView({
-    subcommand: 'triage',
-    connectionString: opts.connectionString,
-    once: opts.once,
-    // `fetchTriage` never rejects, so an unreachable database would otherwise
-    // print honest `n/a` markdown and exit 0 (deep-review I1). Hand the runner
-    // the all-panels-failed reason: it prints the body AND exits 1, matching
-    // every other view's `--snapshot` contract.
-    snapshot: async () => {
-      const data = await fetchTriage();
-      return { body: triageToMarkdown(data), failure: connectionFailure(data) };
-    },
-    view: (target) => <HubApp target={target} />,
-  });
 }

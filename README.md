@@ -11,14 +11,21 @@ questions a DBA runs from memory in the first five minutes of an incident — wh
 connected and in what state, is anything blocked, what's running long, how much
 connection headroom is left, plus one-line wraparound and replication-slot health
 verdicts. Every panel is a door: `Enter` drills into the view that can actually fix
-that problem, `Esc` comes back. You don't need to know which subcommand you need —
-just run `pgops`.
+that problem. You don't need to know which subcommand you need — just run `pgops`.
+
+pgops is **one app with nine tabs**, not nine programs. A tab strip sits under the
+status bar on every screen, and every view is one keystroke away from every other:
+press `3` for locks, `4` for `top`, `Esc` to come back to triage. A subcommand is
+just a shortcut for opening on that tab — `pgops locks` is `pgops` with `3` already
+pressed.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │ pgops      localhost:55432/ap updated just j/k panels  ·  Enter drill in  ·  t top  ·  s snapshot│
 │ triage     pdb                now            ·  q quit                                           │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
+▸ 1 triage  2 sessions  3 locks  4 top  5 space  6 vacuum  7 replication  8 seq  9 system
+
 ▸ SESSIONS ⚠ oldest idle-in-transaction 138s
     active                           3    2m 17s
     idle in transaction              1    2m 17s
@@ -40,11 +47,11 @@ just run `pgops`.
 
 *(captured live against a seeded lock chain — see "Local development database" below)*
 
-> **Status:** v0.1 — the first-five-minutes triage loop is complete. Bare `pgops`
-> (the cockpit), `locks`, `top`, and `sessions` are all built, tested, and
-> snapshot-capable. The wider roadmap (`vacuum`, `slots`, `parts`, `review`,
-> `explain`, `events`, `mcp`) is still planned; the cockpit's HEALTH cards are
-> their only v0.1 presence today (see the table below).
+> **Status:** v0.2 — the shell. The four built views (the cockpit, `locks`,
+> `top`, `sessions`) are now one app: a nine-tab strip, global jump keys, and
+> `Esc` back to triage from anywhere. Tabs `5`–`9` are registered and show a
+> placeholder naming the phase that delivers them; everything else on the
+> roadmap is reached by name or from `doctor` (see the table below).
 
 ## Install
 
@@ -91,6 +98,24 @@ Every view connects via `$DATABASE_URL` unless you pass `-d`.
 
 ### Keys
 
+Global — these work from **every** view, built or not:
+
+| Key | Action |
+|-----|--------|
+| `1` – `9` | jump to a tab: `1` triage, `2` sessions, `3` locks, `4` top, `5` space, `6` vacuum, `7` replication, `8` seq, `9` system |
+| `Tab` / `Shift-Tab` | cycle tabs forward / back, wrapping at both ends |
+| `D` | the doctor report — hygiene findings that can wait (capital `D`; lowercase `d` does nothing) |
+| `Esc` | back to triage |
+
+Tabs `5`–`9` are registered but not built yet: pressing one shows a placeholder
+naming the phase that delivers it. `0` is deliberately unbound.
+
+Global keys go **inert** while a view owns the keyboard — while a kill
+confirmation is open, or while you are typing a `/` filter. So `4` typed into a
+filter is a `4`, not a jump, and a digit pressed at a confirm prompt cannot both
+cancel the kill and change tabs. `Esc` dismisses the modal or filter first, and
+only returns you to triage once nothing else is holding the keys.
+
 The cockpit (`pgops`, no subcommand):
 
 | Key | Action |
@@ -101,7 +126,7 @@ The cockpit (`pgops`, no subcommand):
 | `s` | snapshot the triage screen to a markdown file (prints the path) |
 | `q` | quit |
 
-Inside a drilled-in or directly-invoked view (`locks`, `top`, `sessions`):
+Inside a list view (`locks`, `top`, `sessions`), on top of the global keys above:
 
 | Key | Action | Views |
 |-----|--------|-------|
@@ -110,24 +135,41 @@ Inside a drilled-in or directly-invoked view (`locks`, `top`, `sessions`):
 | `o` | cycle sort order | `top`, `sessions` |
 | `x` | kill the selected backend (confirm modal; requires `pg_signal_backend`) | `locks`, `sessions` |
 | `s` | snapshot the current view to a markdown file (prints the path) | all |
-| `Esc` | back to the cockpit — only when you drilled in from it; direct `pgops locks` etc. leaves `Esc` inert | all |
 | `q` | quit | all |
+
+> **Changed in v0.2.** `Esc` used to be inert on a directly-invoked view and only
+> meant "back" when you had drilled in from the cockpit. Now it always returns to
+> triage, because there is always a triage to return to.
 
 ## What it does (and what's planned)
 
 | Subcommand | Workflow | Status |
 |-----------|----------|--------|
-| *(bare)* `pgops` | Triage cockpit — sessions, blocked, long-running, connections, health, drill-in navigation | **done** |
-| `locks` | Incident lock-chain — root blocker + waiter cascade, kill, snapshot | **done** |
-| `sessions` | Live sessions — spot & kill idle-in-transaction, sort, filter, snapshot | **done** |
-| `top` | Live slow-query view over `pg_stat_statements` — sort, filter, snapshot | **done** |
-| `vacuum` | Autovacuum doctor — bloat + wraparound horizon | planned (cockpit's HEALTH card shows a one-line wraparound verdict today) |
-| `slots` | Replication slot monitor + disk-exhaustion forecast | planned (cockpit's HEALTH card shows a one-line slot verdict today) |
-| `parts` | Partition manager (`pg_partman`) | planned |
-| `review` | Pre-migration safety check (SQL parser) | planned |
-| `explain` | EXPLAIN plans in a local browser view | planned |
-| `events` | Cloud-event correlation (RDS / EKS) | planned |
-| `mcp` | MCP server wrapping the same query layer for agents | planned |
+| *(bare)* `pgops`, or `pgops triage` | Triage cockpit — sessions, blocked, long-running, connections, health, drill-in navigation | **done** — **tab `1`** |
+| `locks` | Incident lock-chain — root blocker + waiter cascade, kill, snapshot | **done** — **tab `3`** |
+| `sessions` | Live sessions — spot & kill idle-in-transaction, sort, filter, snapshot | **done** — **tab `2`** |
+| `top` | Live slow-query view over `pg_stat_statements` — sort, filter, snapshot | **done** — **tab `4`** |
+| `space` | Table & index size, bloat, growth | planned — **tab `5`** |
+| `vacuum` | Autovacuum doctor — bloat + wraparound horizon | planned — **tab `6`** (cockpit's HEALTH card shows a one-line wraparound verdict today) |
+| `replication` | Replication lag and slot disk-exhaustion forecast | planned — **tab `7`** (cockpit's HEALTH card shows a one-line slot verdict today) |
+| `seq` | Sequence exhaustion — integer PKs about to run out | planned — **tab `8`** |
+| `system` | Host & instance metrics | planned — **tab `9`** |
+| `doctor` | Hygiene report across every area — findings that can wait | planned — key `D`, no tab |
+| `indexes` | Unused, duplicate, and invalid indexes | planned — no tab |
+| `tables` | Per-table stats, missing indexes, dead tuples | planned — no tab |
+| `config` | Settings review against the workload | planned — no tab |
+| `explain` | EXPLAIN plans, from `Enter` on a `top` row | planned — no tab |
+| `parts` | Partition manager (`pg_partman`) | planned — no tab |
+| `review` | Pre-migration safety check (SQL parser) | planned — no tab |
+| `events` | Cloud-event correlation (RDS / EKS) | planned — no tab |
+| `mcp` | MCP server wrapping the same query layer for agents | planned — no tab |
+
+**Why some areas have a digit and some don't.** A tab is a single-keystroke jump
+during an incident, so it is reserved for areas that can escalate to *act now*.
+`indexes`, `tables` and `config` never can — they are things you fix on a Tuesday,
+not at 3am — so spending a key on them would waste the one thing the strip is
+short of. They are still full subcommands, reachable by name or from `doctor`.
+A tab is not a feature; it is a claim about urgency.
 
 ## What it doesn't do
 

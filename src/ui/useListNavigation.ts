@@ -43,8 +43,6 @@ export interface ListNavigationOptions {
   enabled?: boolean;
   /** Opt in to `/`-to-filter; omit and the key is inert (e.g. locks). */
   filter?: FilterControl;
-  /** Fired on Esc (outside filter mode) — pop back to the hub. Omit and Esc is inert. */
-  onBack?: () => void;
 }
 
 export function useListNavigation(opts: ListNavigationOptions) {
@@ -64,10 +62,21 @@ export function useListNavigation(opts: ListNavigationOptions) {
         if (!next.filtering) opts.filter.setActive(false);
         return;
       }
-      if (key.escape) {
-        opts.onBack?.();
-        return;
-      }
+      // Esc has exactly ONE owner, and it is not this hook (RULING R-P7): the
+      // shell owns the key. `onBack` used to live here, and leaving it would
+      // have made a second owner — Ink fires every registered `useInput`
+      // handler for a keypress, so both would run and Esc would do two things.
+      //
+      // The early return stays. It is a guard, not a handler: without it Esc
+      // reaches the `q`/`j`/`k` branches below. Today that is harmless rather
+      // than wrong — Ink reports Esc as `input: ''` with `key.escape` and
+      // `key.meta` both true, and no branch below matches an empty input — so
+      // it is deliberately NOT covered by a test, because any test for it would
+      // pass with the line deleted. It earns its place as the thing that keeps
+      // that true: the next branch added here that keys off `key.meta`, or off
+      // anything other than an exact printable `input`, would otherwise
+      // silently acquire Esc as a second trigger.
+      if (key.escape) return;
       if (input === 'q' || (key.ctrl && input === 'c')) {
         exit();
         return;

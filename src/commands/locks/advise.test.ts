@@ -4,7 +4,7 @@ import type { RootBlocker } from './chain.js';
 
 function root(over: Partial<RootBlocker> = {}): RootBlocker {
   return { pid: 1, user: 'u', app: 'a', query: 'q', heldMode: 'AccessExclusiveLock',
-    heldForSecs: 60, state: 'active', waiters: [], totalWaiters: 1, ...over };
+    heldForSecs: 60, state: 'active', waiters: [], totalWaiters: 1, backendStart: null, ...over };
 }
 
 describe('adviseBlocker', () => {

@@ -5,10 +5,10 @@ import type { RootBlocker } from './chain.js';
 const root: RootBlocker = {
   pid: 18432, user: 'deploy', app: 'batch-worker', query: 'UPDATE users SET x = 1',
   heldMode: 'AccessExclusiveLock', heldForSecs: 863, state: 'idle in transaction',
-  totalWaiters: 2,
+  backendStart: null, totalWaiters: 2,
   waiters: [
-    { pid: 2, user: 'u', app: 'web-api', query: 'q', waitingMode: 'ShareLock', table: 'users', waitingForSecs: 5, waiters: [], cycle: false, state: 'active' },
-    { pid: 3, user: 'u', app: 'web-api', query: 'q', waitingMode: 'ShareLock', table: 'users', waitingForSecs: 5, waiters: [], cycle: false, state: 'active' },
+    { pid: 2, user: 'u', app: 'web-api', query: 'q', waitingMode: 'ShareLock', table: 'users', waitingForSecs: 5, waiters: [], cycle: false, state: 'active', backendStart: null },
+    { pid: 3, user: 'u', app: 'web-api', query: 'q', waitingMode: 'ShareLock', table: 'users', waitingForSecs: 5, waiters: [], cycle: false, state: 'active', backendStart: null },
   ],
 };
 

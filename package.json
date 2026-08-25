@@ -20,6 +20,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
     "db:up": "./scripts/dev-db.sh up",
     "db:down": "./scripts/dev-db.sh down",
     "db:psql": "./scripts/dev-db.sh psql",
@@ -37,9 +38,11 @@
     "sre"
   ],
   "dependencies": {
+    "cli-truncate": "^4.0.0",
     "ink": "^5.1.0",
     "pg": "^8.13.1",
-    "react": "^18.3.1"
+    "react": "^18.3.1",
+    "string-width": "^7.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

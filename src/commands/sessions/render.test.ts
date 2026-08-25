@@ -36,7 +36,7 @@ describe('sessionsToMarkdown', () => {
     const dataLine = md.split('\n').find((l) => l.startsWith(`| ${pipeRow.pid} |`))!;
     // header has 6 columns -> 7 pipe-delimiters; the data row must match, meaning
     // every `|` from the query text was escaped rather than left as a raw delimiter.
-    const headerLine = md.split('\n')[0];
+    const headerLine = md.split('\n')[0]!;
     const headerPipes = (headerLine.match(/\|/g) || []).length;
     const dataPipes = (dataLine.match(/(?<!\\)\|/g) || []).length;
     expect(dataPipes).toBe(headerPipes);
@@ -51,7 +51,7 @@ describe('sessionsToMarkdown', () => {
     };
     const md = sessionsToMarkdown([pipeRow]);
     const dataLine = md.split('\n').find((l) => l.startsWith(`| ${pipeRow.pid} |`))!;
-    const headerPipes = (md.split('\n')[0].match(/\|/g) || []).length;
+    const headerPipes = (md.split('\n')[0]!.match(/\|/g) || []).length;
     const dataPipes = (dataLine.match(/(?<!\\)\|/g) || []).length;
     expect(dataPipes).toBe(headerPipes);
     expect(dataLine).toContain('weird\\|app');

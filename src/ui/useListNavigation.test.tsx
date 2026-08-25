@@ -92,30 +92,14 @@ describe('useListNavigation — / filter integration', () => {
   });
 });
 
-describe('useListNavigation — Esc-to-back', () => {
-  /** Harness that exposes onBack callback firing. */
-  function HarnessWithOnBack() {
-    const [value, setValue] = useState('');
-    const [active, setActive] = useState(false);
-    const [backCalls, setBackCalls] = useState(0);
-    const onBack = () => setBackCalls((c) => c + 1);
-    useListNavigation({ itemCount: 3, filter: { value, active, setValue, setActive }, onBack });
-    return <Text>back:{backCalls} mode:{active ? 'filter' : 'nav'}</Text>;
-  }
-
-  it('fires onBack on Esc, but not while filter mode is active', async () => {
-    const { stdin, lastFrame } = render(<HarnessWithOnBack />);
-    await mount();
-
-    await type(stdin, '/');
-    await waitForFrame(lastFrame, 'mode:filter');
-
-    await type(stdin, ESC);
-    await waitForFrame(lastFrame, 'mode:nav');
-    expect(lastFrame()).toContain('back:0'); // Esc during filter exits filter, does NOT fire onBack
-
-    await type(stdin, ESC);
-    await new Promise((r) => setTimeout(r, 40));
-    expect(lastFrame()).toContain('back:1'); // Esc outside filter fires onBack
-  });
-});
+/*
+ * There is no `Esc-to-back` suite any more. `onBack` is gone from the hook
+ * (RULING R-P7 gave the shell sole ownership of Esc), and the half of that test
+ * which still had an owner — Esc leaves filter mode — is already asserted by
+ * `clears the filter on Escape` above. Re-stating it here would have been a
+ * second measurement of the same thing rather than new coverage.
+ *
+ * The hook's remaining `if (key.escape) return;` is deliberately untested; the
+ * comment on it in `useListNavigation.ts` explains why a test for it would
+ * pass with the line deleted.
+ */

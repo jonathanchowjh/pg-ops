@@ -61,3 +61,66 @@ export function verdictSlots(c: SlotsCard): Verdict {
   }
   return { level: 'ok' };
 }
+
+/**
+ * How the cockpit spends its lines.
+ *
+ * Unlike the three list views, `Home` renders no `Table`, so nothing clips it:
+ * whatever it produces is what Ink is handed. Its height is
+ * `stateRows + longRunningRows + fixed chrome`, and `stateRows` is unbounded in
+ * principle — `SESSIONS_SQL` is a `GROUP BY state` with no `LIMIT`, so a busy
+ * database can report six or more. Add the tab strip's two lines and an
+ * ordinary busy box overflows an 80x24 terminal, which is worse than it sounds:
+ * Ink clears the whole terminal and its scrollback for any frame at or above
+ * `rows` (see `INK_CLEAR_RESERVE`), so the screen flashes every 5s poll.
+ *
+ * Two levers, spent in this order:
+ *
+ *  1. **The blank line between panels.** Four of them. They are the first thing
+ *     to go, because compactness costs legibility while a wiped scrollback
+ *     costs the operator the context that sent them here.
+ *  2. **State rows.** Only after the spacing is already gone, and never below
+ *     one — a cockpit showing no sessions at all during a sessions incident is
+ *     not a cockpit. What is dropped is reported as `+N more`, never silently:
+ *     the same rule `Table` follows for dropped columns.
+ *
+ * `longRunning` is not a lever: `LONG_RUNNING_SQL` already has `LIMIT 3`, and
+ * those three rows are the panel's entire content.
+ */
+export interface HomeBudget {
+  /** `marginBottom` between panels: 1 when it fits, 0 when it does not. */
+  spacing: 0 | 1;
+  /** How many SESSIONS state rows to render. At least 1 whenever there is one. */
+  stateRows: number;
+  /** How many state rows were dropped — rendered as `+N more`, never hidden. */
+  hiddenStates: number;
+}
+
+/**
+ * Fixed lines `Home` renders regardless of data, at `spacing` 0:
+ * SESSIONS header, BLOCKED header + body, LONG-RUNNING header,
+ * CONNECTIONS header + body, HEALTH header + 2 verdict lines.
+ */
+const HOME_FIXED_LINES = 9;
+/** The four `marginBottom={1}`s, present only at `spacing` 1. */
+const HOME_SPACING_LINES = 4;
+
+export function budgetHome(opts: { maxLines: number; states: number; longRunning: number }): HomeBudget {
+  // Both panels render one "nothing here" line when empty, so an empty panel
+  // costs the same as a one-row one. Budgeting for 0 would under-count.
+  const states = Math.max(1, opts.states);
+  const longRunning = Math.max(1, opts.longRunning);
+  const base = HOME_FIXED_LINES + longRunning;
+
+  if (base + HOME_SPACING_LINES + states <= opts.maxLines) {
+    return { spacing: 1, stateRows: opts.states, hiddenStates: 0 };
+  }
+  if (base + states <= opts.maxLines) {
+    return { spacing: 0, stateRows: opts.states, hiddenStates: 0 };
+  }
+  // Compact and still over: clip. The `+N more` line occupies one of the rows
+  // it is reporting on, so it is subtracted here rather than added later.
+  const room = Math.max(1, opts.maxLines - base - 1);
+  const stateRows = Math.min(opts.states, room);
+  return { spacing: 0, stateRows, hiddenStates: opts.states - stateRows };
+}

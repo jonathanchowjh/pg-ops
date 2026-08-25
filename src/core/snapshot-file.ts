@@ -34,7 +34,13 @@ export async function saveSnapshot(opts: SaveSnapshotOptions): Promise<StatusMes
   try {
     await mkdir(dir, { recursive: true });
     await writeFile(file, md, 'utf8');
-    return { text: `snapshot → ${file}`, color: 'success' };
+    // Report relative to $HOME (`~/.pgops/...`) rather than the absolute path:
+    // ~25 columns shorter, which keeps the whole filename on one line on an
+    // 80-column terminal — StatusBar's message truncates a longer one, but
+    // truncating would hide the timestamp that makes the filename useful.
+    const home = homedir();
+    const displayPath = file.startsWith(home) ? `~${file.slice(home.length)}` : file;
+    return { text: `snapshot → ${displayPath}`, color: 'success' };
   } catch (err) {
     return { text: `snapshot failed: ${(err as Error).message}`, color: 'critical' };
   }

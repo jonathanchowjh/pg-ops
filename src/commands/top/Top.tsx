@@ -1,30 +1,11 @@
 import { Box, Text } from 'ink';
 import { theme } from '../../core/theme.js';
+import { Table } from '../../ui/Table.js';
+import type { Column } from '../../ui/table-layout.js';
 import { cellQuery } from './render.js';
 import type { QueryRow, SortMode } from './stats.js';
 
-/**
- * Live slow-query table (plan §A2). The analog of locks/LockChain.tsx: a pure
- * presentational component. All state (rows, sort, filter, selection) is owned
- * by index.tsx; this just draws what it's handed.
- */
-
-// Fixed column widths so numbers line up; the query column takes the rest.
-const W = { total: 9, mean: 9, calls: 8, cache: 7 } as const;
-
-const HEADERS: Record<SortMode, string> = {
-  total: 'total ms',
-  mean: 'mean ms',
-  calls: 'calls',
-  cache: 'cache',
-};
-
-/** Right-align a value into a fixed-width column. */
-function col(value: string, width: number): string {
-  return value.padStart(width);
-}
-
-/** Color the cache cell by how cold it is — the whole point of the cache sort. */
+/** Colour the cache cell by how cold it is — the whole point of the cache sort. */
 function cacheColor(pct: number | null): string {
   if (pct === null) return theme.dim;
   if (pct < 50) return theme.critical;
@@ -32,41 +13,57 @@ function cacheColor(pct: number | null): string {
   return theme.success;
 }
 
-function HeaderRow({ sort }: { sort: SortMode }) {
-  const head = (key: SortMode, label: string, width: number) => (
-    <Text color={key === sort ? theme.info : theme.dim} bold={key === sort}>
-      {col(key === sort ? `▼${label}` : label, width)}
-    </Text>
-  );
-  return (
-    <Box>
-      {head('total', HEADERS.total, W.total)}
-      <Text> </Text>
-      {head('mean', HEADERS.mean, W.mean)}
-      <Text> </Text>
-      {head('calls', HEADERS.calls, W.calls)}
-      <Text> </Text>
-      {head('cache', HEADERS.cache, W.cache)}
-      <Text color={theme.dim}> query</Text>
-    </Box>
-  );
-}
-
-function QueryRowLine({ row, selected }: { row: QueryRow; selected: boolean }) {
-  const marker = selected ? '❯ ' : '  ';
-  return (
-    <Box>
-      <Text color={selected ? theme.info : theme.dim}>{marker}</Text>
-      <Text color={theme.fg}>{col(String(Math.round(row.totalMs)), W.total - 2)} </Text>
-      <Text color={theme.fg}>{col(row.meanMs.toFixed(2), W.mean)} </Text>
-      <Text color={theme.fg}>{col(String(row.calls), W.calls)} </Text>
-      <Text color={cacheColor(row.cacheHitPct)}>
-        {col(row.cacheHitPct === null ? '—' : `${Math.round(row.cacheHitPct)}%`, W.cache)}
-      </Text>
-      <Text color={selected ? theme.fg : theme.dim}> {cellQuery(row.query, 70)}</Text>
-    </Box>
-  );
-}
+/**
+ * Column `key`s match `SortMode` so `sortKey` marks the active column with no
+ * extra mapping. `cellQuery` redacts — never slice query text directly.
+ */
+const COLUMNS: Column<QueryRow>[] = [
+  {
+    key: 'total',
+    header: 'total ms',
+    width: 9,
+    align: 'right',
+    value: (r) => String(Math.round(r.totalMs)),
+    color: () => theme.fg,
+  },
+  {
+    key: 'mean',
+    header: 'mean ms',
+    width: 9,
+    align: 'right',
+    value: (r) => r.meanMs.toFixed(2),
+    color: () => theme.fg,
+  },
+  {
+    key: 'calls',
+    header: 'calls',
+    width: 8,
+    align: 'right',
+    drop: 3,
+    value: (r) => String(r.calls),
+    color: () => theme.fg,
+  },
+  {
+    key: 'cache',
+    header: 'cache',
+    width: 7,
+    align: 'right',
+    drop: 2,
+    value: (r) => (r.cacheHitPct === null ? '—' : `${Math.round(r.cacheHitPct)}%`),
+    color: (r) => cacheColor(r.cacheHitPct),
+  },
+  {
+    key: 'query',
+    header: 'query',
+    width: 70,
+    flex: true,
+    min: 20,
+    value: (r) => cellQuery(r.query, 200),
+    // Pre-migration QueryRowLine dimmed the query cell on unselected rows,
+    // keeping numeric cells bright regardless of selection.
+    color: (_, selected) => (selected ? theme.fg : theme.dim),
+  },
+];
 
 export interface TopProps {
   rows: QueryRow[];
@@ -74,27 +71,42 @@ export interface TopProps {
   selectedIndex: number;
   /** Active filter term, shown when non-empty. */
   filter?: string;
+  /**
+   * Total display columns available. Passed straight through to `Table`, which
+   * owns the default (see `TableProps`) — this view never reads the terminal
+   * itself. Containers supply the real value.
+   */
+  width?: number;
+  /** Total lines the table may occupy. Pass-through, same contract as `width`. */
+  maxLines?: number;
 }
 
-export function Top({ rows, sort, selectedIndex, filter }: TopProps) {
-  if (rows.length === 0) {
-    return (
-      <Box paddingX={1} flexDirection="column">
-        {filter ? (
-          <Text color={theme.dim}>No queries match “{filter}”.</Text>
-        ) : (
-          <Text color={theme.dim}>No query statistics. Is pg_stat_statements populated yet?</Text>
-        )}
-      </Box>
-    );
-  }
+export function Top({ rows, sort, selectedIndex, filter, width, maxLines }: TopProps) {
   return (
-    <Box flexDirection="column" paddingX={1}>
-      <HeaderRow sort={sort} />
-      {rows.map((row, i) => (
-        <QueryRowLine key={row.queryid ?? i} row={row} selected={i === selectedIndex} />
-      ))}
-      {filter ? <Text color={theme.dim}>filter: “{filter}” ({rows.length} shown)</Text> : null}
+    // No paddingX here: Table sets `width` on its own root Box and solves its
+    // columns to fill exactly that, so a parent that pads spends two display
+    // columns Table cannot see and every row overflows the budget it was
+    // solved against. What Ink does with that overflow is not something
+    // anything on this branch measured — don't restore paddingX to find out.
+    // Table's own 2-column selection gutter already supplies the left margin.
+    <Box flexDirection="column">
+      <Table
+        columns={COLUMNS}
+        rows={rows}
+        selectedIndex={selectedIndex}
+        sortKey={sort}
+        width={width}
+        maxLines={maxLines}
+        rowKey={(r, i) => String(r.queryid ?? i)}
+        empty={
+          filter
+            ? `No queries match “${filter}”.`
+            : 'No query statistics. Is pg_stat_statements populated yet?'
+        }
+      />
+      {filter && rows.length > 0 ? (
+        <Text color={theme.dim}>filter: “{filter}” ({rows.length} shown)</Text>
+      ) : null}
     </Box>
   );
 }
