@@ -1,0 +1,95 @@
+name: ci
+on:
+  push: { branches: ['**'] }
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      - run: npm run typecheck:test
+      # Ruling 46, restated after P1b deleted the TUI. `npm run typecheck` and
+      # the root tsconfig.json it ran are gone with it, and tsconfig.test.json
+      # was rerooted with packages/*/src/**/* in its include — so the step
+      # above now DOES compile index.ts, which the ruling was written because
+      # nothing did. Do not conclude from that this step is now redundant.
+      # It runs a DIFFERENT PROJECT: rootDir ./src with `test` excluded, the
+      # exact project `build` emits from, where tsconfig.test.json's rootDir
+      # is the repo root with src and test both inside it. So a src file that
+      # imports from test/ — the leak that would put test-only code in the
+      # published dist/ — is TS6059 here and SILENT above. Verified by probe,
+      # both directions. See boundaries.test.ts's own docblock and its
+      # assertion that this step stays present.
+      - run: npm run --workspace @pgops/checks typecheck
+      # M1: packages/checks/package.json's `main`, `types` and `exports` all
+      # point into `dist/`, and until this step nothing in CI ever produced
+      # it — the three typechecks above are all `--noEmit`. The first P1 file
+      # to write `import { CHECKS } from '@pgops/checks'` would have resolved
+      # against a stale hand-built dist/ locally and MODULE_NOT_FOUND in CI.
+      # Same shape as Ruling 46: a declared artifact nothing verifies. Pinned
+      # by boundaries.test.ts, exactly as the typecheck step above is.
+      - run: npm run --workspace @pgops/checks build
+      - run: npm test
+      - run: npm run --workspace @pgops/web typecheck
+      # Task 11: apps/web/test/guards.test.ts source-scans app/ and
+      # components/ for the two P1a rules the spec says are "enforced by
+      # lint rule" — this repo has no ESLint toolchain, so a source-scanning
+      # test (the idiom boundaries.test.ts already established) is the
+      # cheaper mechanism for the same requirement. test:web builds
+      # @pgops/checks first, same as test:int.
+      - run: npm run test:web
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['14', '16', '17', '18']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      # I4: `test:int` ALREADY runs apps/web/test — the root vitest config's
+      # integration project includes `apps/web/test/**/*.int.test.ts`, verified
+      # with `npx vitest list --project integration`. A separate
+      # `npx vitest run --project integration apps/web/test` step used to
+      # follow, re-running those two files, and with them nine more `next
+      # build`s, a second time in all four legs against a 20-minute timeout.
+      # The `@pgops/web build` step that preceded it was redundant for the same
+      # reason: harness.ts's `withConsole` runs that exact build itself, before
+      # the Postgres container exists, which is the whole basis of its
+      # "configuration is read at RUN time" proof.
+      #
+      # PGOPS_TEST_PG_VERSION now reaches apps/web too (harness.ts and
+      # check.int.test.ts both read it), so this one step is what makes the
+      # 14/16/17/18 matrix mean anything for the console.
+      - run: npm run test:int
+        env:
+          PGOPS_TEST_PG_VERSION: ${{ matrix.pg }}
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      # Spec §9, "Runtime env". The source-level half of this rule is
+      # apps/web/test/guards.test.ts (every page is dynamic, nothing opts back
+      # into static rendering); this is the half that builds an actual image on
+      # a machine with the wrong DATABASE_URL and runs it with the right one.
+      # Neither substitutes for the other: the guard cannot see a build, and a
+      # build cannot see an import.
+      - run: ./scripts/image-smoke.sh

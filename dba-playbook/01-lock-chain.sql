@@ -1,5 +1,5 @@
 -- =============================================================================
--- 01 — THE INCIDENT LOCK CHAIN   (→ pgops locks)
+-- 01 — THE INCIDENT LOCK CHAIN   (console: /db/<name>/locks)
 -- =============================================================================
 -- Symptom: "Writes are timing out." Query 2 of the triage file found blocked
 -- sessions. Now you walk the chain: who is waiting, on whom, all the way to the
@@ -32,11 +32,12 @@ ORDER BY waiting_for DESC;
 
 -- 2. THE FULL CHAIN: join pg_locks to itself ---------------------------------
 -- pg_blocking_pids hides the lock detail. To see WHICH lock and WHAT MODE (and
--- to render a tree, as pgops does), join the lock table to itself: every
+-- to render a tree, as the console's Locks page does), join the lock table to
+-- itself: every
 -- un-granted lock (a waiter) matched to the granted lock blocking it.
 --
--- This is the heart of `pgops locks` — the same shape as the production CTE in
--- Part 1 §A1 of the plan, trimmed for reading.
+-- This is the heart of the console's Locks page — the same shape as the
+-- production CTE in Part 1 §A1 of the plan, trimmed for reading.
 SELECT
   waiter.pid                                   AS waiter_pid,
   waiter_act.usename                           AS waiter_user,
@@ -104,7 +105,12 @@ ORDER BY waiter_txn_age DESC;
 -- SELECT pg_cancel_backend(<PID>);       -- gentle: cancel the query
 -- SELECT pg_terminate_backend(<PID>);    -- hard: kill the session
 --
--- This is exactly what `pgops locks` puts behind a confirm modal ("kill pid
--- 18432 (jenkins@batch-worker, holding 14m 23s)? [y/N]") plus an audit entry.
+-- The console's one write action is this statement. It lives on the Sessions
+-- page (/db/<name>/sessions), not the Locks page, and only appears when the
+-- deployment sets PGOPS_ALLOW_ACTIONS=true. It is an inline two-step, not a
+-- modal: you type a required free-text reason next to the row and then press
+-- Confirm, and the kill is pinned to the session identity (backend_start) that
+-- row was showing, so a recycled pid comes back refused rather than killed.
+-- Every attempt is audited, success or failure.
 -- Requires the pg_signal_backend role (or superuser) to signal others' backends.
 -- =============================================================================

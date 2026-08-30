@@ -1,194 +1,189 @@
 # pgops
 
-> The Postgres on-call toolkit for your terminal. Run it during the incident.
+> The Postgres on-call console. Run it during the incident.
 
 pgHero is your daily dashboard. pgBadger is your postmortem tool. pganalyze is the
-enterprise SaaS. **pgops is what you run during the incident** — terminal-native,
-action-shaped, free.
+enterprise SaaS. **pgops is what you run during the incident** — and unlike all
+three, it can act, not only watch.
 
-Type `pgops` and you get a live **triage cockpit**: one screen answering the
-questions a DBA runs from memory in the first five minutes of an incident — who's
-connected and in what state, is anything blocked, what's running long, how much
-connection headroom is left, plus one-line wraparound and replication-slot health
-verdicts. Every panel is a door: `Enter` drills into the view that can actually fix
-that problem. You don't need to know which subcommand you need — just run `pgops`.
-
-pgops is **one app with nine tabs**, not nine programs. A tab strip sits under the
-status bar on every screen, and every view is one keystroke away from every other:
-press `3` for locks, `4` for `top`, `Esc` to come back to triage. A subcommand is
-just a shortcut for opening on that tab — `pgops locks` is `pgops` with `3` already
-pressed.
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ pgops      localhost:55432/ap updated just j/k panels  ·  Enter drill in  ·  t top  ·  s snapshot│
-│ triage     pdb                now            ·  q quit                                           │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
-▸ 1 triage  2 sessions  3 locks  4 top  5 space  6 vacuum  7 replication  8 seq  9 system
-
-▸ SESSIONS ⚠ oldest idle-in-transaction 138s
-    active                           3    2m 17s
-    idle in transaction              1    2m 17s
-
-  BLOCKED ⚠ 2 pid(s) waiting
-    2 waiting · longest 2m 17s · suspect pid 89
-
-  LONG-RUNNING ⚠
-         90   2m 17s UPDATE users SET n = n + 1 WHERE id = 1
-         91   2m 17s DELETE FROM users WHERE id = 1
-
-  CONNECTIONS ✓
-    5 / 100 used · 95 free
-
-  HEALTH
-    ✓ wraparound 0% of horizon
-    ✓ slots 0 inactive
-```
-
-*(captured live against a seeded lock chain — see "Local development database" below)*
-
-> **Status:** v0.2 — the shell. The four built views (the cockpit, `locks`,
-> `top`, `sessions`) are now one app: a nine-tab strip, global jump keys, and
-> `Esc` back to triage from anywhere. Tabs `5`–`9` are registered and show a
-> placeholder naming the phase that delivers them; everything else on the
-> roadmap is reached by name or from `doctor` (see the table below).
-
-## Install
+It is a small web console you deploy next to your databases. One URL, many
+databases, no agent to install and nothing to schedule. You open it when the
+pager goes off, it answers the questions a DBA runs from memory in the first five
+minutes — who's connected and in what state, is anything blocked, what's running
+long, how much connection headroom is left — and then, if you switch the safety
+off, it can terminate the backend that is holding everything up.
 
 ```sh
-# not published to npm yet (still v0.0.0) — run from source for now
-git clone <repo> pg-ops && cd pg-ops
-npm install
-npm run build
-npm start                # the cockpit — or: npm run dev
-npm start -- locks       # or: npm run dev -- locks
+docker build -t pgops .
+docker run -e DATABASE_URL=postgres://… -p 8080:8080 pgops
 ```
 
-### Local development database
+## What's here
 
-No Postgres handy? Start a throwaway one (Docker required):
+Five routes. That is the whole console today.
+
+| Route | What it answers |
+|---|---|
+| `/` | **Overview** — every configured database, each with its worst verdict across the nine incident checks. "Is anything wrong anywhere?", nothing more. A check that could not *run* is reported separately from a check that ran and was fine; "we could not look" and "we looked and it's fine" must never render the same. |
+| `/db/<name>` | **Triage** — one screen per database: connections and headroom, sessions by state, what's blocked, long-running queries, the lock picture, wraparound horizon, replication slots, and top queries. |
+| `/db/<name>/sessions` | **Sessions** — live `pg_stat_activity`, and the one place an action can be taken (see Safety). |
+| `/db/<name>/locks` | **Locks** — the wait graph: who is blocking whom, and the root blocker at the top of the chain. |
+| `/db/<name>/queries` | **Queries** — `pg_stat_statements`, sortable by total, mean or calls. |
+
+A check that cannot run says so and says why — a missing `pg_stat_statements`
+extension, a server below the version it needs — instead of rendering as zero.
+"We could not look" and "we looked and it's fine" never render the same. Where
+Postgres itself withholds a row from your role rather than failing the query,
+the check still runs and that row reads `insufficient privilege`.
+
+## Running it
+
+**There is no published image yet.** Nothing is pushed to a registry, so build
+it from a clone first — every `docker run` below assumes you have:
 
 ```sh
-npm run db:up           # start Postgres on :55432, print DATABASE_URL
-npm run db:seed         # (optional) manufacture a lock chain — lights up the
-                         # cockpit's SESSIONS/BLOCKED/LONG-RUNNING panels, and
-                         # `locks`/`sessions` directly
-export DATABASE_URL='postgres://postgres:secret@localhost:55432/appdb'
-npm run dev              # the cockpit
-npm run dev -- locks
-npm run db:down          # tear it down
+docker build -t pgops .
 ```
-
-`db:up` preloads `pg_stat_statements` so the same DB is ready for `top` and the
-upcoming `vacuum` subcommand. See [scripts/dev-db.sh](scripts/dev-db.sh).
-
-## Use
 
 ```sh
-pgops                              # the cockpit: whole-database triage in one screen
-pgops --snapshot                   # print the triage screen as markdown and exit
-pgops locks                        # lock-chain view (Enter from the BLOCKED panel)
-pgops sessions                     # live sessions — spot & kill idle-in-transaction
-pgops top                          # slow queries over pg_stat_statements
-pgops <view> --snapshot            # any view, one-shot to stdout
-pgops locks -d "postgres://..."    # explicit connection string (any view)
+# one database
+docker run -e DATABASE_URL=postgres://… -p 8080:8080 pgops
+
+# many
+docker run -e PGOPS_DATABASES='[{"name":"prod","url":"postgres://…"},…]' \
+           -e PGOPS_USERNAME=… -e PGOPS_PASSWORD=…                      \
+           -p 8080:8080 pgops
 ```
 
-Every view connects via `$DATABASE_URL` unless you pass `-d`.
+Configuration is read **at request time, not build time**. The same image works
+against any database you point it at, and CI proves it: it builds an image with
+one `DATABASE_URL` baked in, runs it with a different one, and asserts the
+running container uses the second.
 
-### Keys
+### Configuration
 
-Global — these work from **every** view, built or not:
+| Variable | Meaning |
+|---|---|
+| `DATABASE_URL` | One database, named `default`. The simplest form. |
+| `PGOPS_DATABASES` | A JSON array of `{name, url}` for several databases. Each `name` becomes a URL path segment, so it must match `[A-Za-z0-9_-]+` and be unique. |
+| `PGOPS_CONFIG_FILE` | Path to a file holding that same JSON array. Takes precedence over both of the above — it is the most deliberate of the three, and the only one that keeps connection strings out of the process environment, where `docker inspect` and `/proc/<pid>/environ` can read them. |
+| `PGOPS_USERNAME` | Username for HTTP basic auth. |
+| `PGOPS_PASSWORD` | Password for HTTP basic auth. Set both to require auth, or neither to run without it; setting exactly one is a hard 503, not an open door. |
+| `PGOPS_ALLOW_ACTIONS` | Set to `true` to enable actions — surrounding whitespace and case are ignored, so `TRUE` works too. Anything else, including the string `false`, leaves them off; the value is compared against `true`, never tested for truthiness. |
+| `PGOPS_PUBLIC_HOST` | The host recorded in audit records. Falls back to the request's `Host` header, which is the caller's own claim about this console's address rather than an operator-configured, resolvable one. Set it if you read your audit log. |
+| `PGOPS_AUDIT_LOG` | Path for the local audit-log copy. Defaults to `~/.pgops/audit.log`. |
+| `PORT` | Port the server listens on. Defaults to `8080` in the image. |
 
-| Key | Action |
-|-----|--------|
-| `1` – `9` | jump to a tab: `1` triage, `2` sessions, `3` locks, `4` top, `5` space, `6` vacuum, `7` replication, `8` seq, `9` system |
-| `Tab` / `Shift-Tab` | cycle tabs forward / back, wrapping at both ends |
-| `D` | the doctor report — hygiene findings that can wait (capital `D`; lowercase `d` does nothing) |
-| `Esc` | back to triage |
-
-Tabs `5`–`9` are registered but not built yet: pressing one shows a placeholder
-naming the phase that delivers it. `0` is deliberately unbound.
-
-Global keys go **inert** while a view owns the keyboard — while a kill
-confirmation is open, or while you are typing a `/` filter. So `4` typed into a
-filter is a `4`, not a jump, and a digit pressed at a confirm prompt cannot both
-cancel the kill and change tabs. `Esc` dismisses the modal or filter first, and
-only returns you to triage once nothing else is holding the keys.
-
-The cockpit (`pgops`, no subcommand):
-
-| Key | Action |
-|-----|--------|
-| `j` / `k` | move panel focus |
-| `Enter` | drill into the focused panel's view (e.g. BLOCKED → `locks`) |
-| `t` | jump straight to `top`, from any panel |
-| `s` | snapshot the triage screen to a markdown file (prints the path) |
-| `q` | quit |
-
-Inside a list view (`locks`, `top`, `sessions`), on top of the global keys above:
-
-| Key | Action | Views |
-|-----|--------|-------|
-| `j` / `k` | move down / up | all |
-| `/` | filter | `top`, `sessions` |
-| `o` | cycle sort order | `top`, `sessions` |
-| `x` | kill the selected backend (confirm modal; requires `pg_signal_backend`) | `locks`, `sessions` |
-| `s` | snapshot the current view to a markdown file (prints the path) | all |
-| `q` | quit | all |
-
-> **Changed in v0.2.** `Esc` used to be inert on a directly-invoked view and only
-> meant "back" when you had drilled in from the cockpit. Now it always returns to
-> triage, because there is always a triage to return to.
-
-## What it does (and what's planned)
-
-| Subcommand | Workflow | Status |
-|-----------|----------|--------|
-| *(bare)* `pgops`, or `pgops triage` | Triage cockpit — sessions, blocked, long-running, connections, health, drill-in navigation | **done** — **tab `1`** |
-| `locks` | Incident lock-chain — root blocker + waiter cascade, kill, snapshot | **done** — **tab `3`** |
-| `sessions` | Live sessions — spot & kill idle-in-transaction, sort, filter, snapshot | **done** — **tab `2`** |
-| `top` | Live slow-query view over `pg_stat_statements` — sort, filter, snapshot | **done** — **tab `4`** |
-| `space` | Table & index size, bloat, growth | planned — **tab `5`** |
-| `vacuum` | Autovacuum doctor — bloat + wraparound horizon | planned — **tab `6`** (cockpit's HEALTH card shows a one-line wraparound verdict today) |
-| `replication` | Replication lag and slot disk-exhaustion forecast | planned — **tab `7`** (cockpit's HEALTH card shows a one-line slot verdict today) |
-| `seq` | Sequence exhaustion — integer PKs about to run out | planned — **tab `8`** |
-| `system` | Host & instance metrics | planned — **tab `9`** |
-| `doctor` | Hygiene report across every area — findings that can wait | planned — key `D`, no tab |
-| `indexes` | Unused, duplicate, and invalid indexes | planned — no tab |
-| `tables` | Per-table stats, missing indexes, dead tuples | planned — no tab |
-| `config` | Settings review against the workload | planned — no tab |
-| `explain` | EXPLAIN plans, from `Enter` on a `top` row | planned — no tab |
-| `parts` | Partition manager (`pg_partman`) | planned — no tab |
-| `review` | Pre-migration safety check (SQL parser) | planned — no tab |
-| `events` | Cloud-event correlation (RDS / EKS) | planned — no tab |
-| `mcp` | MCP server wrapping the same query layer for agents | planned — no tab |
-
-**Why some areas have a digit and some don't.** A tab is a single-keystroke jump
-during an incident, so it is reserved for areas that can escalate to *act now*.
-`indexes`, `tables` and `config` never can — they are things you fix on a Tuesday,
-not at 3am — so spending a key on them would waste the one thing the strip is
-short of. They are still full subcommands, reachable by name or from `doctor`.
-A tab is not a feature; it is a claim about urgency.
-
-## What it doesn't do
-
-- It's not a daily dashboard — that's [pgHero](https://github.com/ankane/pghero).
-- It's not an offline log report — that's [pgBadger](https://github.com/darold/pgbadger).
-- It doesn't install extensions or manage roles. It tells you what's missing and
-  prints the grant SQL; you (or your DBA) decide.
-- It doesn't replace `psql`. Run pgops during the incident; stay in `psql` for
-  ad-hoc queries.
+Precedence for databases is `PGOPS_CONFIG_FILE`, then `PGOPS_DATABASES`, then
+`DATABASE_URL`. If none is set — or if what you set cannot be read or parsed —
+the server still comes up (configuration is read per request, not at boot) and
+every page renders **"pgops is not configured"** with the reason: which of the
+three inputs pgops looked at, the file path it tried, or the exact JSON error.
+The message names the input you actually set, so you do not have to go digging
+in the container log to find out which one is wrong.
 
 ## Safety
 
-Read-only by default. The cockpit itself never writes — you act from the view you
-drill into. The only write action today is `x` → kill (available in `locks` and
-`sessions`), which goes through a single shared code path: a confirm modal, a
-session-identity re-check (so a PID reused between selection and confirm is
-refused rather than killed), a call to `pg_terminate_backend()`, and an audit-log
-entry. See the security posture in the plan for the least-privilege role grants
-per subcommand.
+pgops can terminate a backend. Everything below exists because of that.
+
+- **Actions are off by default, and the route does not exist without the flag.**
+  With `PGOPS_ALLOW_ACTIONS` unset, `POST /api/db/<name>/kill` answers **404**,
+  not 403 — a 403 advertises a kill endpoint that is merely switched off. The
+  gate is checked before the body is read and before any database is resolved,
+  so a deployment without the flag is indistinguishable from a build without
+  the file. The route also requires `Content-Type: application/json` and
+  answers **415** otherwise, because a cross-origin HTML form cannot set that
+  header and basic-auth credentials ride cross-site automatically.
+- **`PGOPS_ALLOW_ACTIONS=true` with no `PGOPS_USERNAME` is an unauthenticated
+  kill endpoint.** The action gate and basic auth are independent safeguards,
+  and neither one covers this combination: with actions on and auth off,
+  anyone who can reach the port can terminate backends, and the audit record
+  simply says `anonymous`. pgops warns on stderr the first time such a request arrives but
+  does not refuse to serve — some deployments legitimately put an
+  authenticating proxy in front. If yours does not, set `PGOPS_USERNAME` and
+  `PGOPS_PASSWORD` whenever you set `PGOPS_ALLOW_ACTIONS`.
+- **`kill` is pinned to the session identity, not the pid.** The target's
+  `backend_start` is captured when you select the row and compared, inside the
+  same statement as the terminate, against a snapshot of `pg_stat_activity`. A
+  pid that Postgres recycled between your click and your confirmation comes back
+  `session-changed` and is left alone. Killing a blocker never cascades to its
+  waiters.
+- **Every kill is audited**, success or failure, as one JSON line to **stdout**
+  — the channel your log shipper already reads, and the record's real home,
+  since a container's local filesystem is not durable — and, best-effort, to
+  `~/.pgops/audit.log`. The record names the authenticated operator, the target,
+  a required free-text reason, and the outcome. A failed write goes to stderr;
+  it never silently disappears and never turns a successful kill into a
+  reported failure.
+- **Every rendered query is redacted.** `redactSecrets` runs on every query this
+  console displays, and on every audit record before it is written. This matters
+  more on the web than in a terminal: a screenshot needs a human to take it, a
+  URL forwards itself.
+- **Basic auth is the floor, not the answer.** `PGOPS_USERNAME` /
+  `PGOPS_PASSWORD` give you HTTP basic auth over every route that can read or
+  change a database. For anything real, put a reverse proxy in front — OAuth2
+  Proxy, ALB auth, IAP. That is what pgHero's own guide says, and it is what
+  this project's spec says too. Run it behind TLS; basic auth over plaintext is
+  a password in every request.
+
+pgops does not install extensions, manage roles, or run DDL. Give its role the
+least privilege that works: `pg_read_all_stats` to see other sessions' queries,
+and `pg_signal_backend` only if you intend to use `kill`. Without
+`pg_signal_backend` the console still reads everything; a kill returns the
+permission error Postgres gave, in the page, rather than a blank.
+
+## Requirements
+
+- **Postgres 14 or newer.** Tested against 14, 16, 17 and 18 in CI on every push.
+- `pg_stat_statements` for the Queries route. Everything else works without it,
+  and the route says what is missing rather than rendering empty.
+- Docker, to build and run the image — there is no published one yet.
+
+## Development
+
+```sh
+npm install
+npm run db:up                      # throwaway Postgres on :55432, prints DATABASE_URL
+npm run db:seed                    # optional: manufacture a lock chain to look at
+export DATABASE_URL='postgres://postgres:secret@localhost:55432/appdb'
+npm run --workspace @pgops/web dev # http://localhost:3000
+npm run db:down                    # tear it down
+```
+
+`db:up` preloads `pg_stat_statements`, so the Queries route has something to
+show. See [scripts/dev-db.sh](scripts/dev-db.sh).
+
+The repo is two workspaces: `packages/checks`, a framework-free package holding
+every SQL check and the one code path that issues `pg_terminate_backend`; and
+`apps/web`, the Next.js console that renders them. The checks package knows
+nothing about React.
+
+```sh
+npm test                                    # unit — checks, pure logic, source guards
+npm run test:web                            # the console's component and route tests
+npm run test:int                            # integration, against a real Postgres (Docker)
+npm run typecheck:test                      # types across packages/, including test files
+npm run --workspace @pgops/checks typecheck
+npm run --workspace @pgops/web typecheck
+```
+
+## What happened to the terminal UI
+
+pgops began as an Ink terminal program: a tab strip, keystrokes, an ASCII
+cockpit. **That UI was removed in this release.** The reasoning is in the design
+spec — an incident tool that can only be reached by ssh-ing to a box with the
+right `DATABASE_URL` in its environment is reachable by one person at a time,
+and the checks it ran deserved a surface the whole on-call rotation can open. The
+SQL, the thresholds, the redaction and the kill guard were not rewritten; they
+were lifted into `packages/checks` and are what the console runs today.
+
+There is no `pgops` binary in this release. A CLI returns in the next phase as
+`pgops check --format json` — one-shot, exit-coded, meant for scripts and alert
+pipelines rather than for watching — as its own package alongside
+`packages/checks`. If you came here from the old README looking for `pgops
+locks`, that is where it went.
+
+Nothing was ever published to npm, so no installed version was taken away.
 
 ## License
 

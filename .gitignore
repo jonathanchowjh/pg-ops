@@ -7,3 +7,6 @@ dist/
 !.env.example
 coverage/
 *.tsbuildinfo
+# Next.js build output and its generated ambient-types file (apps/web).
+.next/
+next-env.d.ts

@@ -1,5 +1,5 @@
 -- =============================================================================
--- 04 — REPLICATION SLOT HEALTH   (→ pgops slots)
+-- 04 — REPLICATION SLOT HEALTH   (console: "Replication slots" on /db/<name>)
 -- =============================================================================
 -- Symptom: a replica is lagging, OR — the scary one — disk is steadily filling
 -- on the PRIMARY for no obvious reason. Both lead here.
@@ -85,7 +85,11 @@ FROM pg_stat_replication;
 -- Uncomment with the real slot name, only after confirming:
 --   -- SELECT pg_drop_replication_slot('etl_to_snowflake');
 --
--- `pgops slots` watches all of this and adds a disk-exhaustion FORECAST: it
--- tracks each slot's growth rate and projects "disk full in 14h 22m" — turning
--- a 2am page into a 9am planned action.
+-- The console's "Replication slots" panel (/db/<name>) shows each slot with its
+-- type, whether a consumer is attached, and the WAL it is retaining — computed
+-- for EVERY slot, active or not, because the failure that fills a primary's
+-- disk is an attached consumer that has stopped advancing. It reports the
+-- retained bytes it can see right now; it does not track growth over time, so
+-- there is no "disk full in 14h" forecast. Query 2 below is the same reading,
+-- by hand.
 -- =============================================================================

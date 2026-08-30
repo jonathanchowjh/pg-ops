@@ -1,5 +1,5 @@
 -- =============================================================================
--- 02 — SLOW-QUERY TRIAGE   (→ pgops top)
+-- 02 — SLOW-QUERY TRIAGE   (console: /db/<name>/queries)
 -- =============================================================================
 -- Symptom: "Endpoint X is slow," usually from an APM (Datadog, New Relic). The
 -- app points at a feature; your job is to find the guilty SQL and the fix.
@@ -91,8 +91,10 @@ LIMIT 15;
 --   (c) REWRITE the query — remove a function wrapped around an indexed column,
 --       avoid SELECT *, add a LIMIT, fix an accidental cross join.
 --
--- `pgops top` is this loop as a live TUI: sortable by total/mean/calls/cache,
--- press Enter on a row to drop straight into the EXPLAIN view.
+-- The console's Queries page (/db/<name>/queries) is the OBSERVE half of this
+-- loop: the same pg_stat_statements rows, sortable by total, mean or calls,
+-- with every query redacted before it renders. It has no EXPLAIN view — steps
+-- (a)-(c) above stay yours to run here, in psql.
 
 
 -- (Optional) If a deploy changed the workload and you want a clean baseline:

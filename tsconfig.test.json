@@ -1,5 +1,14 @@
 {
-  "extends": "./tsconfig.json",
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  // `vitest.config.ts` is listed explicitly, not swept up by a glob: the root
+  // tsconfig that used to cover it went with the TUI, so nothing typechecked
+  // it at all and it carried an unused import for a whole phase. That is the
+  // hole Ruling 46 exists for — a config file no gate reads.
+  "include": ["packages/*/src/**/*", "packages/*/test/**/*", "vitest.config.ts"],
+  "exclude": ["node_modules", "**/dist"]
 }

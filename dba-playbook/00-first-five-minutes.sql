@@ -6,8 +6,9 @@
 -- pass: a handful of cheap, read-only queries whose answers tell you WHICH of
 -- the other files to open next.
 --
--- A DBA runs roughly these, in this order, from memory. pgops doesn't have a
--- single subcommand for this — it's the orientation that picks the subcommand.
+-- A DBA runs roughly these, in this order, from memory. The pgops console's
+-- Triage page (/db/<name>) answers most of them at a glance; this file is the
+-- orientation itself — the pass that decides which file below to open next.
 --
 -- Safe to run anywhere. All read-only. Run top to bottom.
 -- =============================================================================
@@ -101,9 +102,15 @@ LIMIT 10;
 -- =============================================================================
 -- WHERE TO GO NEXT
 -- -----------------------------------------------------------------------------
---   Query 2 returned rows  ............  01-lock-chain.sql      (pgops locks)
---   Query 1/3 show slow active queries   02-slow-queries.sql    (pgops top)
---   "idle in transaction" + bloat fears  03-autovacuum-bloat.sql(pgops vacuum)
---   Replica lag / disk on primary  ....  04-replication-slots.sql (pgops slots)
---   About to ship a migration  ........  05-migration-safety.sql (pgops review)
+--   Query 2 returned rows  ............  01-lock-chain.sql
+--                                        (console: /db/<name>/locks)
+--   Query 1/3 show slow active queries   02-slow-queries.sql
+--                                        (console: /db/<name>/queries)
+--   "idle in transaction" + bloat fears  03-autovacuum-bloat.sql
+--                                        (console: nothing for bloat)
+--   Replica lag / disk on primary  ....  04-replication-slots.sql
+--                                        (console: "Replication slots" on /db/<name>)
+--   About to ship a migration  ........  05-migration-safety.sql
+--                                        (console: nothing — it reads databases,
+--                                         not migration files)
 -- =============================================================================

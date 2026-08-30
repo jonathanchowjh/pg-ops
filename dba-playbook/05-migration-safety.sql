@@ -1,5 +1,5 @@
 -- =============================================================================
--- 05 — MIGRATION SAFETY: expand → backfill → contract   (→ pgops review)
+-- 05 — MIGRATION SAFETY: expand → backfill → contract   (console: nothing)
 -- =============================================================================
 -- This one is PREVENTIVE, not reactive — the work a careful DBA does BEFORE
 -- shipping a schema change so it doesn't become files 00–01. There's no live
@@ -82,9 +82,10 @@ WHERE tablename = 'users';      -- ← your target table
 -- leave an INVALID index if it fails — re-check pg_indexes and DROP/retry.)
 
 
--- 4. THE PATTERNS pgops review FLAGS -----------------------------------------
--- `pgops review migrations/0042.sql` parses your migration file (no DB needed)
--- and warns on exactly these unsafe shapes, emitting the safe multi-step rewrite:
+-- 4. THE PATTERNS TO CATCH IN CODE REVIEW ------------------------------------
+-- No pgops surface covers this one: the console reads a live database, it does
+-- not read your migration files. These are the shapes to catch by eye, each
+-- rewritten as THE SAFE PATTERN at the top of this file:
 --
 --   UNSAFE                                          WHY
 --   ADD COLUMN ... NOT NULL (volatile default)      full rewrite, ACCESS EXCLUSIVE

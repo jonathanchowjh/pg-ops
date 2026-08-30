@@ -1,5 +1,5 @@
 -- =============================================================================
--- 03 — AUTOVACUUM & BLOAT DOCTOR   (→ pgops vacuum)
+-- 03 — AUTOVACUUM & BLOAT DOCTOR   (console: wraparound only, on /db/<name>)
 -- =============================================================================
 -- Symptom: tables feel bloated, disk creeps up, or a table is slow despite good
 -- indexes. Two distinct worries live here:
@@ -112,7 +112,8 @@ WHERE c.relkind = 'r'
 --   (c) Tune so autovacuum keeps up without you (per-table override):
 --         -- ALTER TABLE users SET (autovacuum_vacuum_scale_factor = 0.05);
 --
--- `pgops vacuum` is this triage as a two-pane TUI: tables ranked by bloat risk,
--- wraparound horizon bar, and an advise line ("run VACUUM ANALYZE users — 42%
--- dead tuples, last successful 14 days ago").
+-- The console has no vacuum view. Its Triage page (/db/<name>) carries a
+-- Wraparound panel — the shutdown risk in section 2 above, with a verdict — and
+-- nothing at all for bloat ranking or per-table vacuum advice. For that half,
+-- this file IS the tool.
 -- =============================================================================
