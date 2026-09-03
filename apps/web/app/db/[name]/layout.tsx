@@ -6,6 +6,9 @@ import { ConfigError } from '@/lib/config';
 import { ConfigErrorPage } from '@/components/config-error';
 import { Nav } from '@/components/nav';
 import { Refresh } from '@/components/refresh';
+import { StatusBar } from '@/components/status-bar';
+import { runCheckFor } from '@/lib/check';
+import { CHECKS } from '@pgops/checks';
 
 export default async function DbLayout({
   children,
@@ -37,10 +40,23 @@ export default async function DbLayout({
   // statement ("no such database") that points at the wrong thing.
   if (!names.includes(name)) notFound();
 
+  // Runs in the LAYOUT, so it is on every page under /db/<name> including the
+  // one with the terminate button, and so it cannot be forgotten by a page
+  // added in a later phase. `runCheckFor` never rejects — a database that is
+  // down renders "identity unavailable" here and its own failure in every
+  // panel below.
+  const who = await runCheckFor(name, CHECKS.identity);
+
   return (
     <main className="mx-auto max-w-5xl p-6">
       <header className="mb-2 flex items-baseline justify-between gap-4">
-        <h1 className="text-xl font-semibold">{name}</h1>
+        <div>
+          {/* The operator's label, then what the server itself answers. The
+              order is deliberate: the label is what they navigated by, the
+              line under it is what that label turned out to mean. */}
+          <h1 className="text-xl font-semibold">{name}</h1>
+          <StatusBar result={who} />
+        </div>
         <Refresh intervalMs={5_000} />
       </header>
       <Nav name={name} />

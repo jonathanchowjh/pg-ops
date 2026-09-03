@@ -1,17 +1,25 @@
 # pgops
 
-> The Postgres on-call console. Run it during the incident.
+> A pgHero superset, built incident-first.
 
-pgHero is your daily dashboard. pgBadger is your postmortem tool. pganalyze is the
-enterprise SaaS. **pgops is what you run during the incident** — and unlike all
-three, it can act, not only watch.
+pgops targets everything pgHero answers, plus the half pgHero does not: it is
+built to be opened while the pager is going off, and it can act, not only watch.
+
+That target is a checked claim rather than a slogan.
+[packages/checks/src/registry.ts](packages/checks/src/registry.ts) maps all 65
+capabilities of pgHero 4.0.1 onto a shipped check, a shipped action, a platform
+feature, or a numbered phase, and the test suite fails if a phase marked
+complete still owes one. **15 of the 65 are shipped, 1 is declined on purpose,
+and 49 remain** — see [Parity with pgHero](#parity-with-pghero).
 
 It is a small web console you deploy next to your databases. One URL, many
-databases, no agent to install and nothing to schedule. You open it when the
-pager goes off, it answers the questions a DBA runs from memory in the first five
-minutes — who's connected and in what state, is anything blocked, what's running
-long, how much connection headroom is left — and then, if you switch the safety
-off, it can terminate the backend that is holding everything up.
+databases, no agent to install and nothing to schedule. What is built so far is
+what you need in the first five minutes — who's connected and in what state, is
+anything blocked, what's running long, how much connection headroom is left,
+which server you are actually pointed at — and then, if you switch the safety
+off, it can terminate the backend that is holding everything up. The hygiene
+half (indexes, bloat, space growth, sequence exhaustion, maintenance) is the
+next phase and is not here yet.
 
 ```sh
 docker build -t pgops .
@@ -24,11 +32,19 @@ Five routes. That is the whole console today.
 
 | Route | What it answers |
 |---|---|
-| `/` | **Overview** — every configured database, each with its worst verdict across the nine incident checks. "Is anything wrong anywhere?", nothing more. A check that could not *run* is reported separately from a check that ran and was fine; "we could not look" and "we looked and it's fine" must never render the same. |
+| `/` | **Overview** — every configured database, each with its worst verdict across every incident check. "Is anything wrong anywhere?", nothing more. A check that could not *run* is reported separately from a check that ran and was fine; "we could not look" and "we looked and it's fine" must never render the same. |
 | `/db/<name>` | **Triage** — one screen per database: connections and headroom, sessions by state, what's blocked, long-running queries, the lock picture, wraparound horizon, replication slots, and top queries. |
 | `/db/<name>/sessions` | **Sessions** — live `pg_stat_activity`, and the one place an action can be taken (see Safety). |
 | `/db/<name>/locks` | **Locks** — the wait graph: who is blocking whom, and the root blocker at the top of the chain. |
 | `/db/<name>/queries` | **Queries** — `pg_stat_statements`, sortable by total, mean or calls. |
+
+Every `/db/<name>` page carries a status line under the heading: the database
+and role the server itself reports, its version, whether the connection is
+encrypted, and a `replica` flag. Everywhere else in the console a database is
+called by the name **you** gave it in `PGOPS_DATABASES`; that line is the only
+place the server gets to answer, and it sits directly above a button that can
+terminate backends. An SSL status pgops could not read says `SSL unknown`, never
+`no SSL`.
 
 A check that cannot run says so and says why — a missing `pg_stat_statements`
 extension, a server below the version it needs — instead of rendering as zero.
@@ -81,6 +97,43 @@ every page renders **"pgops is not configured"** with the reason: which of the
 three inputs pgops looked at, the file path it tried, or the exact JSON error.
 The message names the input you actually set, so you do not have to go digging
 in the container log to find out which one is wrong.
+
+## Parity with pgHero
+
+pgHero is the benchmark, and the audit is in the repo rather than in a claim.
+`registry.ts` was compiled against a fresh clone of pgHero 4.0.1 by enumerating
+every public method under `lib/pghero/methods/`, plus the dashboard-only
+capabilities that back no method at all. Each of the 65 entries names its source
+file and resolves to exactly one state, checked on every test run.
+
+| State | Count |
+|---|---:|
+| Shipped | 15 |
+| Declined on purpose | 1 |
+| Remaining | 49 |
+
+The remaining work is phased, and `parityBacklog('P2')` reports each phase's
+size rather than leaving it to be counted by hand: **P2 is 31 capabilities** —
+indexes, tables, space, sequences, settings and maintenance — then P3–P6 hold
+capture, history, the reset and analyze actions, `EXPLAIN`, and index
+suggestions.
+
+Four deliberate divergences, all of them documented at the code that implements
+them:
+
+- **`kill` is guarded.** pgHero's is a bare `pg_terminate_backend` behind a
+  button. See [Safety](#safety).
+- **`ssl_in_use` needs no extension.** pgHero calls `ssl_is_used()` from
+  `sslinfo`, so it reports SSL only where somebody installed that extension.
+  pgops reads `pg_stat_ssl`, a core catalog since 9.5, for its own backend —
+  which is readable without `pg_read_all_stats`.
+- **`kill_all` is declined**, permanently. There is no incident in which
+  "terminate every session, unreviewed" is the correct first move; it is an
+  action with no diagnosis.
+- **Capture will not reset shared statistics.** pgHero's `capture_query_stats`
+  calls `pg_stat_statements_reset()`, which silently breaks every other
+  consumer on that database. Not yet built (P3), and recorded here so it cannot
+  be built the other way by accident.
 
 ## Safety
 

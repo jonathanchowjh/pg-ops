@@ -39,6 +39,13 @@ async function worstVerdict(name: string): Promise<{ verdict: Verdict; unavailab
   const results = await Promise.all([
     runCheckFor(name, CHECKS.blocked),
     runCheckFor(name, CHECKS.connections),
+    // Carries no verdict, so it can never make the overview worse — but it
+    // can be UNAVAILABLE, and this page counts that separately. Present for
+    // the same reason `sessions` and `queryStats` are, both also
+    // verdict-less: guards.test.ts holds every incident check to the front
+    // door, and narrowing that rule to "checks that can escalate" would have
+    // quietly excused those two as well.
+    runCheckFor(name, CHECKS.identity),
     runCheckFor(name, CHECKS.locks),
     runCheckFor(name, CHECKS.longRunning, {}),
     runCheckFor(name, CHECKS.queryStats, { sort: 'total' }),

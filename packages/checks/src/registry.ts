@@ -147,6 +147,7 @@
 import { killBackend } from './actions/kill.js';
 import { blocked } from './checks/blocked.js';
 import { connections } from './checks/connections.js';
+import { identity } from './checks/identity.js';
 import { locks } from './checks/locks.js';
 import { longRunning } from './checks/long-running.js';
 import { queryStats } from './checks/query-stats.js';
@@ -157,6 +158,7 @@ import { wraparound } from './checks/wraparound.js';
 export const CHECKS = {
   blocked,
   connections,
+  identity,
   locks,
   longRunning,
   queryStats,
@@ -196,26 +198,43 @@ export type ActionId = keyof typeof ACTIONS;
 export type Phase = 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6';
 
 /**
- * `check` / `action` / `planned` / `declined` are meant as mutually
+ * `check` / `action` / `platform` / `planned` / `declined` are meant as mutually
  * exclusive, but a union of object types does not enforce that at the type
  * level — TypeScript's excess-property check only rejects a property absent
  * from EVERY member, so `tsc --strict` accepts an entry carrying both
- * `check` and `planned`. `registry.test.ts`'s "exactly one of shipped /
- * planned / declined" test is the actual enforcement, at runtime, over
- * every entry, on every run.
+ * `check` and `planned`. `registry.test.ts`'s "exactly one of check /
+ * action / platform / planned / declined" test is the actual enforcement, at
+ * runtime, over every entry, on every run.
+ *
+ * `platform` is the third shipped variant, added for #60
+ * `multiple_databases`. It is the same problem the #11 `kill` comment above
+ * works through, one step further out: #11 was shipped but was not a
+ * `Check`, so it got `action`; #60 is shipped but is neither a check nor an
+ * action — it is the app's routing and configuration model, `PGOPS_DATABASES`
+ * and a path segment per name. Leaving it `planned` overstated the backlog
+ * and reported a delivered capability as future work, which is the one thing
+ * this file exists to prevent. Unlike `check` and `action` its payload
+ * cannot be checked against a registry of real things — there is no
+ * `PLATFORM` map to key off — so it carries prose naming where the
+ * capability lives, and that string is the weakest link in this file.
  */
 export type ParityEntry = { name: string; source: string } & (
   | { check: CheckId }
   | { action: ActionId }
+  | { platform: string }
   | { planned: Phase }
   | { declined: string }
 );
 
 export const PGHERO: Record<number, ParityEntry> = {
   // basic — methods/basic.rb
-  1: { name: 'server_version', source: 'methods/basic.rb', planned: 'P1' },
-  2: { name: 'database_name', source: 'methods/basic.rb', planned: 'P1' },
-  3: { name: 'ssl_in_use', source: 'methods/basic.rb', planned: 'P1' },
+  // All three of basic.rb's status-bar facts are one round trip and one
+  // check — see checks/identity.ts, which also backs #48. #3 diverges from
+  // pgHero deliberately (pg_stat_ssl, not the sslinfo extension); the
+  // reasoning is in that file's docblock.
+  1: { name: 'server_version', source: 'methods/basic.rb', check: 'identity' },
+  2: { name: 'database_name', source: 'methods/basic.rb', check: 'identity' },
+  3: { name: 'ssl_in_use', source: 'methods/basic.rb', check: 'identity' },
 
   // connections — methods/connections.rb
   // #4 is pgHero's per-connection LIST (pid/datname/user/source/ip/state/
@@ -254,7 +273,15 @@ export const PGHERO: Record<number, ParityEntry> = {
   15: { name: 'historical_query_stats', source: 'methods/query_stats.rb', planned: 'P3' },
   16: { name: 'query_hash_stats', source: 'methods/query_stats.rb', planned: 'P4' },
   17: { name: 'slow_queries', source: 'methods/query_stats.rb', planned: 'P2' },
-  18: { name: 'query_stats_available', source: 'methods/query_stats.rb', planned: 'P1' },
+  // Shipped since P1a and mislabelled `planned` until the P1 phase gate
+  // caught it. pgHero's capability is the probe plus the remedy, and both
+  // exist: query-stats.ts declares `requires` (the pg_stat_statements
+  // extension and a version floor), and run.ts turns an UNDEFINED_TABLE
+  // from that check into `reason: 'missing-extension'` carrying a `remedy`.
+  // It shares a check with #14 — the availability probe is the `requires`
+  // block ON that check, not a separate query, and `ParityEntry` does not
+  // require check ids to be unique across capabilities.
+  18: { name: 'query_stats_available', source: 'methods/query_stats.rb', check: 'queryStats' },
   19: { name: 'enable_query_stats', source: 'methods/query_stats.rb', planned: 'P5' },
   20: { name: 'reset_query_stats', source: 'methods/query_stats.rb', planned: 'P5' },
   21: { name: 'capture_query_stats', source: 'methods/query_stats.rb', planned: 'P3' },
@@ -295,7 +322,10 @@ export const PGHERO: Record<number, ParityEntry> = {
   47: { name: 'analyze_tables', source: 'methods/maintenance.rb', planned: 'P5' },
 
   // replication — methods/replication.rb
-  48: { name: 'replica', source: 'methods/replication.rb', planned: 'P1' },
+  // `pg_is_in_recovery()`, folded into the identity round trip. slots.ts
+  // already branched on this predicate to stay correct on a standby (see
+  // its A6 note) without ever telling the operator they were on one.
+  48: { name: 'replica', source: 'methods/replication.rb', check: 'identity' },
   49: { name: 'replication_lag', source: 'methods/replication.rb', planned: 'P2' },
   50: { name: 'replication_slots', source: 'methods/replication.rb', check: 'slots' },
   51: { name: 'replicating', source: 'methods/replication.rb', planned: 'P2' },
@@ -324,7 +354,18 @@ export const PGHERO: Record<number, ParityEntry> = {
 
   // platform — multi-database is Rails-engine configuration
   // (lib/pghero/database.rb), not a lib/pghero/methods/ query
-  60: { name: 'multiple_databases', source: 'database.rb', planned: 'P1' },
+  // Shipped in P1a/P1b, and the second entry the phase gate caught. Neither
+  // a check nor an action — hence the `platform` variant, whose docblock
+  // explains the gap. pgHero's phrasing is "switchable from the UI"; here
+  // the URL is the switcher, which is strictly better for an incident tool:
+  // a pgops link names its database, so it survives being pasted into an
+  // incident channel. A dropdown does not.
+  60: {
+    name: 'multiple_databases',
+    source: 'database.rb',
+    platform: 'apps/web: PGOPS_DATABASES / PGOPS_CONFIG_FILE (lib/config.ts), '
+      + 'one route per name under app/db/[name], all of them listed on the overview',
+  },
 
   // Found by the 2026-08-26 re-audit, absent from the old 60-capability
   // matrix entirely:
@@ -341,7 +382,30 @@ export const PGHERO: Record<number, ParityEntry> = {
   65: { name: 'connection_security_breakdown', source: 'app/controllers/pg_hero/home_controller.rb', planned: 'P2' },
 };
 
-/** Capabilities owned but not yet built. Parity is complete when this is 0. */
-export function parityBacklog(): number {
-  return Object.values(PGHERO).filter((e) => 'planned' in e).length;
+/**
+ * The phases whose work is finished and merged.
+ *
+ * This is the list `registry.test.ts` gates on: a capability still `planned`
+ * for a phase named here fails the suite. Add a phase to this array only
+ * when its branch has landed on master — the array is the claim, and the
+ * test is what makes the claim cost something.
+ *
+ * P1 covers both P1a ("the console renders") and P1b ("the console ships");
+ * the registry's `Phase` has no sub-phase granularity and does not need any,
+ * since a capability is owed by P1 whether P1a or P1b was meant to deliver
+ * it.
+ */
+export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1'];
+
+/**
+ * Capabilities owned but not yet built. Parity is complete when this is 0.
+ *
+ * With `phase`, the backlog for that phase alone — which is what the gate
+ * above needs, and what makes "P2 is 31 capabilities" a number this file
+ * reports rather than one somebody counts by hand and gets wrong.
+ */
+export function parityBacklog(phase?: Phase): number {
+  return Object.values(PGHERO)
+    .filter((e) => 'planned' in e && (phase === undefined || e.planned === phase))
+    .length;
 }

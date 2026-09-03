@@ -20,6 +20,7 @@ export { redactSecrets } from './redact.js';
  */
 export type * from './checks/blocked.js';
 export type * from './checks/connections.js';
+export type * from './checks/identity.js';
 export type * from './checks/locks.js';
 export type * from './checks/long-running.js';
 export type * from './checks/query-stats.js';
