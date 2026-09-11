@@ -75,6 +75,7 @@ LIMIT 10`;
 
 export const wraparound: Check<WraparoundRow, WraparoundData> = {
   id: 'wraparound',
+  gate: 'keep-up',
   title: 'Transaction ID wraparound',
   class: 'incident',
   sql: SQL,
@@ -92,11 +93,16 @@ export const wraparound: Check<WraparoundRow, WraparoundData> = {
   thresholds: [
     { level: 'warn', value: 500_000_000, unit: 'transactions',
       because: 'about a quarter of the 2^31 horizon consumed; enough runway to vacuum '
-             + 'the largest table without an outage window, but the trend now matters' },
+             + 'the largest table without an outage window, but the trend now matters',
+      remedy: 'Vacuum the oldest tables during a quiet window while there is still '
+            + 'runway. VACUUM (FREEZE) on the largest table is the long pole.' },
     { level: 'critical', value: 100_000_000, unit: 'transactions',
       because: 'pgHero #44 flags at 10M remaining; we escalate at 100M because '
              + 'freezing a multi-terabyte table takes longer than 10M transactions '
-             + 'of headroom buys on a busy system' },
+             + 'of headroom buys on a busy system',
+      remedy: 'Run VACUUM (FREEZE, VERBOSE) on the oldest tables now. Postgres refuses '
+            + 'new transactions at 1,000,000 remaining, and freezing a large table '
+            + 'takes hours, not minutes.' },
   ],
   /**
    * `txnsUntilShutdown` counts DOWN — smaller is worse, the opposite

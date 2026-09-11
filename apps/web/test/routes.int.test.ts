@@ -81,12 +81,29 @@ describe('/db/[name] triage', () => {
 });
 
 describe('/db/[name]/sessions and /locks', () => {
+  /**
+   * Two fetches, because of the pgops fold — and the reason this test now
+   * asks for `?pgops=show` is a defect it caught rather than a concession.
+   *
+   * On this harness the console is the ONLY client of its own database, so
+   * the default view folds every row away and there is genuinely nothing
+   * left to list. That used to render a table header over an empty body,
+   * with the explanation below the fold: indistinguishable, on the page an
+   * operator opens to find out what is connected, from a query that returned
+   * nothing. The default URL now says so where the rows would be, and this
+   * asserts BOTH halves — the empty state, and that the rows really are one
+   * click away with their pid and state intact.
+   */
   it('lists live sessions with pid, state and age', async () => {
     await withConsole(async ({ baseUrl, sql }) => {
       await sql("SELECT pg_sleep(0)");
-      const html = await (await fetch(`${baseUrl}/db/primary/sessions`)).text();
-      expect(html).toContain('pid');
-      expect(html).toMatch(/active|idle/);
+      const folded = await (await fetch(`${baseUrl}/db/primary/sessions`)).text();
+      expect(folded).toContain('Nothing but pgops');
+      expect(folded).toContain('show them');
+
+      const shown = await (await fetch(`${baseUrl}/db/primary/sessions?pgops=show`)).text();
+      expect(shown).toContain('pid');
+      expect(shown).toMatch(/active|idle/);
     });
   }, 180_000);
 
@@ -269,7 +286,7 @@ describe('the two properties, end to end', () => {
   }, 300_000);
 
   /**
-   * C1: `/` computed its verdict from six of nine incident checks, because a
+   * C1: `/` computed its verdict from nine of twelve incident checks, because a
    * cast erased `runCheckFor`'s arity overloads and `longRunning`, `queryStats`
    * and `sessions` were called with no options — throwing inside `runCheck`,
    * which never rejects, so they came back as three permanently "unavailable"
@@ -298,7 +315,7 @@ describe('the two properties, end to end', () => {
         void runner.query('SELECT pg_sleep(600)').catch(() => {});
         const startedAt = Date.now();
 
-        // With the extension created, all nine incident checks can run on this
+        // With the extension created, all twelve incident checks can run on this
         // container — so "unavailable" on a healthy database means a defect,
         // not a missing extension, and the count can be asserted as zero.
         await sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');

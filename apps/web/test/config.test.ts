@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ConfigError, readDatabases } from '../lib/config.js';
+import { ConfigError, readDatabases } from '@/lib/config';
 
 function configFile(contents: string): string {
   const path = join(mkdtempSync(join(tmpdir(), 'pgops-config-')), 'databases.json');

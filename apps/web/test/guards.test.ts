@@ -41,8 +41,28 @@ function topLevel(dir: string): string[] {
     .filter((p) => statSync(p).isFile());
 }
 
+/**
+ * Line comments FIRST, then block comments — not the other order it shipped
+ * with. Final review: with block-first, a two-character open-comment marker
+ * sitting inside an ordinary `//` comment (not a real block comment at all)
+ * fools the non-greedy block regex into opening there anyway, and it then
+ * closes on the file's next literal close-comment marker, wherever that
+ * happens to be — deleting everything in between, including real code. This
+ * is not hypothetical: the text "every /db/(star) URL" (a slash directly
+ * followed by an asterisk) inside a `//` line at
+ * app/db/[name]/layout.tsx:24 did exactly this, eating roughly thirty lines
+ * down to that file's one legitimate JSX comment's own close-comment marker
+ * around line 54 — silently blinding every guard in this file that reads
+ * that file through `strip()`, including the poll boundary and the kill
+ * gate. (This paragraph spells the two markers out rather than writing them,
+ * because writing the close-comment one literally would end THIS comment
+ * early — the same defect, one level up.) Stripping line comments first
+ * removes that whole line, open-comment marker included, before the
+ * block-comment pass ever runs, so a stray open-comment marker inside a real
+ * line comment can no longer be mistaken for the start of a block comment.
+ */
 const strip = (code: string) =>
-  code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  code.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
 
 /**
  * Every file Next will actually render as a route segment, not just the two
@@ -349,5 +369,136 @@ describe('the kill gate', () => {
       .filter((f) => /\bkillBackend\b|\bACTIONS\b/.test(strip(readFileSync(f, 'utf8'))))
       .sort();
     expect(importers).toEqual([ROUTE]);
+  });
+});
+
+describe('the poll boundary', () => {
+  /**
+   * `<Refresh>` used to render in app/db/[name]/layout.tsx, which put a
+   * 5-second router.refresh() on EVERY route under /db/<name>. That was
+   * correct while every such route was an incident page. P2 adds hygiene
+   * routes whose queries are catalog scans (index_bloat is a ~140-line CTE;
+   * table_sizes touches every relation), and inheriting the poll would run
+   * them every five seconds on every open tab, forever.
+   *
+   * Both directions of getting this wrong are SILENT. An incident page that
+   * loses its <Refresh> still renders — it just stops updating, during an
+   * incident, with nothing on screen saying so. A hygiene page that keeps it
+   * still renders — it just puts a table scan on a timer. Neither throws, so
+   * nothing else in the suite would notice.
+   *
+   * Final review: this used to check only the positive direction (each
+   * incident page polls) plus one hand-picked negative (the layout doesn't).
+   * That left the actual rule — "no OTHER page polls" — unenforced, on the
+   * reasoning that it would range over an empty set until hygiene pages
+   * exist. That reasoning does not hold: `sources(APP)` is non-empty today
+   * (it already walks every page/component/layout under app/), so a
+   * set-equality assertion has a real subject right now, subsumes the old
+   * layout-only negative check for free, and — the actual point — fails
+   * automatically the moment a future phase adds a polling hygiene page,
+   * with nobody needing to remember to extend a list here.
+   */
+  const INCIDENT_PAGES = [
+    join(APP, 'db', '[name]', 'page.tsx'),
+    join(APP, 'db', '[name]', 'sessions', 'page.tsx'),
+    join(APP, 'db', '[name]', 'locks', 'page.tsx'),
+    join(APP, 'db', '[name]', 'queries', 'page.tsx'),
+  ];
+
+  /**
+   * The overview polls too, and deliberately NOT at the incident cadence.
+   * `worstVerdict` runs twelve checks per database, so a tick here costs
+   * twelve times a triage tick times however many databases are configured
+   * — the one page where the 5s interval genuinely could become the load it
+   * is meant to prevent.
+   */
+  const OVERVIEW = join(APP, 'page.tsx');
+
+  it('renders <Refresh> in exactly the incident pages and the overview', () => {
+    const polling = sources(APP)
+      .filter((f) => /<Refresh\b/.test(strip(readFileSync(f, 'utf8'))))
+      .sort();
+    expect(polling).toEqual([...INCIDENT_PAGES, OVERVIEW].sort());
+  });
+
+  /**
+   * The cadence, not just the presence. Set equality above would be satisfied
+   * by an overview polling at 5s — which is the actual mistake available
+   * here, and a silent one: it renders identically and simply multiplies the
+   * console's own load by the number of databases configured.
+   */
+  it('polls the overview strictly slower than an incident page', () => {
+    const interval = (file: string): number => {
+      const m = /<Refresh\s+intervalMs=\{([0-9_]+)\}/.exec(strip(readFileSync(file, 'utf8')));
+      if (m === null) throw new Error(`no <Refresh intervalMs={…}> in ${file}`);
+      return Number(m[1]!.replace(/_/g, ''));
+    };
+    for (const page of INCIDENT_PAGES) {
+      expect(interval(OVERVIEW)).toBeGreaterThan(interval(page));
+    }
+  });
+});
+
+const CHECKS_SRC = fileURLToPath(new URL('../../../packages/checks/src', import.meta.url));
+
+describe('the DDL boundary', () => {
+  it('confines every DDL statement to store/migrations/', () => {
+    // Replaces the old "CLI only" boundary now that migrations run at boot.
+    // pgops issues no DDL against a monitored database, ever; the only code
+    // that can issue any at all is the migration runner, which runs only when
+    // PGOPS_STORE_URL is set and only against that URL.
+    // I7 (final review): this walked packages/checks ONLY, while the README
+    // claims the guard covers the repo and the comment above says "the only
+    // code that can issue any at all is the migration runner". apps/web holds
+    // the pools to the MONITORED databases — the exact place a DDL statement
+    // would do the damage this guard exists to prevent — and was unscanned.
+    //
+    // `sources()` and `topLevel()`, not an ad-hoc extension filter: this file
+    // already carries a docblock (above `sources`) recording that this repo
+    // SHIPPED an `app/status/page.jsx` which slipped a guard filtered to
+    // .ts/.tsx, and concluding that a guard whose file list is narrower than
+    // the framework's is a guard with a documented hole. `topLevel(WEB_ROOT)`
+    // covers instrumentation.ts, proxy.ts and next.config.ts, which the
+    // directory walks do not reach.
+    //
+    // TRUNCATE is anchored on TABLE/ONLY or a bare identifier followed by a
+    // semicolon, NOT on `\s+[a-z_"]`: with the `i` flag that looser form
+    // matched Tailwind's `truncate` utility class, and this tree already
+    // writes `className="max-w-md truncate"` — reordering two CSS classes
+    // would have failed a security guard.
+    const DDL =
+      /\b(?:(?:CREATE|ALTER|DROP)\s+(?:MATERIALIZED\s+)?(?:SCHEMA|TABLE|INDEX|VIEW|EXTENSION|SEQUENCE|FUNCTION|ROLE|USER|DATABASE)\b|TRUNCATE\s+(?:TABLE\b|ONLY\b|"?[a-z_][a-z_0-9]*"?\s*;)|GRANT\s+[A-Z]{2,}\b)/i;
+    const roots: [string[], string, string][] = [
+      [sources(CHECKS_SRC), CHECKS_SRC, 'packages/checks/src'],
+      [sources(APP), APP, 'apps/web/app'],
+      [sources(COMPONENTS), COMPONENTS, 'apps/web/components'],
+      [sources(LIB), LIB, 'apps/web/lib'],
+      [topLevel(WEB_ROOT).filter((f) => /\.(tsx?|jsx?)$/.test(f)), WEB_ROOT, 'apps/web'],
+    ];
+    const matched = roots.flatMap(([files, root, label]) =>
+      files
+        .filter((p) => !p.includes(join('store', 'migrations')))
+        .filter((p) => DDL.test(strip(readFileSync(p, 'utf8'))))
+        // The path RELATIVE to its root, not the basename: two `page.tsx`
+        // files under different routes must not report as the same offender.
+        .map((p) => `${label}/${p.slice(root.length + 1)}`),
+    );
+    expect(matched).toEqual(['packages/checks/src/run.ts']);
+  });
+});
+
+describe('capture', () => {
+  it('contains no call that resets a shared statistics view', () => {
+    // The parent spec §4.3 calls this the strongest product claim in the
+    // design. pgHero's capture_query_stats calls pg_stat_statements_reset(),
+    // which silently breaks every other consumer on the database. The
+    // behavioural proof is capture.int.test.ts's monotonicity assertion; this
+    // is the cheap source-level tripwire that fails the moment someone types
+    // it, in any file, without waiting for an integration run.
+    const RESET = /pg_stat_statements_reset|pg_stat_reset\b/i;
+    const offenders = walk(CHECKS_SRC)
+      .filter((p) => p.endsWith('.ts'))
+      .filter((p) => RESET.test(strip(readFileSync(p, 'utf8'))));
+    expect(offenders).toEqual([]);
   });
 });

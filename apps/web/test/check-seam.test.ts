@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CHECKS } from '@pgops/checks';
-import { isMissingRequestStore, runCheckFor } from '../lib/check.js';
+import { isMissingRequestStore, runCheckFor } from '@/lib/check';
 
 describe('isMissingRequestStore', () => {
   /**

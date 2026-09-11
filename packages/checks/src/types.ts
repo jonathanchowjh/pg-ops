@@ -1,3 +1,4 @@
+import type { Placement } from './gates.js';
 import type { Pool } from 'pg';
 
 export type VerdictLevel = 'ok' | 'warn' | 'critical';
@@ -19,6 +20,27 @@ export interface Threshold {
   unit: 'seconds' | 'transactions' | 'bytes' | 'percent' | 'count';
   /** The sentence justifying this number. MUST NOT be empty. */
   because: string;
+  /**
+   * What the operator should DO once this threshold is crossed.
+   *
+   * Lives here rather than on `Verdict` because it completes the same
+   * thought: a threshold is a number, the reason that number matters, and
+   * the action it calls for. Splitting the action onto the verdict would
+   * separate it from the only value that decides whether it applies, and
+   * would have meant editing all nine `verdict()` functions to carry a
+   * constant they do not compute.
+   *
+   * `registry.ts` already states the rule this closes — "pgHero's capability
+   * is the probe plus the remedy" — but the package applied it to only one
+   * of the two paths. `CheckResult`'s `ok: false` branch carries a `remedy`
+   * for a check that BROKE (`CREATE EXTENSION pg_stat_statements`); nothing
+   * carried one for a check that WORKED and found a problem. So pgops could
+   * explain how to repair itself and not how to repair the database.
+   *
+   * Optional: a threshold whose crossing has no single safe action must not
+   * invent one. Silence is correct where advice would be a guess.
+   */
+  remedy?: string;
 }
 
 export type Requirement =
@@ -31,8 +53,40 @@ export interface SqlQuery { text: string; values?: unknown[] }
 export interface Check<Row, Data, Opts = void> {
   id: string;
   title: string;
-  /** `incident` renders on the triage page; `hygiene` renders on its own page and in doctor. */
-  class: 'incident' | 'hygiene';
+  /**
+   * Which gate of a request's life this check measures — see gates.ts, which
+   * is the console's organising model and the thing the triage page's bands
+   * are derived from.
+   *
+   * Required, and deliberately not optional. A check with no gate is a check
+   * with no home on any page, and the way that goes wrong is silent: it gets
+   * built, it runs, and it renders nowhere. Making the compiler ask the
+   * question is cheaper than a guard that notices later.
+   */
+  gate: Placement;
+  /**
+   * The RUN MODEL, and only that. Surface follows from it; it is not decided
+   * per check any more.
+   *
+   *   incident   — run live on every render; its page polls at 5s.
+   *   hygiene    — the scheduler runs it; pages read the cached result.
+   *   on-demand  — run only when the operator clicks through to it.
+   *
+   * `on-demand` exists so `index_bloat` — a multi-CTE estimate that pgHero
+   * itself keeps off the page you open by reflex — is a class member rather
+   * than an exception carved out in prose. See spec 2026-09-03 §2.
+   */
+  class: 'incident' | 'hygiene' | 'on-demand';
+  /**
+   * `statement_timeout` for this check's own query, in milliseconds.
+   *
+   * Per-check rather than a global constant, because an expensive check can
+   * afford more than a cheap one: 10s for hygiene, 30s for `index_bloat` on
+   * its own route where a wait is expected. Incident checks poll at 5s and
+   * set none — they must stay well inside the interval by construction, and
+   * a timeout would only convert one silent problem into another.
+   */
+  timeoutMs?: number;
   sql: string | ((opts: Opts) => SqlQuery);
   /** Pure. Row shape in, domain data out. */
   map: (rows: Row[]) => Data;
@@ -44,10 +98,41 @@ export interface Check<Row, Data, Opts = void> {
 
 export type FailureReason =
   | 'privilege' | 'missing-extension' | 'unsupported-version'
-  | 'unreachable' | 'error';
+  | 'unreachable' | 'error'
+  /**
+   * History was asked for and no store is configured.
+   *
+   * A distinct reason rather than `error` for the same purpose the others
+   * serve: `reason` is machine-readable so the surface renders the exact
+   * remedy, and the remedy here is one environment variable, not a GRANT or a
+   * CREATE EXTENSION. Reported as `error`, an unconfigured store would read
+   * to an operator as their database being unwell — the misattribution class
+   * run.ts's I1 and check.ts's M8/F4 docblocks were both written against.
+   */
+  | 'missing-store';
 
+/**
+ * `verdict: null` means the check does not judge — it reports a reading an
+ * operator looks at, and has no opinion to escalate.
+ *
+ * `runCheck` used to substitute `{level: 'ok'}` here, which made "we do not
+ * judge" indistinguishable from "we judged and it is fine". That is this
+ * project's own `ok:false`-vs-`ok:true` discipline, violated one level down.
+ * It was harmless while every check was `incident` and the overview ranked
+ * `ok` at 0; it stops being harmless in P2, where a per-area badge reads
+ * these verdicts and a substituted `ok` paints a green dot on an area
+ * nobody has an opinion about. See spec 2026-09-03 §1.1.
+ */
 export type CheckResult<D> =
-  | { ok: true; data: D; verdict: Verdict; measuredAt: number }
+  | {
+      ok: true; data: D; verdict: Verdict | null; measuredAt: number;
+      /**
+       * The threshold `verdict` crossed, when it crossed one — so a surface
+       * can show WHY the number matters and what to do, not just its colour.
+       * Absent for `ok` and for checks that do not judge. See run.ts.
+       */
+      crossed?: Threshold;
+    }
   | { ok: false; reason: FailureReason; message: string; remedy?: string };
 
 /**
@@ -63,3 +148,28 @@ export interface CheckContext {
   /** `server_version_num`, e.g. 170000. */
   serverVersion: number;
 }
+
+export interface TimeRange { from: Date; to: Date }
+
+/**
+ * A check answers "what is true now" and yields one verdict. A series answers
+ * "how has this moved" and yields many points with NO verdict at all. They
+ * share pools, requirements and the failure envelope, and share nothing else
+ * — siblings, not variants. See the parent spec §4.1.
+ *
+ * They live beside `Check` and `CheckResult` rather than in a `series/`
+ * module of their own for that reason: this file is the framework's shapes,
+ * `run.ts` is its runners, and everything under `checks/`, `actions/` and
+ * `series/` is an instance. A `series/types.ts` that also held `runSeries`
+ * broke that split in both directions at once.
+ */
+export interface Series<Point, Opts = void> {
+  id: string;
+  title: string;
+  read: (ctx: CheckContext, range: TimeRange, opts: Opts) => Promise<Point[]>;
+  requires?: Requirement[];
+}
+
+export type SeriesResult<P> =
+  | { ok: true; points: P[]; readAt: number }
+  | { ok: false; reason: FailureReason; message: string; remedy?: string };

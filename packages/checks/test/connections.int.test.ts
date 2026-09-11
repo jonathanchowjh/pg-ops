@@ -29,7 +29,8 @@ describe('connections', () => {
       const r = await runCheck(ctx, connections);
       if (!r.ok) throw new Error(r.message);
       // An idle test database has almost all of its pool free.
-      expect(r.verdict.level).toBe('ok');
+      // `connections` carries a verdict function, so this is never null in practice.
+      expect(r.verdict!.level).toBe('ok');
 
       // Drive the verdict directly at each documented boundary.
       const t = connections.thresholds!;

@@ -1,5 +1,8 @@
 import { connection } from 'next/server';
-import { runCheck, type Check, type CheckResult } from '@pgops/checks';
+import {
+  runCheck, runSeries,
+  type Check, type CheckResult, type Series, type SeriesResult, type TimeRange,
+} from '@pgops/checks';
 // Extensionless, not './pools.js': this file's tsconfig sets moduleResolution
 // "bundler" (Next requires it), under which Next's own webpack/Turbopack
 // resolvers do NOT map a literal ".js" specifier onto a sibling ".ts" file —
@@ -37,6 +40,29 @@ const NO_REQUEST_STORE = 'E251';
 
 export function isMissingRequestStore(err: unknown): boolean {
   return (err as { __NEXT_ERROR_CODE?: string } | null)?.__NEXT_ERROR_CODE === NO_REQUEST_STORE;
+}
+
+/**
+ * The two "this is the CONSOLE failing, not the database" messages, in one
+ * place because their WORDING is the whole point.
+ *
+ * Both fire on paths where no database was contacted, and both are rendered
+ * by the same panel that renders a genuinely sick database. `FailureReason`
+ * is packages/checks' vocabulary and has no member for "the web layer is
+ * misconfigured", so the distinction lives entirely in these strings: they
+ * name pgops, they say the database was not contacted, and the ConfigError
+ * one ends with the operator's own input (PGOPS_CONFIG_FILE and its path,
+ * PGOPS_DATABASES, DATABASE_URL). Reported as `reason: 'unreachable'` with a
+ * bare framework message, this told an on-call engineer their database was
+ * down when what was wrong was the deployment they had just changed.
+ *
+ * `runSeriesFor` duplicated both strings verbatim, minus the reasoning — two
+ * copies of a message whose exact wording carries the meaning will drift.
+ */
+function consoleFailure(kind: 'render' | 'config', detail: string): string {
+  return kind === 'render'
+    ? `pgops console error — the database was not contacted. Dynamic rendering could not be established: ${detail}`
+    : `pgops console misconfigured — the database was not contacted. ${detail}`;
 }
 
 /**
@@ -90,19 +116,9 @@ export async function runCheckFor<Row, Data, Opts>(
     if (!isMissingRequestStore(err)) {
       // M8: this path is the CONSOLE failing, not the database. It fires once
       // per check, so the triage page renders eight "Unavailable" panels at
-      // once — and `reason: 'error'` with a bare framework message reads,
-      // during an incident, as the database being down. `FailureReason` is
-      // packages/checks' vocabulary and there is no reason in it for "the web
-      // layer is misconfigured", so the distinction is carried in the message:
-      // it names pgops, and it says the database was never contacted. Same
-      // misattribution class as run.ts's own I1 docblock — a fault in the tool
-      // presented as a fault in the thing the tool is looking at.
+      // once. See `consoleFailure` for the wording and why it matters.
       const detail = err instanceof Error ? err.message : String(err);
-      return {
-        ok: false,
-        reason: 'error',
-        message: `pgops console error — the database was not contacted. Dynamic rendering could not be established: ${detail}`,
-      };
+      return { ok: false, reason: 'error', message: consoleFailure('render', detail) };
     }
     // No request store: not a real Next.js request (this file's own tests,
     // for instance). Nothing to opt into dynamic rendering for; proceed.
@@ -113,24 +129,59 @@ export async function runCheckFor<Row, Data, Opts>(
       ? await runCheck(ctx, check as Check<Row, Data, void>)
       : await runCheck(ctx, check, opts);
   } catch (err) {
-    // F4: same shape and same reasoning as the M8 branch above — a fault in
-    // the CONSOLE presented as a fault in the thing the console is looking at.
-    // `contextFor` reads configuration before it opens anything, so a
-    // `ConfigError` here means no database was ever contacted; reporting it as
-    // `reason: 'unreachable'` told an on-call engineer their database was down
-    // when what was actually wrong was the deployment they had just changed.
-    // `FailureReason` is packages/checks' vocabulary and has no member for
-    // "the web layer is misconfigured", so — exactly as M8 does — the
-    // distinction is carried in the message: it names pgops, it says nothing
-    // was contacted, and it ends with ConfigError's own text, which is the one
-    // place the operator's actual input (PGOPS_CONFIG_FILE and its path,
-    // PGOPS_DATABASES, DATABASE_URL) is named.
+    // F4: same shape and same reasoning as the M8 branch above. `contextFor`
+    // reads configuration before it opens anything, so a `ConfigError` here
+    // means no database was ever contacted.
     if (err instanceof ConfigError) {
-      return {
-        ok: false,
-        reason: 'error',
-        message: `pgops console misconfigured — the database was not contacted. ${err.message}`,
-      };
+      return { ok: false, reason: 'error', message: consoleFailure('config', err.message) };
+    }
+    return { ok: false, reason: 'unreachable', message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * The same seam, for a series.
+ *
+ * A series must go through `await connection()` for exactly the reason a
+ * check must: the store URL and the database list are read at run time from
+ * the process environment, and a route Next is free to prerender would freeze
+ * whatever the BUILD machine saw into HTML. Calling `contextFor` directly from
+ * a page — which is what this plan originally specified — reintroduces the
+ * defect the docblock above exists to prevent.
+ *
+ * Never rejects, for the same reason: a page renders a failed series; it must
+ * never render a stack trace.
+ */
+export async function runSeriesFor<P>(
+  name: string,
+  series: Series<P, void>,
+  range: TimeRange,
+): Promise<SeriesResult<P>>;
+export async function runSeriesFor<P, Opts>(
+  name: string,
+  series: Series<P, Opts>,
+  range: TimeRange,
+  opts: Opts,
+): Promise<SeriesResult<P>>;
+export async function runSeriesFor<P, Opts>(
+  name: string,
+  series: Series<P, Opts>,
+  range: TimeRange,
+  opts?: Opts,
+): Promise<SeriesResult<P>> {
+  try {
+    await connection();
+  } catch (err) {
+    if (!isMissingRequestStore(err)) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return { ok: false, reason: 'error', message: consoleFailure('render', detail) };
+    }
+  }
+  try {
+    return await runSeries(await contextFor(name), series, range, opts as Opts);
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      return { ok: false, reason: 'error', message: consoleFailure('config', err.message) };
     }
     return { ok: false, reason: 'unreachable', message: err instanceof Error ? err.message : String(err) };
   }

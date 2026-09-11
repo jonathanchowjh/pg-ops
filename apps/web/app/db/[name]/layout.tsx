@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react';
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { connection } from 'next/server';
 import { databaseNames } from '@/lib/pools';
 import { ConfigError } from '@/lib/config';
 import { ConfigErrorPage } from '@/components/config-error';
 import { Nav } from '@/components/nav';
-import { Refresh } from '@/components/refresh';
 import { StatusBar } from '@/components/status-bar';
 import { runCheckFor } from '@/lib/check';
 import { CHECKS } from '@pgops/checks';
@@ -47,17 +47,31 @@ export default async function DbLayout({
   // panel below.
   const who = await runCheckFor(name, CHECKS.identity);
 
+  // Capped, not fixed. At `max-w-5xl` this shell was 1024px on every
+  // monitor — 40% of a 2560px screen — while the queries table it contains
+  // has five columns and a SQL column, so the width the console refused to
+  // use was exactly the width its widest content needed. The cap stays
+  // because an uncapped console puts 2500px lines of prose on an ultrawide,
+  // which is its own kind of unreadable; it just sits far enough out that an
+  // ordinary 1440 or 1920 display fills it.
   return (
-    <main className="mx-auto max-w-5xl p-6">
-      <header className="mb-2 flex items-baseline justify-between gap-4">
-        <div>
-          {/* The operator's label, then what the server itself answers. The
-              order is deliberate: the label is what they navigated by, the
-              line under it is what that label turned out to mean. */}
-          <h1 className="text-xl font-semibold">{name}</h1>
-          <StatusBar result={who} />
-        </div>
-        <Refresh intervalMs={5_000} />
+    <main className="mx-auto w-full max-w-[100rem] p-6">
+      <header className="mb-2">
+        {/* The way back. Every /db/* page was a one-way trip — comparing two
+            databases during an incident meant the browser's back button or
+            editing the URL, on the console whose front door exists precisely
+            to be returned to. */}
+        <Link
+          href="/"
+          className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          ← All databases
+        </Link>
+        {/* The operator's label, then what the server itself answers. The
+            order is deliberate: the label is what they navigated by, the
+            line under it is what that label turned out to mean. */}
+        <h1 className="mt-1 text-xl font-semibold">{name}</h1>
+        <StatusBar result={who} />
       </header>
       <Nav name={name} />
       {children}

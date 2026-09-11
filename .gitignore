@@ -10,3 +10,6 @@ coverage/
 # Next.js build output and its generated ambient-types file (apps/web).
 .next/
 next-env.d.ts
+# Playwright MCP scratch output (page snapshots, console logs) written into
+# whatever directory the browser tooling is driven from.
+.playwright-mcp/

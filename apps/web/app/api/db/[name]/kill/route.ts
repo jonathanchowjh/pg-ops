@@ -58,8 +58,20 @@ export async function POST(
   // Spec §7.1: "A deployment that never sets PGOPS_ALLOW_ACTIONS cannot reach
   // tiers 1-3 at all — the routes do not exist." 404, not 403: a 403
   // advertises a kill endpoint that is merely switched off. Checked before
-  // the body is read and before the database is resolved, so a disallowed
-  // deployment is indistinguishable from one built without this file.
+  // the body is read and before the database is resolved.
+  //
+  // This check is no longer the one that makes a flagless deployment
+  // INDISTINGUISHABLE from a build without this file, and an earlier version
+  // of this comment claimed it was. It cannot be: only POST is exported, so
+  // Next's app-route dispatch answered every other method 405 before this
+  // line ran — and 405-where-a-missing-route-answers-404 is exactly the
+  // disclosure the 404 exists to prevent. `proxy.ts` now gates the path above
+  // method dispatch, which is what actually holds the property
+  // (actions.int.test.ts, "indistinguishable from a build without the file").
+  //
+  // This copy STAYS. It is what keeps the route correct if that matcher is
+  // ever narrowed, and a handler in front of pg_terminate_backend should not
+  // be reachable-by-configuration. Neither check is redundant with the other.
   if (!actionsAllowed(process.env)) return missing();
 
   warnIfActionsAreUnauthenticated(process.env);
@@ -104,14 +116,23 @@ export async function POST(
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
     return bad('pid must be a positive integer.');
   }
-  if (backendStart !== null && typeof backendStart !== 'string') {
-    return bad('backendStart must be the session identity string, or null.');
-  }
   // The only free-text field in the audit record, and the only thing that
   // distinguishes a deliberate kill from an accident when someone reads the
   // log six months from now. Required, and required to be more than spaces.
+  //
+  // Checked BEFORE backendStart, which is optional: a body missing both used
+  // to be told only about backendStart, so a caller fixed that, retried, and
+  // was rejected a second time for the field that actually mattered.
   if (typeof reason !== 'string' || reason.trim() === '') {
     return bad('reason is required.');
+  }
+  // Absent means null — "I captured no identity, kill on pid alone" — which
+  // is what every caller that omitted the field already meant. The old check
+  // was `backendStart !== null && typeof backendStart !== 'string'`, and
+  // `undefined` fails both halves, so omitting it was rejected by a message
+  // that explicitly offers null as a legal value.
+  if (backendStart !== undefined && backendStart !== null && typeof backendStart !== 'string') {
+    return bad('backendStart must be the session identity string, or null.');
   }
 
   let ctx;

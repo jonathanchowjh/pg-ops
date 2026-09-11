@@ -137,6 +137,7 @@ export interface SessionsData {
 
 export const sessions: Check<SessionRow, SessionsData, SessionOpts> = {
   id: 'sessions',
+  gate: 'connect',
   title: 'Sessions',
   class: 'incident',
   sql: SQL,
@@ -244,6 +245,7 @@ GROUP BY state ORDER BY sessions DESC`;
 
 export const sessionStates: Check<StateRow, StatesData> = {
   id: 'sessionStates',
+  gate: 'connect',
   title: 'Session states',
   class: 'incident',
   sql: STATES_SQL,
@@ -263,10 +265,15 @@ export const sessionStates: Check<StateRow, StatesData> = {
   thresholds: [
     { level: 'warn', value: 60, unit: 'seconds',
       because: 'a transaction idle for a minute is holding row locks and pinning the '
-             + 'xmin horizon for no reason; almost always an application bug' },
+             + 'xmin horizon for no reason; almost always an application bug',
+      remedy: 'Find the application holding it open — Sessions shows its application_name '
+            + '— and fix the path that does work between BEGIN and COMMIT.' },
     { level: 'critical', value: 300, unit: 'seconds',
       because: 'five minutes of idle-in-transaction blocks autovacuum from reclaiming '
-             + 'anything newer, so bloat starts accumulating on top of the locking' },
+             + 'anything newer, so bloat starts accumulating on top of the locking',
+      remedy: 'Terminate it: at this age it blocks autovacuum as well as holding locks. '
+            + 'Set idle_in_transaction_session_timeout on that role so Postgres does '
+            + 'this without you.' },
   ],
   /**
    * Neither lookup uses a non-null assertion — same reasoning as

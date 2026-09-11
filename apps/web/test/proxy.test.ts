@@ -9,6 +9,10 @@ function request(headers: Record<string, string>): NextRequest {
   return new NextRequest('http://localhost/', { headers });
 }
 
+function req(method: string, path: string): NextRequest {
+  return new NextRequest(`http://localhost${path}`, { method });
+}
+
 /**
  * `NextResponse.next({ request: { headers } })` does not literally hand a
  * rewritten Request to anything this test can see — Next's own source
@@ -82,5 +86,51 @@ describe('proxy', () => {
     // `handleMiddlewareField` at all — there is no forwarded request for
     // ANY header to ride along on, not just this one.
     expect(res.headers.get('x-middleware-override-headers')).toBeNull();
+  });
+
+  /**
+   * The kill route is POST-only, so Next's own app-route dispatch answers
+   * every other method with 405 BEFORE the handler — and therefore before
+   * `actionsAllowed` — ever runs. A 405 is a disclosure: a build without the
+   * file answers 404, so `GET /api/db/<name>/kill` was a reliable oracle
+   * that a console had the kill endpoint compiled in, no matter how firmly
+   * PGOPS_ALLOW_ACTIONS was left unset.
+   *
+   * Both README.md and the route's own comment claimed a flagless
+   * deployment was "indistinguishable from a build without this file". This
+   * is the test that makes the claim true instead of merely written down.
+   * The gate has to live here, above Next's method matching; the route keeps
+   * its own copy so the property does not rest on this matcher alone.
+   */
+  describe('the kill route with actions disabled', () => {
+    const KILL = '/api/db/default/kill';
+
+    afterEach(() => { delete process.env.PGOPS_ALLOW_ACTIONS; });
+
+    for (const method of ['GET', 'POST', 'HEAD', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      it(`answers ${method} with a bare 404, never a 405`, () => {
+        const res = proxy(req(method, KILL));
+
+        expect(res.status).toBe(404);
+        // Not `NextResponse.next(...)`: nothing downstream may run, so there
+        // is no forwarded request for the route handler to be reached by.
+        expect(res.headers.get('x-middleware-override-headers')).toBeNull();
+      });
+    }
+
+    it('lets the request through to the route once actions are enabled', () => {
+      process.env.PGOPS_ALLOW_ACTIONS = 'true';
+
+      const res = proxy(req('POST', KILL));
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-middleware-override-headers')).not.toBeNull();
+    });
+
+    it('gates on the kill path only, leaving ordinary pages alone', () => {
+      const res = proxy(req('GET', '/db/default/sessions'));
+
+      expect(res.status).toBe(200);
+    });
   });
 });

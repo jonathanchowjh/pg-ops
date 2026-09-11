@@ -12,7 +12,8 @@ describe('blocked', () => {
       if (!r.ok) throw new Error(r.message);
       expect(r.data.count).toBe(0);
       expect(r.data.longestQueryAgeSecs).toBeNull();
-      expect(r.verdict.level).toBe('ok');
+      // `blocked` carries a verdict function, so this is never null in practice.
+      expect(r.verdict!.level).toBe('ok');
     });
   }, 120_000);
 
@@ -80,7 +81,8 @@ describe('blocked', () => {
         expect(found, 'blocked should eventually report this fixture as the longest-blocked session').toBeDefined();
         expect(found!.data.count).toBeGreaterThan(0);
         expect(found!.data.suspectPid).toBe(holderPid);
-        expect(found!.verdict.level).not.toBe('ok');
+        // `blocked` carries a verdict function, so this is never null in practice.
+        expect(found!.verdict!.level).not.toBe('ok');
       } finally {
         await Promise.all(clients.map((c) => c.end().catch(() => {})));
       }

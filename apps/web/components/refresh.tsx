@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useTransition } from 'react';
+import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 
 export interface TickState {
@@ -95,6 +95,21 @@ export function tick(
   return { state: onTick(before, now), act: nextTick(before, now).act };
 }
 
+/**
+ * The freshness readout, the poll, and the one control that lets an operator
+ * ask for data NOW.
+ *
+ * That control is not a nicety. `onSettle`'s re-arm exists, in its own words,
+ * "so the refresh fired after an action cannot be swallowed by one that
+ * started before it" — an action being a terminate. But `requested` could
+ * only ever be set by a TIMER tick colliding with a flight: there was no
+ * operator-facing control anywhere in the console that could request a
+ * refresh, so the branch that property 3 is about was unreachable by the
+ * person it was written for. The button below is that missing caller, and it
+ * goes through the same `tick` the interval does rather than calling
+ * `router.refresh()` directly — routing it around the state machine is what
+ * would let a manual press add the concurrent load property 1 forbids.
+ */
 export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
   const router = useRouter();
   // `isPending` IS the completion signal. It goes true when the transition
@@ -109,21 +124,40 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
   // the value `isPending` had on the render that started it.
   const pending = useRef(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
+  // The displayed age has to advance on its own. It was computed as
+  // `Date.now() - startedAt` during render, and this component only renders
+  // when a refresh starts or settles — so between polls the number was
+  // frozen, and it read "updated 0s ago" almost permanently. The one moment
+  // the readout genuinely matters is when the poll has STALLED, and a frozen
+  // clock is precisely the display that cannot show that.
+  const [now, setNow] = useState(() => Date.now());
+
+  // Deliberately separate from the poll interval and deliberately not derived
+  // from it: this drives the clock, not the fetch. Ticking the display at 1s
+  // while polling at 5s is what makes a stalled poll visible as a number that
+  // keeps climbing past the interval.
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // One transition, whether it came from the interval or from the operator.
+  // Both go through `tick`, so both obey property 1 (skip, never queue) and
+  // both record property 3's re-arm on a collision.
+  const request = useCallback(() => {
+    const t = tick(state.current, Date.now(), pending.current);
+    state.current = t.state;
+    if (t.act === 'skip') return;
+
+    setStartedAt(t.state.startedAt);
+    setNow(Date.now());
+    startTransition(() => { router.refresh(); });
+  }, [router]);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      // Every transition goes through the pure functions above, so the
-      // properties they are tested for are the properties this actually has.
-      // The earlier version inlined them here, where nothing could test them.
-      const t = tick(state.current, Date.now(), pending.current);
-      state.current = t.state;
-      if (t.act === 'skip') return;
-
-      setStartedAt(t.state.startedAt);
-      startTransition(() => { router.refresh(); });
-    }, intervalMs);
+    const id = setInterval(request, intervalMs);
     return () => clearInterval(id);
-  }, [intervalMs, router]);
+  }, [intervalMs, request]);
 
   // The falling edge of `isPending` is the flight settling, which is where
   // property 3's re-arm belongs: a tick skipped during the flight fires
@@ -137,12 +171,37 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
     state.current = settled.state;
     if (settled.act !== 'refresh') return;
     setStartedAt(Date.now());
+    setNow(Date.now());
     startTransition(() => { router.refresh(); });
   }, [isPending, router]);
 
+  // Age is measured from request START, not arrival (property 2), so it keeps
+  // climbing during a flight — which is true: the data on screen really is
+  // that old until the new render commits.
+  const age = startedAt === null ? null : Math.max(0, Math.round((now - startedAt) / 1000));
+
   return (
-    <span className="text-sm text-muted-foreground" suppressHydrationWarning>
-      {startedAt === null ? 'live' : `updated ${Math.round((Date.now() - startedAt) / 1000)}s ago`}
+    <span className="flex items-center gap-3 text-sm text-muted-foreground">
+      <span suppressHydrationWarning>
+        {isPending
+          ? 'refreshing…'
+          : age === null
+            // Before the first tick there is no age to state. "live" is a
+            // claim about the poll being armed, which is all that is true yet.
+            ? 'live'
+            : `updated ${age}s ago`}
+      </span>
+      <button
+        type="button"
+        onClick={request}
+        // NOT disabled while pending. A press during a flight is exactly the
+        // case property 3 handles — it re-arms one follow-up rather than
+        // being dropped — and disabling the control would delete the only
+        // path that reaches it.
+        className="rounded border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+      >
+        Refresh
+      </button>
     </span>
   );
 }

@@ -85,6 +85,7 @@ const SQL = (o: LongRunningOpts) => ({
 
 export const longRunning: Check<LongRunningRow, LongRunningData, LongRunningOpts> = {
   id: 'longRunning',
+  gate: 'work',
   title: 'Long-running queries',
   class: 'incident',
   sql: SQL,
@@ -108,10 +109,16 @@ export const longRunning: Check<LongRunningRow, LongRunningData, LongRunningOpts
   thresholds: [
     { level: 'warn', value: 60, unit: 'seconds',
       because: 'pgHero #9 uses 60s as the definition of long-running; matching it keeps '
-             + 'the two tools comparable on the same database' },
+             + 'the two tools comparable on the same database',
+      remedy: 'Check whether this query is normally slow or newly slow — Queries carries '
+            + "its history. A statement_timeout on the role bounds the unbounded case." },
     { level: 'critical', value: 300, unit: 'seconds',
       because: 'five minutes exceeds almost every application and proxy timeout, so the '
-             + 'client is gone and the work is being redone elsewhere' },
+             + 'client is gone and the work is being redone elsewhere',
+      remedy: 'The client has almost certainly timed out and retried, so terminating this '
+            + 'backend usually frees work nobody is waiting for. Confirm it is not '
+            + 'maintenance — a vacuum, or a concurrent index build — first; those '
+            + 'look identical here and must not be killed.' },
   ],
   /**
    * Neither lookup uses a non-null assertion — same reasoning as

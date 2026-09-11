@@ -8,6 +8,25 @@
 
 import { readFileSync } from 'node:fs';
 
+/**
+ * What pgops calls itself in `pg_stat_activity.application_name`.
+ *
+ * Lives in config.ts, which imports nothing local, because both sides of the
+ * name need it and they already form a cycle: pools.ts imports `storePool`
+ * from store.ts, so store.ts importing back from pools.ts made
+ * `pools -> store -> pools`. Under ESM that is not a warning — a `const` in a
+ * cycle is in its temporal dead zone while the other module initialises, so
+ * whichever side loaded second would read APP_NAME as undefined and name its
+ * connections "undefined-store", at runtime, only in whichever import order
+ * the bundler happened to pick.
+ *
+ * One definition, deliberately: the pool that SETS this string and the view
+ * that HIDES it must agree, and two copies of a literal is exactly how that
+ * stops being true.
+ */
+export const APP_NAME = 'pgops';
+
+
 export class ConfigError extends Error {
   constructor(message: string) {
     super(message);

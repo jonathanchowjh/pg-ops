@@ -278,6 +278,7 @@ const SQL = (o: QueryStatsOpts) => ({
 
 export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
   id: 'queryStats',
+  gate: 'work',
   title: 'Query statistics',
   class: 'incident',
   sql: SQL,
@@ -291,9 +292,13 @@ export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
     // comment above `SQL` for why). `rows[0]` with a `?? 0` / `?? null`
     // fallback matches sessions.ts's and long-running.ts's own convention
     // for "possibly no rows at all". With zero rows there is no
-    // `requested_sort` to read back either; `'total'` is an arbitrary but
-    // harmless default in that case — an empty list has nothing under the
-    // header for a wrong label to contradict.
+    // `requested_sort` to read back either; `'total'` is an arbitrary
+    // fallback in that case, and it IS operator-visible on `sort` — this
+    // check cannot make it harmless by itself. It stays unobserved only
+    // because the one caller today (apps/web's queries page) suppresses its
+    // "sorted by …" label on an empty list, since nothing was actually
+    // ordered. A future caller that renders `sort` unconditionally would
+    // need the same care.
     const requested = rows[0]?.requested_sort ?? 'total';
     return {
       totalShapes: rows[0]?.total_shapes ?? 0,
@@ -349,3 +354,53 @@ export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
  * `QuerySort` to `string`, and do not add a fifth key without adding its
  * `ORDER` entry in the same change.
  */
+
+export interface SlowQueryOpts {
+  minCalls?: number;
+  minMeanMs?: number;
+}
+
+/**
+ * pgHero's defaults (lib/pghero.rb:44-45), adopted rather than re-derived —
+ * the same provenance rule the hygiene thresholds follow in the P2 spec §2.1.
+ */
+export const SLOW_QUERY_DEFAULTS = { minCalls: 100, minMeanMs: 20 } as const;
+
+/**
+ * pgHero's #17, which is a FILTER over query_stats, not a query of its own
+ * (`query_stats.select { |q| q[:calls] >= slow_query_calls && q[:average_time]
+ * >= slow_query_ms }`). Implemented the same way: a second
+ * pg_stat_statements scan to re-derive rows the caller already has would cost
+ * a round trip and give a second, inconsistent snapshot.
+ *
+ * Both bounds must hold. Either alone is a bad filter: a query called twice
+ * that takes a second is a one-off, and a query called a million times at 1ms
+ * is the database doing its job.
+ *
+ * Inherits `queryStats`'s LIMIT, exactly as pgHero's inherits its
+ * `query_stats(**options)` limit — a slow shape outside the top N by the
+ * caller's sort is not surfaced, and no single sort fixes that: this filter
+ * is a CONJUNCTION over two axes (`calls >= minCalls AND meanMs >=
+ * minMeanMs`), and a top-N window ordered by either axis alone is blind to
+ * the other — sorting by `mean` fills the window with one-off expensive
+ * statements that never reach `minCalls`, sorting by `calls` fills it with
+ * high-volume statements too cheap to reach `minMeanMs`. No ordering makes
+ * this list definitive; only disclosing the truncation (see the doc comment
+ * on the caller side, apps/web's queries page) does.
+ *
+ * Takes only the one field it reads, not the full `QueryStatsData` — a
+ * caller that already extracted `{ rows }` (or a test fixture that never
+ * populates `totalShapes`/`sort`/`statsResetAt`, all irrelevant to a filter)
+ * satisfies this without fabricating the rest of the shape. A caller that
+ * needs to disclose truncation (comparing `rows.length` against
+ * `totalShapes`, as the queries page does) reads `totalShapes` itself from
+ * its own `QueryStatsData` — `slowQueries` has no reason to pass it through.
+ */
+export function slowQueries(
+  data: Pick<QueryStatsData, 'rows'>,
+  opts: SlowQueryOpts = {},
+): QueryStatRowData[] {
+  const minCalls = opts.minCalls ?? SLOW_QUERY_DEFAULTS.minCalls;
+  const minMeanMs = opts.minMeanMs ?? SLOW_QUERY_DEFAULTS.minMeanMs;
+  return data.rows.filter((r) => r.calls >= minCalls && r.meanMs >= minMeanMs);
+}

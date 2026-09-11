@@ -60,6 +60,36 @@ describe('the kill route', () => {
     });
   });
 
+  /**
+   * The half the POST-only test above could not see. `route.ts` exports only
+   * POST, so Next's app-route dispatch answered every OTHER method 405 before
+   * the handler — and therefore before `actionsAllowed` — ever ran. A build
+   * without the file answers 404, so `GET /api/db/<name>/kill -> 405` was a
+   * reliable oracle that a console had the kill endpoint compiled in, however
+   * firmly the flag was left unset. That is precisely the disclosure the 404
+   * exists to prevent, and both README.md and route.ts asserted it did not
+   * happen.
+   *
+   * Asserted against a real server rather than against `proxy()` directly:
+   * the unit test in proxy.test.ts pins the decision, but the property being
+   * claimed is about Next's DISPATCH, so only a booted console can show the
+   * 405 is gone. Compared byte-for-byte against a path with no route at all,
+   * because "indistinguishable" is the actual claim — not merely "also 404".
+   */
+  it('is indistinguishable from a build without the file, on every method', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      const methods = ['GET', 'POST', 'HEAD', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+
+      const control = await fetch(`${baseUrl}/api/db/primary/no-such-route`);
+      expect(control.status).toBe(404);
+
+      for (const method of methods) {
+        const res = await fetch(`${baseUrl}/api/db/primary/kill`, { method });
+        expect(res.status, `${method} leaked the route`).toBe(control.status);
+      }
+    });
+  });
+
   it('terminates a real backend, refuses a stale identity, and reports a dead pid', async () => {
     await withConsole(async ({ baseUrl, url }) => {
       // A real, idle client backend to kill.
@@ -152,6 +182,38 @@ describe('the kill route', () => {
     await withConsole(async ({ baseUrl }) => {
       const res = await kill(baseUrl, { pid: 1, backendStart: null, reason: '   ' });
       expect(res.status).toBe(400);
+    }, ALLOWED);
+  });
+
+  /**
+   * `backendStart` is the PID-reuse guard's input, and `null` is a MEANINGFUL
+   * value there: it says "I did not capture an identity, kill on pid alone".
+   * An ABSENT field meant the same thing to every caller that wrote one, but
+   * the check was `backendStart !== null && typeof backendStart !== 'string'`,
+   * and `undefined` fails both halves — so omitting the field was rejected
+   * with a message that explicitly offers null as a legal value.
+   */
+  it('treats an absent backendStart as null rather than rejecting it', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      const res = await kill(baseUrl, { pid: 999_999, reason: 'absent backendStart' });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ outcome: 'gone' });
+    }, ALLOWED);
+  });
+
+  /**
+   * Ordering, not just acceptance. `reason` is the only field a human writes
+   * and the only one that makes an audit record mean anything six months on,
+   * so a body missing both must name it — a caller told only about
+   * `backendStart` fixes that, retries, and is rejected a second time.
+   */
+  it('names the missing reason first when a body is missing both fields', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      const res = await kill(baseUrl, { pid: 1 });
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/reason/i);
     }, ALLOWED);
   });
 

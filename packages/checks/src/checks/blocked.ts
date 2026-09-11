@@ -83,6 +83,7 @@ FROM act WHERE cardinality(blockers) > 0`;
 
 export const blocked: Check<BlockedRow, BlockedData> = {
   id: 'blocked',
+  gate: 'wait',
   title: 'Blocked sessions',
   class: 'incident',
   sql: SQL,
@@ -99,7 +100,9 @@ export const blocked: Check<BlockedRow, BlockedData> = {
   },
   thresholds: [
     { level: 'warn', value: 1, unit: 'count',
-      because: 'any blocked session is a query not completing' },
+      because: 'any blocked session is a query not completing',
+      remedy: 'Open the wait graph. The session to act on is the ROOT of the chain, which '
+            + 'is often idle in transaction rather than the one running a slow query.' },
     {
       level: 'critical', value: 60, unit: 'seconds',
       // A8: worded around what `longestQueryAgeSecs` actually measures — the
@@ -111,6 +114,14 @@ export const blocked: Check<BlockedRow, BlockedData> = {
       because: 'past a minute of query age, most client and proxy timeouts have already '
              + 'fired for that session, so it is likely being retried elsewhere while '
              + 'still shown here as blocked, and the queue grows faster than it drains',
+      // Deliberately NOT "terminate the root blocker" — that is the locks
+      // check's remedy, and on the triage page these two panels sit one above
+      // the other. Rendered as written, the console gave the same instruction
+      // twice in eight lines. This one owns the half locks does not: why
+      // waiting it out is the wrong call.
+      remedy: 'Treat this as an outage in progress rather than something that will clear: '
+            + 'the waiters are already timing out and retrying, which adds load to the '
+            + 'queue behind them. The wait graph names the session to break it at.',
     },
   ],
   /**

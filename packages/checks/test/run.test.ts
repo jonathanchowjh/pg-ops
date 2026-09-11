@@ -11,7 +11,7 @@ function fakeCtx(impl: () => Promise<{ rows: unknown[] }>): CheckContext {
 }
 
 const doubler: Check<{ n: string }, number> = {
-  id: 'doubler',
+  id: 'doubler', gate: 'work',
   title: 'Doubler',
   class: 'incident',
   sql: 'SELECT 1 AS n',
@@ -148,5 +148,159 @@ describe('runCheck’s arity is part of its type (I1)', () => {
       await runCheck(ctx, blocked);
     };
     expect(typeof neverCalled).toBe('function');
+  });
+});
+
+/**
+ * `queryWithTimeout` (internal to run.ts, exercised here only through
+ * `runCheck` + `timeoutMs`) must destroy a pooled connection rather than
+ * return it to the pool as healthy when ROLLBACK itself fails after the
+ * check's own query already failed — otherwise the next check to draw that
+ * connection gets "current transaction is aborted, commands ignored until
+ * end of transaction block", the exact poisoned-pooled-connection failure
+ * this function exists to prevent.
+ *
+ * A real `pg_terminate_backend`-against-a-live-connection integration test
+ * (timeout.int.test.ts) cannot pin this specifically: once a connection's
+ * socket actually dies, node-postgres's own Client sets `_queryable =
+ * false`, and pg-pool's `_release` checks that flag independently of
+ * whatever argument our code passes to `release()` — so a real dead socket
+ * gets evicted from the pool either way, fixed code or not. A fake client
+ * whose `ROLLBACK` rejects while everything else about it looks healthy is
+ * what isolates the one thing this fix actually controls: the argument
+ * `release()` is called with.
+ */
+describe('queryWithTimeout: pool hygiene when ROLLBACK itself fails', () => {
+  const timedCheck: Check<{ n: string }, number> = { ...doubler, timeoutMs: 100 };
+
+  it('passes the rollback error to release(), so pg-pool destroys the connection', async () => {
+    const releaseCalls: unknown[] = [];
+    const fakeClient = {
+      query: async (text: string) => {
+        if (text === 'ROLLBACK') throw new Error('connection lost');
+        if (text === 'BEGIN' || text.startsWith('SET LOCAL')) return { rows: [] };
+        throw new Error('query failed');
+      },
+      on: () => {},
+      removeListener: () => {},
+      release: (err?: unknown) => releaseCalls.push(err),
+    };
+    const ctx: CheckContext = { target: { connect: async () => fakeClient } as never, serverVersion: 170000 };
+
+    const r = await runCheck(ctx, timedCheck);
+
+    // The check's own query error is what the operator sees — a rollback
+    // failure on top of it must never replace or hide that message.
+    expect(r).toMatchObject({ ok: false, reason: 'error', message: 'query failed' });
+    expect(releaseCalls).toHaveLength(1);
+    expect(releaseCalls[0]).toBeInstanceOf(Error);
+    expect((releaseCalls[0] as Error).message).toBe('connection lost');
+  });
+
+  it('releases with no argument when ROLLBACK succeeds — the ordinary case stays a plain, reusable release', async () => {
+    const releaseCalls: unknown[] = [];
+    const fakeClient = {
+      query: async (text: string) => {
+        if (text === 'ROLLBACK') return { rows: [] };
+        if (text === 'BEGIN' || text.startsWith('SET LOCAL')) return { rows: [] };
+        throw new Error('query failed');
+      },
+      on: () => {},
+      removeListener: () => {},
+      release: (err?: unknown) => releaseCalls.push(err),
+    };
+    const ctx: CheckContext = { target: { connect: async () => fakeClient } as never, serverVersion: 170000 };
+
+    const r = await runCheck(ctx, timedCheck);
+
+    expect(r).toMatchObject({ ok: false, reason: 'error', message: 'query failed' });
+    expect(releaseCalls).toEqual([undefined]);
+  });
+});
+
+/**
+ * `crossed` — the threshold a verdict actually crossed, resolved once here so
+ * every surface can explain itself without asking.
+ *
+ * `Threshold.because` is required and non-empty by contract, and reached no
+ * pixel of the console: the UI showed a red badge and a number and never said
+ * why the number was bad. Resolving it at each of the nine call sites that
+ * render a panel would have made "forgot to explain this one" a thing a page
+ * written later could do.
+ */
+describe('runCheck resolves the threshold a verdict crossed', () => {
+  const graded: Check<{ n: string }, number> = {
+    id: 'graded', gate: 'work',
+    title: 'Graded',
+    class: 'incident',
+    sql: 'SELECT 1 AS n',
+    map: (rows) => Number(rows[0]?.n ?? 0),
+    thresholds: [
+      { level: 'warn', value: 10, unit: 'count', because: 'ten is worth a look', remedy: 'Look at it.' },
+      { level: 'critical', value: 20, unit: 'count', because: 'twenty is an incident' },
+    ],
+    verdict: (d) => ({ level: d >= 20 ? 'critical' : d >= 10 ? 'warn' : 'ok' }),
+  };
+
+  const run = (n: string) => runCheck(fakeCtx(async () => ({ rows: [{ n }] })), graded);
+
+  it('hands back the threshold matching the verdict level, with its remedy', async () => {
+    const r = await run('12');
+    expect(r).toMatchObject({ ok: true, crossed: { because: 'ten is worth a look', remedy: 'Look at it.' } });
+  });
+
+  it('picks the critical threshold, not merely the first one that exists', async () => {
+    const r = await run('25');
+    if (!r.ok) throw new Error('expected ok');
+    // The bug this pins: `thresholds[0]` would pass the warn case above and
+    // then explain a CRITICAL connection pool with the warn sentence — the
+    // more alarming badge next to the calmer reason.
+    expect(r.crossed?.because).toBe('twenty is an incident');
+  });
+
+  /**
+   * `ok` crossed nothing, so there is nothing to explain. Resolving a
+   * threshold here would attach a critical rationale to a healthy reading —
+   * the same "we looked and it is fine" over-claim as substituting an `ok`
+   * verdict for a check that has no opinion.
+   */
+  it('resolves nothing for a healthy reading', async () => {
+    const r = await run('3');
+    if (!r.ok) throw new Error('expected ok');
+    // Asserted directly, not via toMatchObject: an expected `undefined` there
+    // is satisfied by an absent key AND by a present one, so the version of
+    // this test written that way survived a mutation that resolved the WARN
+    // threshold for a healthy reading — it would have explained a green
+    // panel with the sentence justifying an escalation.
+    expect(r.crossed).toBeUndefined();
+  });
+
+  it('resolves nothing for a check that does not judge', async () => {
+    const r = await runCheck(fakeCtx(async () => ({ rows: [{ n: '99' }] })), doubler);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.verdict).toBeNull();
+    expect(r.crossed).toBeUndefined();
+  });
+});
+
+/**
+ * Every threshold that escalates should be able to say what to do about it.
+ *
+ * Not a style rule: `because` is enforced non-empty for the same reason, and
+ * the pair is what turns a red badge into something an operator woken at 3am
+ * can act on. A new check landing without one is the failure mode this
+ * catches — the sentence is easy to leave for later and later never comes.
+ */
+describe('every shipped threshold carries advice', () => {
+  it('has a non-empty because and remedy on every threshold in CHECKS', async () => {
+    const { CHECKS } = await import('../src/registry.js');
+    const missing: string[] = [];
+    for (const [id, check] of Object.entries(CHECKS)) {
+      for (const t of check.thresholds ?? []) {
+        if (!t.because?.trim()) missing.push(`${id}/${t.level}: because`);
+        if (!t.remedy?.trim()) missing.push(`${id}/${t.level}: remedy`);
+      }
+    }
+    expect(missing).toEqual([]);
   });
 });

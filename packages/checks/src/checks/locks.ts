@@ -326,6 +326,7 @@ export function countDistinctWaiters(roots: RootBlocker[]): number {
 
 export const locks: Check<LockRow, LocksData> = {
   id: 'locks',
+  gate: 'wait',
   title: 'Lock wait graph',
   class: 'incident',
   sql: SQL,
@@ -349,10 +350,14 @@ export const locks: Check<LockRow, LocksData> = {
   thresholds: [
     { level: 'warn', value: 1, unit: 'count',
       because: 'any session waiting on a lock is a query not completing; it is worth '
-             + 'seeing even when brief' },
+             + 'seeing even when brief',
+      remedy: 'Open the wait graph and identify the root blocker before the chain grows. '
+            + 'A chain is cheapest to break at the top.' },
     { level: 'critical', value: 60, unit: 'seconds',
       because: 'a minute of blocking outlives most application timeouts, so the waiters '
-             + 'are already being retried and the pile-up is compounding' },
+             + 'are already being retried and the pile-up is compounding',
+      remedy: 'Terminate the ROOT blocker, not a waiter. Killing a waiter frees nothing '
+            + 'and the next one takes its place immediately.' },
   ],
   /**
    * Neither lookup uses a non-null assertion (see connections.ts's own

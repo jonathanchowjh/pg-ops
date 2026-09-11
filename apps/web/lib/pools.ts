@@ -1,7 +1,8 @@
 import { Pool } from 'pg';
 import type { CheckContext } from '@pgops/checks';
 // Extensionless — see the comment on the equivalent import in lib/check.ts.
-import { readDatabases, type DatabaseConfig } from './config';
+import { APP_NAME, readDatabases, type DatabaseConfig } from './config';
+import { storePool } from './store';
 
 export class UnknownDatabaseError extends Error {
   constructor(name: string, known: string[]) {
@@ -23,6 +24,7 @@ export class UnknownDatabaseError extends Error {
 const POOLS = new Map<string, Pool>();
 const VERSIONS = new Map<string, number>();
 
+
 function configured(): DatabaseConfig[] {
   return readDatabases(process.env);
 }
@@ -36,6 +38,23 @@ function poolFor(db: DatabaseConfig): Pool {
   if (existing) return existing;
   const pool = new Pool({
     connectionString: db.url,
+    // So pgops can recognise its own backends, which it could not do at all.
+    //
+    // Without this, every pool opened here reported an EMPTY application_name,
+    // and the Sessions page showed pgops's own ~19 idle connections
+    // interleaved with the application's — each with its own Terminate link,
+    // offering to kill the console. Three real sessions in an incident were
+    // three rows out of twenty-two.
+    //
+    // Verified against PG 17, not assumed: `pg`'s ConnectionParameters
+    // Object.assigns the PARSED connection string over the explicit config,
+    // so a URL carrying `?application_name=` wins over this line (and over
+    // `fallback_application_name`, which behaves identically here). That is
+    // the right precedence — an operator who named their connections meant
+    // it — and the consequence is stated where it lands: the Sessions fold
+    // keys on APP_NAME, so on such a deployment it matches nothing and every
+    // row stays visible. It over-shows; it never hides a real session.
+    application_name: APP_NAME,
     // A diagnostic tool must not be the reason connections run out. Ten is
     // ample for a console rendering a handful of checks per page view.
     max: 10,
@@ -66,5 +85,8 @@ export async function contextFor(name: string): Promise<CheckContext> {
     VERSIONS.set(db.url, serverVersion);
   }
 
-  return { target, serverVersion };
+  // `store` is undefined, not null, when unset: CheckContext types it as
+  // optional, and runSeries tests presence rather than nullness.
+  const store = storePool(process.env) ?? undefined;
+  return { target, store, serverVersion };
 }

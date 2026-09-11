@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
 # Local dev Postgres for pgops. Starts a throwaway container you can point
-# `pgops locks` (and future subcommands) at. Not for production.
+# the web console at. Not for production.
 #
 #   ./scripts/dev-db.sh up      # start (idempotent) and print DATABASE_URL
 #   ./scripts/dev-db.sh down    # stop and remove
 #   ./scripts/dev-db.sh url     # print the connection string
 #   ./scripts/dev-db.sh psql    # open psql inside the container
-#   ./scripts/dev-db.sh seed    # manufacture a lock chain to demo `locks`
+#   ./scripts/dev-db.sh seed    # manufacture a lock chain for the locks route
 #
 # Override defaults via env: PGOPS_DEV_PORT, PGOPS_DEV_IMAGE.
 set -euo pipefail
@@ -44,8 +44,8 @@ up() {
       if docker exec "$NAME" pg_isready -U postgres >/dev/null 2>&1; then echo " ✓"; break; fi
       printf "."; sleep 1
     done
-    # pg_stat_statements is needed by `pgops top`; create it now so the dev DB
-    # is ready for every subcommand, not just locks.
+    # pg_stat_statements is needed by the queries route; create it now so the
+    # dev DB is ready for every route, not just locks.
     docker exec "$NAME" psql -U postgres -d "$DB" -q \
       -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" >/dev/null 2>&1 || true
   fi
@@ -54,7 +54,7 @@ up() {
   echo
   echo "Run pgops against it:"
   echo "  export DATABASE_URL='${URL}'"
-  echo "  npm run dev -- locks"
+  echo "  npm run --workspace @pgops/web dev   # http://localhost:3000"
 }
 
 down() {

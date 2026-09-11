@@ -13,7 +13,8 @@ describe('wraparound', () => {
       const worst = r.data.worst[0]!;
       expect(worst.txnsUntilShutdown).toBe(HARD_LIMIT - worst.xactAge);
       expect(worst.txnsUntilShutdown).toBeGreaterThan(2_000_000_000);
-      expect(r.verdict.level).toBe('ok');
+      // `wraparound` carries a verdict function, so this is never null in practice.
+      expect(r.verdict!.level).toBe('ok');
     });
   }, 120_000);
 

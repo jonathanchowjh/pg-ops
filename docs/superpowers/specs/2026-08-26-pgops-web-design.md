@@ -508,14 +508,26 @@ multi-database config, `router.refresh()` polling. `kill` behind the flag.
 **The Ink TUI, `src/ui/`, and the Ink/React-terminal dependencies are deleted
 here.** This is the phase where pgops stops being a terminal program.
 
-**P2 — the hygiene class.** `indexes`, `tables`, `space`, `sequences`, `config`,
-`vacuum`, `replication`, plus `/doctor`. Closes ~24 gaps. Ships
-`pgops check --format json` with exit codes at the same time, because it is the
-same registry and the cron surface is what makes hygiene findings *arrive*
-instead of waiting to be looked at.
+**P2 — the hygiene class.** `indexes`, `tables`, `space`, `sequences`,
+`settings`, `maintenance`, `constraints`, plus the incident-class capabilities
+that were scheduled here rather than classified here: `replication`,
+per-connection detail, and `slow_queries`. Its size is
+`parityBacklog('P2')` — the registry is the authority, and a count written
+into prose is a second copy that nothing compares to the first. See
+`docs/superpowers/specs/2026-09-03-pgops-p2-hygiene-design.md`.
+
+The CLI surface this phase used to carry — `pgops check --format json` with
+exit codes — was cut on 2026-09-03. P2 is web only. The consequence is
+recorded in that spec's §0: with no cron surface, a hygiene finding arrives
+when someone opens the page.
 
 **P3 — history.** `pgops init`, the `pgops` schema, `pgops capture`, retention,
 delta maths, discontinuity detection.
+
+> **Amended 2026-09-03** — see `2026-09-03-pgops-full-parity-design.md` §11.
+> P3 ships BEFORE P2. `pgops init` and `packages/cli` are cut: migrations run
+> at boot and capture runs in-process behind an advisory lock, gated on an
+> explicit `PGOPS_STORE_URL` with no fallback to a monitored database.
 
 **P4 — charts.** Trend views over P3's data. Query trends, space growth.
 

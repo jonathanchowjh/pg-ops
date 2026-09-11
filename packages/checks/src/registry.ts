@@ -29,7 +29,7 @@
  *    `lib/pghero/methods/` file at all: `/connections?security=1`
  *    categorises every connection's SSL status (SSL / Internal Process /
  *    Socket / No SSL, with the reason) — computed entirely in
- *    `home_controller.rb#connections`, never in a method. Added as #64.
+ *    `home_controller.rb#connections`, never in a method. Added as #65.
  *  - Nothing was renamed or moved between files, with one correction: the
  *    old matrix implied a `tuning.rb` source file (per the task brief's file
  *    list); no such file exists — `tune` is a dashboard view over
@@ -125,13 +125,16 @@
  *    pg_stat_activity LEFT JOIN pg_stat_ssl ...` — one row per backend.
  *    This package's `connections` check returns four aggregate numbers
  *    (`max`/`used`/`reserved`/`headroom`); no amount of reading an
- *    aggregate produces a per-connection list, so #4 is `planned: 'P2'`,
- *    the same phase as its sibling #7 `connection_sources`. Remapping #4 to
- *    `sessions` was considered and rejected: `sessions` is the closest
- *    shipped analog but still lacks `datname` and `ssl`, and caps at 500
- *    rows where pgHero's list is unbounded — a near-miss `check:` in a
- *    registry whose whole job is being right about parity is exactly the
- *    failure this correction fixes.
+ *    aggregate produces a per-connection list. `connectionDetail`
+ *    (connections.ts) is that list — the same SQL shape pgHero's own method
+ *    runs, plus `count(*) OVER ()` for the pre-LIMIT total — and now backs
+ *    #4, its sibling #7 `connection_sources`, and #65's SSL breakdown,
+ *    all from the one round trip pgHero's own controller derives them from.
+ *    Remapping #4 to `sessions` was considered and rejected: `sessions` is
+ *    the closest shipped analog but still lacks `datname` and `ssl`, and
+ *    caps at 500 rows where pgHero's list is unbounded — a near-miss
+ *    `check:` in a registry whose whole job is being right about parity is
+ *    exactly the failure this correction fixes.
  *  - #5 `total_connections`, unlike #4, IS answered by the `connections`
  *    check's aggregate `used` — but with a scope difference worth stating
  *    rather than leaving implicit: pgHero's `total_connections` is `SELECT
@@ -144,24 +147,30 @@
  *
  * #11 `kill` is a ruling of its own — see the comment on `ACTIONS` below.
  */
+import type { Placement } from './gates.js';
 import { killBackend } from './actions/kill.js';
+import { captureOnce } from './capture.js';
 import { blocked } from './checks/blocked.js';
-import { connections } from './checks/connections.js';
+import { connectionDetail, connections } from './checks/connections.js';
 import { identity } from './checks/identity.js';
 import { locks } from './checks/locks.js';
 import { longRunning } from './checks/long-running.js';
 import { queryStats } from './checks/query-stats.js';
+import { replicationLag } from './checks/replication.js';
 import { sessionStates, sessions } from './checks/sessions.js';
 import { slots } from './checks/slots.js';
 import { wraparound } from './checks/wraparound.js';
+import { historicalQueryStats } from './series/query-stats.js';
 
 export const CHECKS = {
   blocked,
+  connectionDetail,
   connections,
   identity,
   locks,
   longRunning,
   queryStats,
+  replicationLag,
   sessions,
   sessionStates,
   slots,
@@ -193,6 +202,31 @@ export type CheckId = keyof typeof CHECKS;
  */
 export const ACTIONS = { kill: killBackend } as const;
 
+/**
+ * The over-time half. Keyed the same way CHECKS is, so `series:` in the
+ * parity map can name a real thing and the test can prove it exists.
+ */
+export const SERIES = { historicalQueryStats } as const;
+export type SeriesId = keyof typeof SERIES;
+
+/**
+ * Scheduled work that is neither a check nor an action.
+ *
+ * `platform: string` would have accepted these, and that is exactly why it
+ * must not: it is free text, so it cannot enforce "never names something that
+ * does not exist" — the property that makes this registry worth having. Same
+ * precedent as `action: ActionId`. Spec 2026-09-03 Ruling 3.
+ *
+ * Both entries point at the one function: pgHero splits capture into two
+ * methods, pgops captures both in one pass because they share a transaction
+ * and a lock.
+ */
+export const JOBS = {
+  captureQueryStats: captureOnce,
+  captureSpaceStats: captureOnce,
+} as const;
+export type JobId = keyof typeof JOBS;
+
 export type ActionId = keyof typeof ACTIONS;
 
 export type Phase = 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6';
@@ -218,9 +252,37 @@ export type Phase = 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6';
  * `PLATFORM` map to key off — so it carries prose naming where the
  * capability lives, and that string is the weakest link in this file.
  */
-export type ParityEntry = { name: string; source: string } & (
+export type ParityEntry = {
+  name: string;
+  source: string;
+  /**
+   * Where this capability sits on the tree (gates.ts) — required on every
+   * entry, shipped or not.
+   *
+   * This is the half of the registry that faces FORWARD. `check`/`planned`
+   * answer "is it built and when"; `gate` answers "what is it for", which is
+   * the question that has to have an answer BEFORE anything is built, or the
+   * capability arrives with nowhere to render and a band gets invented to
+   * hold it. All forty remaining capabilities carry one today.
+   *
+   * For a shipped `check`, this must equal that check's own `gate` — asserted
+   * in registry.test.ts rather than derived, so the duplication is the thing
+   * that catches a capability being remapped to a check on a different gate.
+   *
+   * Ruling on ACTIONS, which are remedies rather than questions: an action
+   * takes the gate of the OBJECT it acts on, not of every stall it can clear.
+   * #11 `kill` terminates a session, so it is `connect` and lives on Sessions,
+   * even though breaking a lock chain is its headline use; #12
+   * `kill_long_running_queries` selects its targets by query duration, so it
+   * is `work`. Without that rule `kill` could be argued into any of three
+   * gates.
+   */
+  gate: Placement;
+} & (
   | { check: CheckId }
   | { action: ActionId }
+  | { series: SeriesId }
+  | { job: JobId }
   | { platform: string }
   | { planned: Phase }
   | { declined: string }
@@ -232,47 +294,70 @@ export const PGHERO: Record<number, ParityEntry> = {
   // check — see checks/identity.ts, which also backs #48. #3 diverges from
   // pgHero deliberately (pg_stat_ssl, not the sslinfo extension); the
   // reasoning is in that file's docblock.
-  1: { name: 'server_version', source: 'methods/basic.rb', check: 'identity' },
-  2: { name: 'database_name', source: 'methods/basic.rb', check: 'identity' },
-  3: { name: 'ssl_in_use', source: 'methods/basic.rb', check: 'identity' },
+  1: { name: 'server_version', source: 'methods/basic.rb',
+    gate: 'server', check: 'identity' },
+  2: { name: 'database_name', source: 'methods/basic.rb',
+    gate: 'server', check: 'identity' },
+  3: { name: 'ssl_in_use', source: 'methods/basic.rb',
+    gate: 'server', check: 'identity' },
 
   // connections — methods/connections.rb
   // #4 is pgHero's per-connection LIST (pid/datname/user/source/ip/state/
   // ssl) — this package's `connections` check is an aggregate only, so
-  // nothing here backs it. #5 IS answered by that aggregate's `used`, with
-  // a scoping difference (client backends only). See the top-of-file note.
-  4: { name: 'connections', source: 'methods/connections.rb', planned: 'P2' },
-  5: { name: 'total_connections', source: 'methods/connections.rb', check: 'connections' },
-  6: { name: 'connection_states', source: 'methods/connections.rb', check: 'sessionStates' },
-  7: { name: 'connection_sources', source: 'methods/connections.rb', planned: 'P2' },
+  // `connectionDetail` backs #4 instead. #5 IS answered by that aggregate's
+  // `used`, with a scoping difference (client backends only). See the
+  // top-of-file note.
+  4: { name: 'connections', source: 'methods/connections.rb',
+    gate: 'connect', check: 'connectionDetail' },
+  5: { name: 'total_connections', source: 'methods/connections.rb',
+    gate: 'connect', check: 'connections' },
+  6: { name: 'connection_states', source: 'methods/connections.rb',
+    gate: 'connect', check: 'sessionStates' },
+  7: { name: 'connection_sources', source: 'methods/connections.rb',
+    gate: 'connect', check: 'connectionDetail' },
 
   // queries — methods/queries.rb
   // running_queries: pgHero's own SQL is `state <> 'idle'`, ordered by
   // query/xact start — the same detail columns (pid, state, query, user,
   // duration) `sessions` already returns for every session; sessions.ts's
   // own `prepareSessions(..., { sort: 'active' })` is this exact view.
-  8: { name: 'running_queries', source: 'methods/queries.rb', check: 'sessions' },
-  9: { name: 'long_running_queries', source: 'methods/queries.rb', check: 'longRunning' },
+  8: { name: 'running_queries', source: 'methods/queries.rb',
+    gate: 'connect', check: 'sessions' },
+  9: { name: 'long_running_queries', source: 'methods/queries.rb',
+    gate: 'work', check: 'longRunning' },
   // blocked_queries: `locks`, not `blocked` — see the top-of-file note for
   // why (verified against pgHero's actual SQL, not the name alone).
-  10: { name: 'blocked_queries', source: 'methods/queries.rb', check: 'locks' },
+  10: { name: 'blocked_queries', source: 'methods/queries.rb',
+    gate: 'wait', check: 'locks' },
 
   // kill — methods/kill.rb
-  11: { name: 'kill', source: 'methods/kill.rb', action: 'kill' },
-  12: { name: 'kill_long_running_queries', source: 'methods/kill.rb', planned: 'P5' },
+  11: { name: 'kill', source: 'methods/kill.rb',
+    gate: 'connect', action: 'kill' },
+  12: { name: 'kill_long_running_queries', source: 'methods/kill.rb',
+    gate: 'work', planned: 'P5' },
   13: {
     name: 'kill_all',
     source: 'methods/kill.rb',
+    gate: 'connect',
     declined: 'An action with no diagnosis; there is no incident in which '
       + '"terminate every session, unreviewed" is the correct first move. '
       + 'Web design spec §7.1; ops-console spec §3.4d. Permanent — ruled by the controller.',
   },
 
   // query_stats — methods/query_stats.rb
-  14: { name: 'query_stats', source: 'methods/query_stats.rb', check: 'queryStats' },
-  15: { name: 'historical_query_stats', source: 'methods/query_stats.rb', planned: 'P3' },
-  16: { name: 'query_hash_stats', source: 'methods/query_stats.rb', planned: 'P4' },
-  17: { name: 'slow_queries', source: 'methods/query_stats.rb', planned: 'P2' },
+  14: { name: 'query_stats', source: 'methods/query_stats.rb',
+    gate: 'work', check: 'queryStats' },
+  15: { name: 'historical_query_stats', source: 'methods/query_stats.rb',
+    gate: 'work', series: 'historicalQueryStats' },
+  16: { name: 'query_hash_stats', source: 'methods/query_stats.rb',
+    gate: 'work', planned: 'P4' },
+  // A FILTER over #14's rows, not a query: pgHero's slow_queries selects
+  // from query_stats on calls >= 100 && average_time >= 20ms. Derived by
+  // `slowQueries(data)` in query-stats.ts — same precedent as #5, where an
+  // aggregate this package already computes answers a pgHero capability
+  // without a check of its own.
+  17: { name: 'slow_queries', source: 'methods/query_stats.rb',
+    gate: 'work', check: 'queryStats' },
   // Shipped since P1a and mislabelled `planned` until the P1 phase gate
   // caught it. pgHero's capability is the probe plus the remedy, and both
   // exist: query-stats.ts declares `requires` (the pg_stat_statements
@@ -281,76 +366,122 @@ export const PGHERO: Record<number, ParityEntry> = {
   // It shares a check with #14 — the availability probe is the `requires`
   // block ON that check, not a separate query, and `ParityEntry` does not
   // require check ids to be unique across capabilities.
-  18: { name: 'query_stats_available', source: 'methods/query_stats.rb', check: 'queryStats' },
-  19: { name: 'enable_query_stats', source: 'methods/query_stats.rb', planned: 'P5' },
-  20: { name: 'reset_query_stats', source: 'methods/query_stats.rb', planned: 'P5' },
-  21: { name: 'capture_query_stats', source: 'methods/query_stats.rb', planned: 'P3' },
+  18: { name: 'query_stats_available', source: 'methods/query_stats.rb',
+    gate: 'work', check: 'queryStats' },
+  19: { name: 'enable_query_stats', source: 'methods/query_stats.rb',
+    gate: 'work', planned: 'P5' },
+  20: { name: 'reset_query_stats', source: 'methods/query_stats.rb',
+    gate: 'work', planned: 'P5' },
+  21: { name: 'capture_query_stats', source: 'methods/query_stats.rb',
+    gate: 'work', job: 'captureQueryStats' },
 
   // indexes — methods/indexes.rb
-  22: { name: 'index_hit_rate', source: 'methods/indexes.rb', planned: 'P2' },
-  23: { name: 'index_caching', source: 'methods/indexes.rb', planned: 'P2' },
-  24: { name: 'index_usage', source: 'methods/indexes.rb', planned: 'P2' },
-  25: { name: 'missing_indexes', source: 'methods/indexes.rb', planned: 'P2' },
-  26: { name: 'unused_indexes', source: 'methods/indexes.rb', planned: 'P2' },
-  27: { name: 'invalid_indexes', source: 'methods/indexes.rb', planned: 'P2' },
-  28: { name: 'duplicate_indexes', source: 'methods/indexes.rb', planned: 'P2' },
-  29: { name: 'index_bloat', source: 'methods/indexes.rb', planned: 'P2' },
-  30: { name: 'indexes', source: 'methods/indexes.rb', planned: 'P2' },
-  31: { name: 'reset_stats', source: 'methods/indexes.rb', planned: 'P5' },
-  32: { name: 'last_stats_reset_time', source: 'methods/indexes.rb', planned: 'P2' },
+  22: { name: 'index_hit_rate', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P2' },
+  23: { name: 'index_caching', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P2' },
+  24: { name: 'index_usage', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P2' },
+  25: { name: 'missing_indexes', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P2' },
+  26: { name: 'unused_indexes', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P2' },
+  27: { name: 'invalid_indexes', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P2' },
+  28: { name: 'duplicate_indexes', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P2' },
+  29: { name: 'index_bloat', source: 'methods/indexes.rb',
+    gate: 'keep-up', planned: 'P2' },
+  30: { name: 'indexes', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P2' },
+  31: { name: 'reset_stats', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P5' },
+  32: { name: 'last_stats_reset_time', source: 'methods/indexes.rb',
+    gate: 'work', planned: 'P2' },
 
   // tables — methods/tables.rb (a distinct file in current pgHero; the old
   // matrix did not name a source file for this group)
-  33: { name: 'table_hit_rate', source: 'methods/tables.rb', planned: 'P2' },
-  34: { name: 'table_caching', source: 'methods/tables.rb', planned: 'P2' },
-  35: { name: 'unused_tables', source: 'methods/tables.rb', planned: 'P2' },
-  36: { name: 'table_stats', source: 'methods/tables.rb', planned: 'P2' },
+  33: { name: 'table_hit_rate', source: 'methods/tables.rb',
+    gate: 'work', planned: 'P2' },
+  34: { name: 'table_caching', source: 'methods/tables.rb',
+    gate: 'work', planned: 'P2' },
+  35: { name: 'unused_tables', source: 'methods/tables.rb',
+    gate: 'work', planned: 'P2' },
+  36: { name: 'table_stats', source: 'methods/tables.rb',
+    gate: 'keep-up', planned: 'P2' },
 
   // space — methods/space.rb
-  37: { name: 'database_size', source: 'methods/space.rb', planned: 'P2' },
-  38: { name: 'relation_sizes', source: 'methods/space.rb', planned: 'P2' },
-  39: { name: 'table_sizes', source: 'methods/space.rb', planned: 'P2' },
-  40: { name: 'space_growth', source: 'methods/space.rb', planned: 'P4' },
-  41: { name: 'relation_space_stats', source: 'methods/space.rb', planned: 'P4' },
-  42: { name: 'capture_space_stats', source: 'methods/space.rb', planned: 'P3' },
+  37: { name: 'database_size', source: 'methods/space.rb',
+    gate: 'keep-up', planned: 'P2' },
+  38: { name: 'relation_sizes', source: 'methods/space.rb',
+    gate: 'keep-up', planned: 'P2' },
+  39: { name: 'table_sizes', source: 'methods/space.rb',
+    gate: 'keep-up', planned: 'P2' },
+  40: { name: 'space_growth', source: 'methods/space.rb',
+    gate: 'keep-up', planned: 'P4' },
+  41: { name: 'relation_space_stats', source: 'methods/space.rb',
+    gate: 'keep-up', planned: 'P4' },
+  42: { name: 'capture_space_stats', source: 'methods/space.rb',
+    gate: 'keep-up', job: 'captureSpaceStats' },
 
   // maintenance — methods/maintenance.rb
-  43: { name: 'maintenance_info', source: 'methods/maintenance.rb', planned: 'P2' },
-  44: { name: 'transaction_id_danger', source: 'methods/maintenance.rb', check: 'wraparound' },
-  45: { name: 'autovacuum_danger', source: 'methods/maintenance.rb', planned: 'P2' },
-  46: { name: 'vacuum_progress', source: 'methods/maintenance.rb', planned: 'P2' },
-  47: { name: 'analyze_tables', source: 'methods/maintenance.rb', planned: 'P5' },
+  43: { name: 'maintenance_info', source: 'methods/maintenance.rb',
+    gate: 'keep-up', planned: 'P2' },
+  44: { name: 'transaction_id_danger', source: 'methods/maintenance.rb',
+    gate: 'keep-up', check: 'wraparound' },
+  45: { name: 'autovacuum_danger', source: 'methods/maintenance.rb',
+    gate: 'keep-up', planned: 'P2' },
+  46: { name: 'vacuum_progress', source: 'methods/maintenance.rb',
+    gate: 'keep-up', planned: 'P2' },
+  47: { name: 'analyze_tables', source: 'methods/maintenance.rb',
+    gate: 'keep-up', planned: 'P5' },
 
   // replication — methods/replication.rb
   // `pg_is_in_recovery()`, folded into the identity round trip. slots.ts
   // already branched on this predicate to stay correct on a standby (see
   // its A6 note) without ever telling the operator they were on one.
-  48: { name: 'replica', source: 'methods/replication.rb', check: 'identity' },
-  49: { name: 'replication_lag', source: 'methods/replication.rb', planned: 'P2' },
-  50: { name: 'replication_slots', source: 'methods/replication.rb', check: 'slots' },
-  51: { name: 'replicating', source: 'methods/replication.rb', planned: 'P2' },
+  48: { name: 'replica', source: 'methods/replication.rb',
+    gate: 'server', check: 'identity' },
+  49: { name: 'replication_lag', source: 'methods/replication.rb',
+    gate: 'keep-up', check: 'replicationLag' },
+  50: { name: 'replication_slots', source: 'methods/replication.rb',
+    gate: 'keep-up', check: 'slots' },
+  // `SELECT state FROM pg_stat_replication` in pgHero, reduced to `.any?`.
+  // Folded into #49's round trip as a count rather than a boolean: "two
+  // standbys attached" and "one" are different operational facts, and the
+  // boolean throws that away for nothing.
+  51: { name: 'replicating', source: 'methods/replication.rb',
+    gate: 'keep-up', check: 'replicationLag' },
 
   // sequences — methods/sequences.rb
-  52: { name: 'sequences', source: 'methods/sequences.rb', planned: 'P2' },
-  53: { name: 'sequence_danger', source: 'methods/sequences.rb', planned: 'P2' },
-  54: { name: 'unreadable_sequences', source: 'methods/sequences.rb', planned: 'P2' },
+  52: { name: 'sequences', source: 'methods/sequences.rb',
+    gate: 'keep-up', planned: 'P2' },
+  53: { name: 'sequence_danger', source: 'methods/sequences.rb',
+    gate: 'keep-up', planned: 'P2' },
+  54: { name: 'unreadable_sequences', source: 'methods/sequences.rb',
+    gate: 'keep-up', planned: 'P2' },
 
   // constraints — methods/constraints.rb (a distinct file in current
   // pgHero; the old matrix did not name a source file for this group)
-  55: { name: 'invalid_constraints', source: 'methods/constraints.rb', planned: 'P2' },
+  55: { name: 'invalid_constraints', source: 'methods/constraints.rb',
+    gate: 'keep-up', planned: 'P2' },
 
   // settings — methods/settings.rb (a distinct file in current pgHero; the
   // old matrix did not name a source file for this group)
-  56: { name: 'settings', source: 'methods/settings.rb', planned: 'P2' },
+  56: { name: 'settings', source: 'methods/settings.rb',
+    gate: 'server', planned: 'P2' },
 
   // explain — methods/explain.rb
-  57: { name: 'explain', source: 'methods/explain.rb', planned: 'P6' },
+  57: { name: 'explain', source: 'methods/explain.rb',
+    gate: 'work', planned: 'P6' },
 
   // suggested_indexes — methods/suggested_indexes.rb
-  58: { name: 'suggested_indexes', source: 'methods/suggested_indexes.rb', planned: 'P6' },
+  58: { name: 'suggested_indexes', source: 'methods/suggested_indexes.rb',
+    gate: 'work', planned: 'P6' },
 
   // system — methods/system.rb
-  59: { name: 'system_stats', source: 'methods/system.rb', planned: 'P6' },
+  59: { name: 'system_stats', source: 'methods/system.rb',
+    gate: 'server', planned: 'P6' },
 
   // platform — multi-database is Rails-engine configuration
   // (lib/pghero/database.rb), not a lib/pghero/methods/ query
@@ -363,23 +494,32 @@ export const PGHERO: Record<number, ParityEntry> = {
   60: {
     name: 'multiple_databases',
     source: 'database.rb',
+    gate: 'server',
     platform: 'apps/web: PGOPS_DATABASES / PGOPS_CONFIG_FILE (lib/config.ts), '
       + 'one route per name under app/db/[name], all of them listed on the overview',
   },
 
   // Found by the 2026-08-26 re-audit, absent from the old 60-capability
   // matrix entirely:
-  61: { name: 'disable_query_stats', source: 'methods/query_stats.rb', planned: 'P5' },
+  61: { name: 'disable_query_stats', source: 'methods/query_stats.rb',
+    gate: 'work', planned: 'P5' },
   // #62 stays planned: (controller ruling); action must be gated behind
   // explicit confirmation when built — see the top-of-file note.
-  62: { name: 'autoindex', source: 'methods/suggested_indexes.rb', planned: 'P6' },
+  62: { name: 'autoindex', source: 'methods/suggested_indexes.rb',
+    gate: 'work', planned: 'P6' },
   // Found by the systematic (fix-round) re-audit — see the file-by-file
   // enumeration in the task report:
-  63: { name: 'suggested_indexes_by_query', source: 'methods/suggested_indexes.rb', planned: 'P6' },
-  64: { name: 'best_index', source: 'methods/suggested_indexes.rb', planned: 'P6' },
-  // Dashboard-only — no lib/pghero/methods/ file backs this; see
-  // home_controller.rb#connections, the params[:security] branch.
-  65: { name: 'connection_security_breakdown', source: 'app/controllers/pg_hero/home_controller.rb', planned: 'P2' },
+  63: { name: 'suggested_indexes_by_query', source: 'methods/suggested_indexes.rb',
+    gate: 'work', planned: 'P6' },
+  64: { name: 'best_index', source: 'methods/suggested_indexes.rb',
+    gate: 'work', planned: 'P6' },
+  // Dashboard-only — no lib/pghero/methods/ file backs this; it is Ruby
+  // post-processing over the connections list in home_controller.rb's
+  // params[:security] branch. Derived here in `map` from the same round
+  // trip, as `bySslStatus`. See `sslStatus` for the four-value scheme and
+  // why a boolean would be wrong.
+  65: { name: 'connection_security_breakdown', source: 'app/controllers/pg_hero/home_controller.rb',
+    gate: 'connect', check: 'connectionDetail' },
 };
 
 /**
@@ -395,7 +535,14 @@ export const PGHERO: Record<number, ParityEntry> = {
  * since a capability is owed by P1 whether P1a or P1b was meant to deliver
  * it.
  */
-export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1'];
+export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1', 'P3'];
+
+/**
+ * Build order, as data. `planned: 'P3'` means "P3 OWNS this", not "P3 happens
+ * third" — so P3 shipping before P2 is a change to this array and nothing
+ * else. Renumbering 43 registry entries to make labels sort would be ceremony.
+ */
+export const PHASE_ORDER: readonly Phase[] = ['P0', 'P1', 'P3', 'P2', 'P4', 'P5', 'P6'];
 
 /**
  * Capabilities owned but not yet built. Parity is complete when this is 0.

@@ -1,6 +1,8 @@
+import type { Metadata } from 'next';
 import { CHECKS, type Waiter } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
+import { Refresh } from '@/components/refresh';
 import { Sql } from '@/components/sql';
 import { formatDuration } from '@/lib/format';
 
@@ -23,8 +25,12 @@ function WaiterTree({ waiters }: { waiters: Waiter[] }) {
           <span className="font-mono">{w.pid}</span>{' '}
           <span className="text-muted-foreground">
             {w.user ?? '—'}@{w.app ?? '—'} · waiting {formatDuration(w.waitSecs)}
-            {w.cycle ? ' · DEADLOCK (cycle back to an ancestor)' : ''}
           </span>
+          {w.cycle ? (
+            <span className="ml-1 font-semibold text-destructive">
+              · DEADLOCK (cycle back to an ancestor)
+            </span>
+          ) : null}
           <Sql>{w.query}</Sql>
           {w.cycle ? null : <WaiterTree waiters={w.waiters} />}
         </li>
@@ -33,40 +39,55 @@ function WaiterTree({ waiters }: { waiters: Waiter[] }) {
   );
 }
 
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ name: string }>;
+}): Promise<Metadata> {
+  const { name } = await params;
+  return { title: `${name} · Locks` };
+}
+
 export default async function Locks({ params }: { params: Promise<{ name: string }> }) {
   const { name } = await params;
   const result = await runCheckFor(name, CHECKS.locks);
 
   return (
-    <CheckPanel title="Lock wait graph" result={result}>
-      {(d) => (
-        <>
-          {d.truncated ? (
-            <p className="mb-2 text-sm text-muted-foreground">
-              Partial graph — more lock rows matched than were fetched.
-            </p>
-          ) : null}
-          {d.roots.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No blocking.</p>
-          ) : (
-            <ul className="space-y-3">
-              {d.roots.map((r) => (
-                <li key={r.pid}>
-                  <p>
-                    <span className="font-mono font-medium">{r.pid}</span>{' '}
-                    <span className="text-muted-foreground">
-                      {r.user ?? '—'}@{r.app ?? '—'} · {r.state ?? '—'} · open {formatDuration(r.xactAgeSecs)} ·
-                      blocking {r.totalWaiters}
-                    </span>
-                  </p>
-                  <Sql>{r.query}</Sql>
-                  <WaiterTree waiters={r.waiters} />
-                </li>
-              ))}
-            </ul>
-          )}
-        </>
-      )}
-    </CheckPanel>
+    <>
+      {/* Task 1: the poll lives on the incident pages, not the layout —
+          hygiene routes share that layout and must not inherit a 5s
+          catalog scan. test/guards.test.ts holds this. */}
+      <div className="mb-2 flex justify-end"><Refresh intervalMs={5_000} /></div>
+      <CheckPanel title="Lock wait graph" result={result}>
+        {(d) => (
+          <>
+            {d.truncated ? (
+              <p className="mb-2 text-sm text-muted-foreground">
+                Partial graph — more lock rows matched than were fetched.
+              </p>
+            ) : null}
+            {d.roots.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No blocking.</p>
+            ) : (
+              <ul className="space-y-3">
+                {d.roots.map((r) => (
+                  <li key={r.pid}>
+                    <p>
+                      <span className="font-mono font-medium">{r.pid}</span>{' '}
+                      <span className="text-muted-foreground">
+                        {r.user ?? '—'}@{r.app ?? '—'} · {r.state ?? '—'} · open {formatDuration(r.xactAgeSecs)} ·
+                        blocking {r.totalWaiters}
+                      </span>
+                    </p>
+                    <Sql>{r.query}</Sql>
+                    <WaiterTree waiters={r.waiters} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </CheckPanel>
+    </>
   );
 }

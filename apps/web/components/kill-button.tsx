@@ -46,7 +46,13 @@ export function KillButton({
   // a second Terminate on that row invites a kill against a pid Postgres may
   // already have handed to someone else.
   if (outcome === 'terminated') {
-    return <span className="text-xs text-muted-foreground">{OUTCOMES[outcome]}</span>;
+    // `role="status"` so the result of a destructive action is ANNOUNCED. A
+    // screen-reader user pressed Confirm and the only feedback was this text
+    // silently replacing the button — no announcement, so nothing said
+    // whether a production backend had just been terminated, refused, or had
+    // errored. Polite rather than assertive: the action has already finished,
+    // so there is nothing to interrupt.
+    return <span role="status" className="text-xs text-muted-foreground">{OUTCOMES[outcome]}</span>;
   }
 
   if (!confirming) {
@@ -56,7 +62,7 @@ export function KillButton({
             WHY the last attempt did not do what they expected — a refusal
             names a stale row, an error names a fixable privilege problem. */}
         {outcome ? (
-          <span className="text-xs text-muted-foreground">{OUTCOMES[outcome] ?? outcome}</span>
+          <span role="status" className="text-xs text-muted-foreground">{OUTCOMES[outcome] ?? outcome}</span>
         ) : null}
         <button
           type="button"
@@ -113,22 +119,67 @@ export function KillButton({
     });
   };
 
+  // `send` refuses a blank reason and always has. It did so SILENTLY: the
+  // operator clicked Confirm, nothing happened, nothing said why, and the only
+  // account of the rule was an early `return` in a function they cannot see.
+  // On the one control in this console that can end a production backend, a
+  // button that looks armed and does nothing is the worst of the three
+  // available behaviours — worse than refusing loudly, and worse than not
+  // being there. The guard in `send` stays as the actual enforcement; this
+  // just stops the UI from lying about it.
+  const blank = reason.trim() === '';
+
+  // Absolutely positioned, anchored to the RIGHT edge of its cell, so it grows
+  // LEFTWARD over the query column instead of widening the table.
+  //
+  // Laid out inline, this control took the action cell from 16px to 423px and
+  // the sessions table from 944px to 1351px inside a 942px container — putting
+  // Confirm at x=1422 on a 1280px viewport. The operator had to scroll
+  // sideways to finish an action they had already started, on the one control
+  // that ends a production backend. Anchoring right pins the panel to the one
+  // edge that is always on screen (the table's right edge is the container's),
+  // and the table's width no longer changes at all when this opens, so no
+  // other row moves under the reader either.
   return (
-    <span className="flex items-center gap-1">
+    <span className="absolute top-1/2 right-2 z-10 flex -translate-y-1/2 items-center gap-1 rounded-md border bg-background p-1.5 whitespace-nowrap shadow-lg">
       <label className="sr-only" htmlFor={`reason-${pid}`}>Reason</label>
       <input
         id={`reason-${pid}`}
-        className="w-40 border px-1 text-xs"
+        className="w-40 rounded border px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
         placeholder={`Reason — terminate ${pid}`}
         value={reason}
         onChange={(e) => setReason(e.target.value)}
+        aria-describedby={`reason-hint-${pid}`}
+        // The operator clicked Terminate one keystroke ago; the reason field
+        // is unambiguously where they are going next.
+        autoFocus
       />
-      <button type="button" data-confirm className="text-xs font-medium" disabled={pending} onClick={send}>
+      <button
+        type="button"
+        data-confirm
+        // Styled as destructive, unlike its neighbour. Confirm and Cancel were
+        // two near-identical scraps of 12px text, distinguished only by
+        // `font-medium` — a coin flip at a glance, on a pair where one choice
+        // is irreversible.
+        className="rounded border border-destructive px-2 py-1 text-xs font-medium text-destructive hover:bg-destructive/10 focus-visible:ring-2 focus-visible:ring-destructive focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+        disabled={pending || blank}
+        onClick={send}
+      >
         Confirm
       </button>
-      <button type="button" className="text-xs" onClick={() => setConfirming(false)}>
+      <button
+        type="button"
+        className="rounded px-2 py-1 text-xs text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+        onClick={() => setConfirming(false)}
+      >
         Cancel
       </button>
+      {/* Says WHY it is disabled, and says the thing the operator actually
+          needs to know: the text is not a formality, it is written to the
+          audit record that outlives the incident. */}
+      <span id={`reason-hint-${pid}`} className="text-xs text-muted-foreground">
+        {blank ? 'reason required — it is audited' : null}
+      </span>
     </span>
   );
 }

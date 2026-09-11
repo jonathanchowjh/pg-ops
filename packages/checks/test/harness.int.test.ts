@@ -4,7 +4,7 @@ import { withPostgres } from './harness.js';
 import type { Check } from '../src/types.js';
 
 const version: Check<{ v: string }, number> = {
-  id: 'version', title: 'Server version', class: 'incident',
+  id: 'version', gate: 'work', title: 'Server version', class: 'incident',
   // No bind parameter here on purpose: `check.sql` as a plain string never gets a
   // `values` array from runCheck, so a literal `$1` sent this way is unbound and
   // Postgres rejects it with "there is no parameter $1" (42P02) — a real SQL

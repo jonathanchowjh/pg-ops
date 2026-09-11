@@ -1,0 +1,57 @@
+/**
+ * Next calls `register()` once per server instance — and for the EDGE runtime
+ * as well as the node one, where `pg` cannot run. The guard is not optional.
+ *
+ * It also fires on every dev-server restart, which is why `migrate` is
+ * forward-only and idempotent: re-running is the normal case here, not the
+ * exceptional one.
+ *
+ * The imports are dynamic and INSIDE the guard so that `pg` and the store
+ * modules are never pulled into an edge bundle.
+ */
+export async function register(): Promise<void> {
+  if (process.env.NEXT_RUNTIME !== 'nodejs') return;
+
+  const [{ startScheduler }, { storePool }, { contextFor, databaseNames }, checks] =
+    await Promise.all([
+      import('./lib/scheduler'),
+      import('./lib/store'),
+      import('./lib/pools'),
+      import('@pgops/checks'),
+    ]);
+
+  // A backstop, and named honestly as one. `startScheduler` already swallows
+  // the only failure it realistically has (see its I1 note), and
+  // `databaseNames()` is wrapped where it is actually called, inside `names`.
+  // What this catches is anything startScheduler grows later — register() is
+  // awaited by Next during server preparation, so an escape here is the whole
+  // console failing to boot over an OPTIONAL history store.
+  try {
+    const store = storePool(process.env);
+    if (store === null) {
+      console.info('[pgops] PGOPS_STORE_URL is not set; history is disabled and no DDL will run.');
+      return;
+    }
+    await startScheduler({
+      store,
+      names: () => {
+        // Configuration is read per TICK, not once at boot: PGOPS_CONFIG_FILE
+        // points at a mounted file that can change without the container
+        // restarting, and the whole configuration model is "read at request
+        // time, not build time".
+        try {
+          return databaseNames();
+        } catch {
+          return [];
+        }
+      },
+      capture: async (name) => checks.captureOnce(await contextFor(name), name),
+      migrate: checks.migrate,
+    });
+  } catch (err) {
+    console.error(
+      '[pgops] scheduler failed to start; history is disabled for this process: %s',
+      (err as Error)?.message ?? err,
+    );
+  }
+}

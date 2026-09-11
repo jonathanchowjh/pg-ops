@@ -1,7 +1,16 @@
 export * from './types.js';
-export * from './run.js';
+// The tree — the four gates a request clears. Every check declares one and
+// the triage page's bands are derived from it; see gates.ts.
+export * from './gates.js';
+// By name, not `export *`: run.ts owns both runners and `messageOf`, which
+// capture.ts imports and which is not part of this package's surface.
+export { runCheck, runSeries } from './run.js';
 export * from './registry.js';
 export { redactSecrets } from './redact.js';
+export { captureOnce } from './capture.js';
+export { deltas, historicalQueryStats } from './series/query-stats.js';
+export { migrate, CURRENT_VERSION } from './store/schema.js';
+export type * from './series/query-stats.js';
 
 /**
  * The per-check domain types.
@@ -24,7 +33,13 @@ export type * from './checks/identity.js';
 export type * from './checks/locks.js';
 export type * from './checks/long-running.js';
 export type * from './checks/query-stats.js';
+export type * from './checks/replication.js';
 export type * from './checks/sessions.js';
 export type * from './checks/slots.js';
 export type * from './checks/wraparound.js';
 export type * from './actions/kill.js';
+
+// slowQueries and SLOW_QUERY_DEFAULTS are VALUES, not types — `export type *`
+// above carries interfaces only, so without this apps/web cannot import them
+// and the queries page fails to compile.
+export { slowQueries, SLOW_QUERY_DEFAULTS } from './checks/query-stats.js';
