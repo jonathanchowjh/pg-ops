@@ -6,6 +6,7 @@ import { runCheckFor, runSeriesFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
 import { Badge } from '@/components/ui/badge';
 import { Refresh } from '@/components/refresh';
+import { SubNav } from '@/components/sub-nav';
 import { Sql } from '@/components/sql';
 import { formatCount, formatMillis } from '@/lib/format';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -109,6 +110,11 @@ export default async function Queries({
           hygiene routes share that layout and must not inherit a 5s
           catalog scan. test/guards.test.ts holds this. */}
       <div className="mb-2 flex justify-end"><Refresh intervalMs={5_000} /></div>
+      <SubNav
+        name={name}
+        base="queries"
+        items={[{ segment: 'indexes', label: 'Indexes' }, { segment: 'tables', label: 'Tables' }]}
+      />
       {/*
        * pgHero #17 slow_queries: NOT a query, a FILTER over #14's rows
        * (query_stats.select { calls >= slow_query_calls && average_time >=

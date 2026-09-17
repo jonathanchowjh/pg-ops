@@ -76,6 +76,42 @@ describe('the package boundary', () => {
     expect(bad).toEqual([]);
   });
 
+  /**
+   * Every ratio in this package divides in NUMERIC arithmetic, never bigint.
+   *
+   * `pg_statio_*` and `pg_stat_*` counters are all bigint, and bigint /
+   * bigint is INTEGER division in Postgres: measured on 17.11, an index with
+   * 39,649 hits and 1 read returns exactly `0` where the true rate is
+   * 0.99997. The page then reports a 0% cache hit rate under a summary
+   * reporting 99.99%, and nothing errors.
+   *
+   * This is a SOURCE guard because the behaviour is not reachable from a
+   * test. Catching it needs a relation with `heap_blks_read > 0`, and a
+   * table written inside the test is still entirely in shared buffers — 500k
+   * rows (17 MB) and 400k wide rows (54 MB, past the ring-buffer threshold)
+   * both measured `heap_blks_read = 0` against the default 128 MB. Only
+   * exceeding shared_buffers outright would do it, which is not a fixture
+   * worth having. The per-INDEX form is covered behaviourally in
+   * indexes.int.test.ts, because index pages do get read once; the per-TABLE
+   * form has no such luck, and this stands in for it.
+   *
+   * `sum(...)` needs no cast: `sum()` over a bigint already returns numeric.
+   */
+  it('casts to numeric before dividing, in every ratio', () => {
+    const bad: string[] = [];
+    for (const file of allSourceFiles(SRC)) {
+      const code = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/[^\n]*/g, '');
+      for (const m of code.matchAll(/([^/\n]{0,120})\/\s*nullif\(/g)) {
+        const numerator = m[1]!;
+        if (/::numeric|\bsum\s*\(/.test(numerator)) continue;
+        bad.push(`${file}: ${numerator.trim()} / nullif(...)`);
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+
   it('gives every threshold a justification', () => {
     for (const [id, check] of Object.entries(CHECKS)) {
       for (const t of check.thresholds ?? []) {
@@ -136,10 +172,20 @@ describe('the package boundary', () => {
           ...[...sql.matchAll(/::text\s+AS\s+(\w+)/gi)].map((m) => m[1]!),
           ...[...sql.matchAll(/(\w+)::text\b(?!\s*AS)/gi)].map((m) => m[1]!),
         ]);
-        const orderBy = sql.match(/ORDER BY[\s\S]*$/i)?.[0] ?? '';
+        // EACH ORDER BY clause, bounded — not one slice from the first
+        // `ORDER BY` to the end of the block. A query whose CTE carries its
+        // own `ORDER BY` (sequences.ts uses `DISTINCT ON`, which requires one)
+        // put every outer `::text AS` alias inside that slice and reported
+        // three offences against a query sorting on `(v.val / v.ceiling)` — a
+        // numeric expression. An inner clause cannot reference an outer
+        // alias, because the outer SELECT is not in its scope.
+        const clauses = [...sql.matchAll(/ORDER BY[\s\S]*?(?=\bLIMIT\b|\n\s*\)|$)/gi)]
+          .map((m) => m[0]);
         for (const alias of aliases) {
-          if (new RegExp(`(^|[^.\\w])${alias}\\b`).test(orderBy)) {
-            offenders.push(`${file}: ORDER BY sorts '${alias}' by its ::text alias, not its numeric source`);
+          for (const clause of clauses) {
+            if (new RegExp(`(^|[^.\\w])${alias}\\b`).test(clause)) {
+              offenders.push(`${file}: ORDER BY sorts '${alias}' by its ::text alias, not its numeric source`);
+            }
           }
         }
       }

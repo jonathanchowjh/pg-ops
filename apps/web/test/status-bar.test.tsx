@@ -39,6 +39,22 @@ describe('StatusBar', () => {
     primary.unmount();
   });
 
+  /**
+   * The regression that matters, and it is guarded by StatusBar not having
+   * changed at all. #56 renders in a disclosure on /cleanup, not here: this
+   * component sits in the layout shared by the four incident pages, two
+   * lines above a button that terminates backends, and settings are twenty-one
+   * numbers that would bury the one line saying WHICH server that button acts
+   * on. If a future change threads settings through here, this fails.
+   */
+  it('states the server facts on one line and nothing else', async () => {
+    const r = await render(<StatusBar result={ok()} />);
+    expect(r.container.querySelectorAll('p')).toHaveLength(1);
+    expect(r.container.querySelector('details')).toBeNull();
+    expect(r.text()).not.toMatch(/shared_buffers|settings/i);
+    r.unmount();
+  });
+
   it('says so when the connection is not encrypted', async () => {
     const r = await render(<StatusBar result={ok({ ssl: false })} />);
     expect(r.text()).toMatch(/no ssl/i);

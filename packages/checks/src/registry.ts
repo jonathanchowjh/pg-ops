@@ -152,28 +152,61 @@ import { killBackend } from './actions/kill.js';
 import { captureOnce } from './capture.js';
 import { blocked } from './checks/blocked.js';
 import { connectionDetail, connections } from './checks/connections.js';
+import { invalidConstraints } from './checks/constraints.js';
 import { identity } from './checks/identity.js';
+import { indexBloat } from './checks/index-bloat.js';
+import {
+  duplicateIndexes, indexCaching, indexHitRate, indexList, indexUsage,
+  invalidIndexes, lastStatsReset, missingIndexes, unusedIndexes,
+} from './checks/indexes.js';
 import { locks } from './checks/locks.js';
+import { autovacuumDanger, vacuumProgress } from './checks/maintenance.js';
 import { longRunning } from './checks/long-running.js';
 import { queryStats } from './checks/query-stats.js';
 import { replicationLag } from './checks/replication.js';
+import { sequences } from './checks/sequences.js';
 import { sessionStates, sessions } from './checks/sessions.js';
+import { settings } from './checks/settings.js';
 import { slots } from './checks/slots.js';
+import { databaseSize, relationSizes, tableSizes } from './checks/space.js';
+import { tableCaching, tableHitRate, tableStats, unusedTables } from './checks/tables.js';
 import { wraparound } from './checks/wraparound.js';
 import { historicalQueryStats } from './series/query-stats.js';
 
 export const CHECKS = {
+  autovacuumDanger,
   blocked,
   connectionDetail,
   connections,
+  databaseSize,
+  duplicateIndexes,
   identity,
+  indexBloat,
+  indexCaching,
+  indexHitRate,
+  indexList,
+  indexUsage,
+  invalidConstraints,
+  invalidIndexes,
+  lastStatsReset,
   locks,
   longRunning,
+  missingIndexes,
   queryStats,
+  relationSizes,
   replicationLag,
+  sequences,
   sessions,
   sessionStates,
+  settings,
   slots,
+  tableCaching,
+  tableHitRate,
+  tableSizes,
+  tableStats,
+  unusedIndexes,
+  unusedTables,
+  vacuumProgress,
   wraparound,
 } as const;
 
@@ -377,46 +410,46 @@ export const PGHERO: Record<number, ParityEntry> = {
 
   // indexes — methods/indexes.rb
   22: { name: 'index_hit_rate', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'indexHitRate' },
   23: { name: 'index_caching', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'indexCaching' },
   24: { name: 'index_usage', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'indexUsage' },
   25: { name: 'missing_indexes', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'missingIndexes' },
   26: { name: 'unused_indexes', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'unusedIndexes' },
   27: { name: 'invalid_indexes', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'invalidIndexes' },
   28: { name: 'duplicate_indexes', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'duplicateIndexes' },
   29: { name: 'index_bloat', source: 'methods/indexes.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'indexBloat' },
   30: { name: 'indexes', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'indexList' },
   31: { name: 'reset_stats', source: 'methods/indexes.rb',
     gate: 'work', planned: 'P5' },
   32: { name: 'last_stats_reset_time', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'lastStatsReset' },
 
   // tables — methods/tables.rb (a distinct file in current pgHero; the old
   // matrix did not name a source file for this group)
   33: { name: 'table_hit_rate', source: 'methods/tables.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'tableHitRate' },
   34: { name: 'table_caching', source: 'methods/tables.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'tableCaching' },
   35: { name: 'unused_tables', source: 'methods/tables.rb',
-    gate: 'work', planned: 'P2' },
+    gate: 'work', check: 'unusedTables' },
   36: { name: 'table_stats', source: 'methods/tables.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'tableStats' },
 
   // space — methods/space.rb
   37: { name: 'database_size', source: 'methods/space.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'databaseSize' },
   38: { name: 'relation_sizes', source: 'methods/space.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'relationSizes' },
   39: { name: 'table_sizes', source: 'methods/space.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'tableSizes' },
   40: { name: 'space_growth', source: 'methods/space.rb',
     gate: 'keep-up', planned: 'P4' },
   41: { name: 'relation_space_stats', source: 'methods/space.rb',
@@ -425,14 +458,22 @@ export const PGHERO: Record<number, ParityEntry> = {
     gate: 'keep-up', job: 'captureSpaceStats' },
 
   // maintenance — methods/maintenance.rb
+  // Answered by `tableStats` (#36), not by a check of its own. pgHero's
+  // `maintenance_info` reads pg_stat_user_tables and returns (schema, table,
+  // last_vacuum, last_autovacuum, last_analyze, last_autoanalyze, dead_rows,
+  // live_rows); `tableStats` reads the same view and returns the same eight
+  // fields, because #36 diverged from pgHero's `table_stats` precisely by
+  // adopting THIS shape — see tables.ts. Two checks would have given the
+  // maintenance page two answers to one question. Naming one check twice is
+  // already how #49/#51 and #1/#2/#3/#48 work.
   43: { name: 'maintenance_info', source: 'methods/maintenance.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'tableStats' },
   44: { name: 'transaction_id_danger', source: 'methods/maintenance.rb',
     gate: 'keep-up', check: 'wraparound' },
   45: { name: 'autovacuum_danger', source: 'methods/maintenance.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'autovacuumDanger' },
   46: { name: 'vacuum_progress', source: 'methods/maintenance.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'vacuumProgress' },
   47: { name: 'analyze_tables', source: 'methods/maintenance.rb',
     gate: 'keep-up', planned: 'P5' },
 
@@ -454,22 +495,27 @@ export const PGHERO: Record<number, ParityEntry> = {
     gate: 'keep-up', check: 'replicationLag' },
 
   // sequences — methods/sequences.rb
+  // #52, #53 and #54 are one query. pgHero asks three times — list them,
+  // rank them by danger, name the ones it could not read — and the ranking
+  // needs the column ceiling that the listing already had to find, so
+  // splitting them would mean deriving the same ceiling three times and
+  // letting the three copies drift.
   52: { name: 'sequences', source: 'methods/sequences.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'sequences' },
   53: { name: 'sequence_danger', source: 'methods/sequences.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'sequences' },
   54: { name: 'unreadable_sequences', source: 'methods/sequences.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'sequences' },
 
   // constraints — methods/constraints.rb (a distinct file in current
   // pgHero; the old matrix did not name a source file for this group)
   55: { name: 'invalid_constraints', source: 'methods/constraints.rb',
-    gate: 'keep-up', planned: 'P2' },
+    gate: 'keep-up', check: 'invalidConstraints' },
 
   // settings — methods/settings.rb (a distinct file in current pgHero; the
   // old matrix did not name a source file for this group)
   56: { name: 'settings', source: 'methods/settings.rb',
-    gate: 'server', planned: 'P2' },
+    gate: 'server', check: 'settings' },
 
   // explain — methods/explain.rb
   57: { name: 'explain', source: 'methods/explain.rb',
@@ -535,7 +581,7 @@ export const PGHERO: Record<number, ParityEntry> = {
  * since a capability is owed by P1 whether P1a or P1b was meant to deliver
  * it.
  */
-export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1', 'P3'];
+export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1', 'P3', 'P2'];
 
 /**
  * Build order, as data. `planned: 'P3'` means "P3 OWNS this", not "P3 happens

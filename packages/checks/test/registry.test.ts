@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   ACTIONS, CHECKS, COMPLETE_PHASES, JOBS, PGHERO, PHASE_ORDER, SERIES, parityBacklog,
@@ -166,6 +167,73 @@ describe('every capability has a place on the tree', () => {
     for (const [id, check] of Object.entries(CHECKS)) {
       if (check.gate === 'server') continue;
       expect(GATE_ORDER, `check ${id}`).toContain(check.gate as Gate);
+    }
+  });
+});
+
+/**
+ * §8, enforced rather than repeated.
+ *
+ * The registry is the authority on parity, and the lesson §8 draws is that
+ * prose restating a number the registry owns is what rots. It rotted exactly
+ * that way: through P3 and P2 the README went on saying "24 of the 65 are
+ * shipped … and 40 remain" while `parityBacklog` had moved to 49 and 15. Two
+ * whole phases, silently, in the one document a reader evaluating pgops
+ * against pgHero actually opens.
+ *
+ * Nothing held it, so this does. It reads the README's own table and headline
+ * rather than a copy of them, so the next release cannot move the registry and
+ * leave the prose behind — the way every other claim in this repo is held by a
+ * guard rather than by remembering.
+ */
+describe('the README parity claims', () => {
+  const README = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8');
+
+  const row = (label: string): number => {
+    const m = new RegExp(`\\|\\s*${label}\\s*\\|\\s*(\\d+)\\s*\\|`).exec(README);
+    if (m === null) throw new Error(`no "${label}" row in the README parity table`);
+    return Number(m[1]);
+  };
+
+  const shipped = Object.values(PGHERO).length - parityBacklog()
+    - Object.values(PGHERO).filter((e) => 'declined' in e).length;
+
+  it('states the counts the registry computes', () => {
+    expect(row('Shipped')).toBe(shipped);
+    expect(row('Declined on purpose')).toBe(
+      Object.values(PGHERO).filter((e) => 'declined' in e).length);
+    expect(row('Remaining')).toBe(parityBacklog());
+  });
+
+  /**
+   * The headline near the top of the file, which is the sentence most readers
+   * get to and the one furthest from the table that would correct it.
+   */
+  it('repeats those counts in the headline, rather than a second set', () => {
+    const m = /\*\*(\d+) of the 65 are shipped, (\d+) (?:is|are) declined on purpose,\s*\n?\s*and (\d+) remain\*\*/.exec(README);
+    expect(m, 'no "N of the 65 are shipped…" headline in the README').not.toBeNull();
+    expect(Number(m![1])).toBe(shipped);
+    expect(Number(m![3])).toBe(parityBacklog());
+  });
+
+  /**
+   * The per-phase line. `parityBacklog(phase)` exists precisely so this is not
+   * counted by hand, and a phase that finishes without the README noticing is
+   * the same defect one level down.
+   */
+  it('states what each unfinished phase still owes', () => {
+    for (const phase of ['P4', 'P5', 'P6'] as Phase[]) {
+      const m = new RegExp(`${phase} owes (\\d+)`).exec(README);
+      expect(m, `README does not say what ${phase} owes`).not.toBeNull();
+      expect(Number(m![1]), phase).toBe(parityBacklog(phase));
+    }
+  });
+
+  it('claims no phase complete that the registry still owes for', () => {
+    for (const phase of PHASES) {
+      if (!COMPLETE_PHASES.includes(phase)) continue;
+      expect(README, `README lists ${phase} as owing work while it is complete`)
+        .not.toMatch(new RegExp(`${phase} owes [1-9]`));
     }
   });
 });

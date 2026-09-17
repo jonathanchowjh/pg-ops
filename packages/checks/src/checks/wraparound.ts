@@ -1,7 +1,14 @@
 import type { Check, Verdict } from '../types.js';
 
-/** The xid at which Postgres refuses new transactions. */
-const HARD_LIMIT = 2_147_483_647;
+/**
+ * The xid at which Postgres refuses new transactions.
+ *
+ * Exported because `maintenance.ts`'s `autovacuumDanger` counts down from the
+ * same horizon — it is the per-relation detail behind this database-wide
+ * alarm, and two copies of the number would eventually disagree about which
+ * page was telling the truth.
+ */
+export const HARD_LIMIT = 2_147_483_647;
 
 export interface WraparoundRow {
   database: string;

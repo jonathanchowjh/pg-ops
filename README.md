@@ -19,8 +19,8 @@ That superset claim is checked rather than asserted.
 [packages/checks/src/registry.ts](packages/checks/src/registry.ts) maps all 65
 capabilities of pgHero 4.0.1 onto a shipped check, a shipped action, a platform
 feature, or a numbered phase, and the test suite fails if a phase marked
-complete still owes one. **24 of the 65 are shipped, 1 is declined on purpose,
-and 40 remain** — see [Parity with pgHero](#parity-with-pghero).
+complete still owes one. **49 of the 65 are shipped, 1 is declined on purpose,
+and 15 remain** — see [Parity with pgHero](#parity-with-pghero).
 
 One URL, many databases. What is built so far is what you need in the first
 five minutes — who's connected and in what state, is
@@ -29,8 +29,9 @@ which server you are actually pointed at — and then, if you switch the safety
 off, it can terminate the backend that is holding everything up. Point it at a
 store and it also records history — query statistics and relation sizes,
 captured every five minutes, without ever resetting a counter another tool is
-reading. The hygiene half (indexes, bloat, space growth, sequence exhaustion,
-maintenance) is the next phase and is not here yet.
+reading. The hygiene half is here too — indexes, bloat, table and database
+size, sequence exhaustion, vacuum and analyze, and the server's own settings —
+on its own tab, behind its own pages, and never polling a catalog scan.
 
 ```sh
 docker build -t pgops .
@@ -361,29 +362,39 @@ Without the variable there is no scheduler, no schema, and no DDL anywhere;
 history reports itself as unavailable and the queries page simply does not
 draw the column. It never guesses at a database to write to.
 
-## What v1 is, and what v2 adds
+## What v2 adds
 
-**v1 is the incident half of pgHero, and only that half.** That is a boundary,
-not a shortfall: every route here answers a question you have while the pager
-is going off, and each one is complete. Twenty-four of pgHero's sixty-five
-capabilities ship, one is declined on purpose, and forty remain.
+**v1 was the incident half of pgHero, and only that half.** v2 is the other
+half: indexes, bloat, table and database size, sequence exhaustion, vacuum and
+analyze, and the server's own settings. It ships as a whole class rather than
+as panels appearing one release at a time, for the reason the v1 boundary
+existed in the first place — a console that answers "are your indexes healthy?"
+with a half-built screen is worse than one that does not answer it at all.
 
-**The hygiene half is not in v1, and it is not partially in v1** — indexes,
-bloat, table and database size, sequence exhaustion, maintenance, settings.
-None of it renders as an empty panel or a screen that is quietly incomplete.
-It is designed rather than deferred: the whole class is specified in
-[`docs/superpowers/specs/2026-09-03-pgops-p2-hygiene-design.md`](docs/superpowers/specs/2026-09-03-pgops-p2-hygiene-design.md),
-down to thresholds and per-capability divergences, and it lands as v2.
+The shape of the console changed, which is why this is a major version. The nav
+had four gates and three tabs; `keep-up` — *Replication & cleanup* — had no
+destination. It has one now:
 
-The reason for the split is the same one behind everything else here: a
-console that answers "are your indexes healthy?" with a half-built screen is
-worse than one that does not answer it at all. "We have not built this" and
-"we looked and it is fine" must never render the same, and the cleanest way to
-hold that line across a whole class of checks is not to ship the class until it
-is whole.
+| Route | What it answers |
+|---|---|
+| `/db/<name>/cleanup` | Wraparound horizon, replication role and lag, replication slots |
+| `/db/<name>/cleanup/space` | Database size, largest relations, largest tables |
+| `/db/<name>/cleanup/maintenance` | Running vacuums, last vacuum and analyze, transaction-ID age by relation |
+| `/db/<name>/cleanup/sequences` | Every sequence against the ceiling of the column it feeds |
+| `/db/<name>/queries/indexes` | Index usage, missing and unused indexes, duplicates, invalid indexes |
+| `/db/<name>/queries/indexes/bloat` | Index bloat, estimated — on its own route, run on request |
+| `/db/<name>/queries/tables` | Table hit rate, caching, unused tables, table statistics |
 
-If you are evaluating pgops against pgHero today, the honest summary is: use it
-during an incident, and keep pgHero for the weekly hygiene pass until v2.
+**The poll boundary is the load-bearing distinction.** `/cleanup` renders
+incident checks and refreshes every five seconds, because a wraparound horizon
+and a stalled replication slot both get worse while you watch. Everything under
+it runs catalog scans and refreshes only when you ask. A guard in the test
+suite holds that from both directions: a hygiene route that starts polling
+fails, and so does an incident page that stops.
+
+The divergences from pgHero that arrived with these routes are catalogued with
+the rest of them under [Parity with pgHero](#parity-with-pghero), beside the
+code that implements each one.
 
 ## Parity with pgHero
 
@@ -395,20 +406,23 @@ file and resolves to exactly one state, checked on every test run.
 
 | State | Count |
 |---|---:|
-| Shipped | 24 |
+| Shipped | 49 |
 | Declined on purpose | 1 |
-| Remaining | 40 |
+| Remaining | 15 |
 
-The remaining work is phased, and `parityBacklog('P2')` reports each phase's
-size rather than leaving it to be counted by hand: **P2 is 25 capabilities** —
-indexes, tables, space, sequences, settings, maintenance and constraints —
-then P4–P6 hold the charts over the captured history, the reset and analyze
-actions, `EXPLAIN`, and index suggestions. P3, the store and the capture
-scheduler, is done; build order is data in `PHASE_ORDER`, which is why P3
-shipped ahead of P2.
+The remaining work is phased, and `parityBacklog(phase)` reports each phase's
+size rather than leaving it to be counted by hand: **P4 owes 3, P5 owes 6 and
+P6 owes 6** — the charts over the captured history, the `reset_stats` and
+`analyze` actions, `EXPLAIN`, and index suggestions. P0, P1, P2 and P3 are
+done. Build order is data in `PHASE_ORDER`, which is why P3, the store and the
+capture scheduler, shipped ahead of P2.
 
-Six deliberate divergences, all of them documented at the code that implements
-them:
+Every number above comes from `registry.ts`. If one of them is wrong, the test
+suite is wrong with it — `parityBacklog` is what the phase gate reads, and a
+phase marked complete that still owes an entry fails by name.
+
+Twelve deliberate divergences, all of them documented at the code that
+implements them — six from v1, six that arrived with the hygiene routes:
 
 - **`kill` is guarded.** pgHero's is a bare `pg_terminate_backend` behind a
   button. See [Safety](#safety).
@@ -435,6 +449,36 @@ them:
   test captures twice and asserts the counters only ever climb, and a source
   guard fails the moment any file in `packages/checks` so much as names a
   reset function.
+- **Sizes are bytes, not `pretty_size` strings.** pgHero returns `"8192 MB"`,
+  which cannot be thresholded, summed or charted. pgops returns the number and
+  formats it at the page that renders it. See `space.ts`.
+- **A reading we could not take is `null`, never a sentinel.** pgHero renders
+  an index with no I/O yet as `"Insufficient data"` in a column of percentages,
+  and a table nothing has read as `0%` cached. Both sort to the top of a page
+  ranked by how bad the reading is. See `indexes.ts` and `tables.ts`.
+- **Settings are one round trip, not fifteen.** pgHero issues `SHOW <name>` per
+  setting; pgops reads `pg_settings` once. The value is the `SHOW`-equivalent,
+  so `shared_buffers` reads `128MB` rather than `16384` with a separate `8kB`
+  unit hanging off it. pgHero's version branch is also dropped rather than
+  copied: it exists because `SHOW` errors on a setting the server does not
+  have, and `pg_settings` returns no row instead. See `settings.ts`.
+- **`sequence_danger` measures against the COLUMN's type, not the sequence's
+  own maximum.** A bigint sequence feeding an `integer` column overflows at
+  2,147,483,647 — the column's ceiling is the one that breaks writes. Measured
+  against the sequence's own `max_value` it reads as 0.00000002% used on the
+  day it starts failing. See `sequences.ts`.
+- **`autovacuum_danger` ships as a list, not an alarm.** `transaction_id_danger`
+  already reads the database-wide `datfrozenxid`, which is the minimum over
+  every relation, so it cannot miss what the per-relation list would find. Two
+  badges on one fact would disagree the moment either was tuned. The list is
+  what you open after the alarm fires, to decide what to vacuum first. It also
+  reads the TOAST relation's frozen xid, which freezes independently of the
+  heap — read the heap alone and a table whose TOAST holds the oldest xid in
+  the database reports an age of zero. See `maintenance.ts`.
+- **`maintenance_info` is answered by `table_stats`.** The two read the same
+  view and return the same eight fields, so #43 and #36 resolve to one check
+  rather than two answers to one question. See `tables.ts`.
+
 
 ## Safety
 

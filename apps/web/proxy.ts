@@ -85,9 +85,11 @@ export function proxy(req: NextRequest) {
  * `public/` directory and no `app/favicon.ico`, and you cannot generate one
  * (app-icons.md: "You cannot generate a `favicon` icon").
  *
- * It does now ship `app/icon.svg`, which is NOT that path: Next serves an app
- * icon as its own Route Handler at `/icon`, which this matcher therefore
- * covers. That is left alone deliberately. The tab icon goes through
+ * It does now ship `app/icon.svg`, which is NOT that path: Next serves a
+ * STATIC app icon at `/icon.svg` — the route table in `next build` prints it
+ * as `○ /icon.svg`, not the `/icon?<generated>` that app-icons.md shows for a
+ * generated `icon.tsx` — and this matcher therefore covers it. That is left
+ * alone deliberately. The tab icon goes through
  * `authorize` like everything else, so an unauthenticated browser gets a 401
  * for it and shows no icon beside the credential prompt — which is cosmetic,
  * and cheaper than widening a matcher whose every exclusion is an

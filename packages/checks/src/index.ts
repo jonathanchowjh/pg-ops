@@ -29,13 +29,21 @@ export type * from './series/query-stats.js';
  */
 export type * from './checks/blocked.js';
 export type * from './checks/connections.js';
+export type * from './checks/constraints.js';
 export type * from './checks/identity.js';
+export type * from './checks/index-bloat.js';
+export type * from './checks/indexes.js';
 export type * from './checks/locks.js';
+export type * from './checks/maintenance.js';
 export type * from './checks/long-running.js';
 export type * from './checks/query-stats.js';
 export type * from './checks/replication.js';
+export type * from './checks/sequences.js';
 export type * from './checks/sessions.js';
+export type * from './checks/settings.js';
 export type * from './checks/slots.js';
+export type * from './checks/space.js';
+export type * from './checks/tables.js';
 export type * from './checks/wraparound.js';
 export type * from './actions/kill.js';
 
@@ -43,3 +51,7 @@ export type * from './actions/kill.js';
 // above carries interfaces only, so without this apps/web cannot import them
 // and the queries page fails to compile.
 export { slowQueries, SLOW_QUERY_DEFAULTS } from './checks/query-stats.js';
+// Same reason: `settingNames` is the function the settings check's own
+// integration test and any caller that needs the asked-for list uses, and
+// `export type *` above cannot carry it.
+export { settingNames } from './checks/settings.js';

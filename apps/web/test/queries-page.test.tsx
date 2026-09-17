@@ -45,7 +45,16 @@ vi.mock('@/lib/check', () => ({
 }));
 
 // Refresh calls useRouter() unconditionally in its own module body's render path.
-vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: () => {} }) }));
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ refresh: () => {} }),
+  // Added when the Queries tab gained a SubNav. `vi.mock` replaces the WHOLE
+  // module, so every hook anywhere in the page's tree has to be supplied
+  // here — omitting this one failed all eight tests in this file with
+  // `No "useSelectedLayoutSegment" export is defined on the "next/navigation"
+  // mock`, which names the hook but not the component that introduced it.
+  // `null` is the segment on the tab's own page, which is the page under test.
+  useSelectedLayoutSegment: () => null,
+}));
 
 let rendered: Rendered | undefined;
 
@@ -57,6 +66,39 @@ afterEach(() => {
   rendered = undefined;
   rowsState.rows = [BASE_ROW];
   seriesState.result = { ok: false, reason: 'missing-store', message: 'no store' };
+});
+
+describe('the Queries tab is extended, not replaced', () => {
+  /**
+   * The WIRING, which neither sub-nav.test.tsx nor the rest of this file
+   * covers: that component test renders SubNav directly, so deleting
+   * `<SubNav>` from this page would leave it green. This is the assertion
+   * that goes red.
+   */
+  it('renders the sub-route strip on the tab itself', async () => {
+    const element = await Queries({
+      params: Promise.resolve({ name: 'primary' }),
+      searchParams: Promise.resolve({}),
+    });
+    rendered = await render(element);
+    const html = rendered.container.innerHTML;
+    expect(html).toContain('/db/primary/queries/indexes');
+    expect(html).toContain('/db/primary/queries/tables');
+  });
+
+  /**
+   * /queries is an incident page and guards.test.ts asserts it polls. The
+   * strip is additive: the tab keeps its content and its refresh.
+   */
+  it('keeps the poll and the query table it already had', async () => {
+    const element = await Queries({
+      params: Promise.resolve({ name: 'primary' }),
+      searchParams: Promise.resolve({}),
+    });
+    rendered = await render(element);
+    expect(rendered.text()).toContain('sorted by total');
+    expect(rendered.text()).toContain('select 1');
+  });
 });
 
 describe('Queries page — default sort', () => {

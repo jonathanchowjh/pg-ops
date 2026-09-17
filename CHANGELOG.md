@@ -4,6 +4,87 @@ All notable changes to pgops are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-09-17
+
+The hygiene half ships. v1 answered the questions you have in the first five
+minutes of an incident; v2 answers the ones you have on a Tuesday afternoon —
+indexes, bloat, table and database size, sequence exhaustion, vacuum and
+analyze, and the server's own settings.
+
+**Major, because the console changed shape.** `gates.ts` has always modelled a
+request as four gates, and the nav had only three tabs: `keep-up` —
+*Replication & cleanup* — had no destination. It has one now, and every gate
+has a tab.
+
+Parity, read from `registry.ts` rather than counted by hand: **49 of the 65
+capabilities ship, 1 is declined on purpose, and 15 remain.** `parityBacklog`
+reports P2 as 0 and the phase gate is green; P4, P5 and P6 owe 3, 6 and 6.
+
+### Added
+
+- **Cleanup** (`/db/<name>/cleanup`) — the wraparound horizon, replication role
+  and lag, and replication slots. The one hygiene-gate route that polls, at the
+  incident cadence, because a closing horizon and a stalled slot both get worse
+  while you watch.
+- **Space** (`/db/<name>/cleanup/space`) — database size, largest relations,
+  largest tables with their indexes and TOAST.
+- **Maintenance** (`/db/<name>/cleanup/maintenance`) — running vacuums with
+  their progress, last vacuum and analyze per table, and transaction-ID age by
+  relation.
+- **Sequences** (`/db/<name>/cleanup/sequences`) — every sequence against the
+  ceiling of the column it actually feeds, with the ones this role cannot read
+  counted rather than dropped.
+- **Indexes** (`/db/<name>/queries/indexes`) — index hit rate and caching,
+  missing indexes, unused indexes, duplicates, and invalid indexes.
+- **Index bloat** (`/db/<name>/queries/indexes/bloat`) — the five-CTE estimate,
+  on its own route and run only when asked, because pgHero keeps it off the
+  page you open by reflex for the same reason.
+- **Tables** (`/db/<name>/queries/tables`) — table hit rate, caching, unused
+  tables, and per-table statistics.
+- **Settings** — the server's own configuration, in a collapsed disclosure on
+  the Cleanup page.
+- A second-level nav under the tabs that carry sub-routes, and a `Cleanup` tab
+  on the first level.
+
+### Changed
+
+- **The poll boundary is now enforced in both directions.** `/cleanup` and the
+  four incident pages refresh every five seconds; every hygiene route runs its
+  catalog scans on visit and never polls. A guard fails if a hygiene route
+  gains a refresh, and fails if an incident page loses one.
+- **`registry.ts` closes P2.** Ten capabilities flip from planned to shipped
+  and `'P2'` joins `COMPLETE_PHASES`, which the phase gate now holds.
+
+### Divergences from pgHero, new in this release
+
+Each is documented at the code that implements it; the full catalogue of twelve
+is in the README.
+
+- **Sizes are bytes, not `pretty_size` strings.** `"8192 MB"` cannot be
+  thresholded, summed or charted. The formatting happens at the page.
+- **A reading we could not take is `null`, never a sentinel.** pgHero renders
+  an index with no I/O yet as `"Insufficient data"` in a column of percentages,
+  and a table nothing has read as `0%` cached — both sort to the top of a page
+  ranked by how bad the reading is.
+- **Settings are one round trip, not fifteen**, and the value is the
+  `SHOW`-equivalent: `shared_buffers` reads `128MB`, not `16384` with a
+  separate `8kB` unit. pgHero's version branch is dropped rather than copied —
+  it exists because `SHOW` errors on a setting the server does not have, and
+  `pg_settings` returns no row instead.
+- **`sequence_danger` measures against the COLUMN's type, not the sequence's
+  own maximum.** A bigint sequence feeding an `integer` column overflows at
+  2,147,483,647; measured against its own `max_value` it reads as 0.00000002%
+  used on the day it starts failing.
+- **`autovacuum_danger` ships as a list, not an alarm.** `transaction_id_danger`
+  already reads the database-wide `datfrozenxid` — the minimum over every
+  relation — so it cannot miss what the per-relation list would find, and two
+  badges on one fact would disagree the moment either was tuned. The list also
+  reads the TOAST relation's frozen xid, which freezes independently of the
+  heap.
+- **`maintenance_info` is answered by `table_stats`.** Both read
+  `pg_stat_user_tables` and return the same eight fields. One question, one
+  answer.
+
 ## [1.0.0] — 2026-09-11
 
 The first release. pgops is a web console you deploy next to your databases:

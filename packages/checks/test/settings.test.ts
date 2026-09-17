@@ -1,0 +1,105 @@
+import { describe, expect, it } from 'vitest';
+import { settings, settingNames, toSettings } from '../src/checks/settings.js';
+
+describe('settingNames', () => {
+  /**
+   * The parity contract with `settings.rb`, pinned rather than described.
+   *
+   * §8's lesson is that a parity claim nobody can check is the one that rots:
+   * dropping a setting from a group degrades in silence — the page renders,
+   * one row fewer, and no other test in this file notices. This is the only
+   * thing standing between that and a reviewer diffing against pgHero by eye.
+   *
+   * `io_method` is in the list unconditionally. pgHero branches on the server
+   * version because `SHOW` errors on a setting that does not exist;
+   * `pg_settings` returns no row instead, so there is nothing to branch on.
+   */
+  it("asks for exactly pgHero 4.0.1's three groups, in pgHero's order", () => {
+    expect(settingNames()).toEqual([
+      'max_connections', 'shared_buffers', 'effective_cache_size', 'maintenance_work_mem',
+      'checkpoint_completion_target', 'wal_buffers', 'default_statistics_target',
+      'random_page_cost', 'effective_io_concurrency', 'work_mem', 'huge_pages',
+      'jit', 'wal_compression', 'io_method', 'min_wal_size', 'max_wal_size',
+      'autovacuum', 'autovacuum_max_workers', 'autovacuum_vacuum_cost_limit',
+      'autovacuum_vacuum_scale_factor', 'autovacuum_analyze_scale_factor',
+      'vacuum_cost_limit',
+    ]);
+  });
+
+  it('asks for every name exactly once, so the server is not queried twice for one value', () => {
+    const asked = settingNames();
+    expect(new Set(asked).size).toBe(asked.length);
+  });
+
+  /**
+   * The check takes no options at all, which is the point of removing the
+   * branch: `sql` is a pure function of its opts and cannot reach the server
+   * version, and no page can supply one it does not have.
+   */
+  it('needs nothing from the caller', () => {
+    expect(settings.sql).toBeTypeOf('function');
+    expect(settingNames).toHaveLength(0);
+  });
+});
+
+describe('toSettings', () => {
+  /**
+   * Every group carries more than one member, because a grouping bug that
+   * puts everything in `main` passes any test where the other groups have a
+   * single expected member and nothing to be wrongly joined by.
+   */
+  const rows = [
+    { name: 'vacuum_cost_limit', value: '200' },
+    { name: 'autovacuum_max_workers', value: '3' },
+    { name: 'shared_buffers', value: '128MB' },
+    { name: 'autovacuum', value: 'on' },
+    { name: 'max_connections', value: '100' },
+  ];
+
+  it('puts each setting in its own group and no other', () => {
+    const d = toSettings(rows);
+    expect(d.main.map((s) => s.name)).toEqual(['max_connections', 'shared_buffers']);
+    expect(d.autovacuum.map((s) => s.name)).toEqual(['autovacuum', 'autovacuum_max_workers']);
+    expect(d.vacuum.map((s) => s.name)).toEqual(['vacuum_cost_limit']);
+  });
+
+  /**
+   * The rows above are deliberately in neither catalog nor alphabetical
+   * order. `pg_settings` answers in its own order and the SQL adds no
+   * `ORDER BY`, so this is the only thing deciding what an operator reads.
+   */
+  it('orders by the pgHero arrays, not by the order the rows arrived', () => {
+    const d = toSettings(rows);
+    expect(d.main[0]!.name).toBe('max_connections');
+    expect(d.autovacuum[0]!.name).toBe('autovacuum');
+  });
+
+  /**
+   * A name with no row is skipped, never rendered blank — which is what keeps
+   * this function free of the version branch. On 17 there is no `io_method`
+   * row and nothing here needs to know why.
+   */
+  it('skips a setting the server did not return rather than rendering it empty', () => {
+    const d = toSettings([{ name: 'max_connections', value: '100' }]);
+    expect(d.main).toEqual([{ name: 'max_connections', value: '100' }]);
+    expect(d.main.some((s) => s.name === 'io_method')).toBe(false);
+  });
+
+  it('gives three empty groups for a server that returned nothing', () => {
+    expect(toSettings([])).toEqual({ main: [], autovacuum: [], vacuum: [] });
+  });
+
+  it('keeps the value verbatim, including one that is a word rather than a number', () => {
+    const d = toSettings([{ name: 'huge_pages', value: 'try' }]);
+    expect(d.main[0]!.value).toBe('try');
+  });
+
+  it('ships no verdict: advice that does not know the machine is a guess', () => {
+    expect(settings.verdict).toBeUndefined();
+    expect(settings.thresholds).toBeUndefined();
+  });
+
+  it('places server facts in the status line, not in a gate', () => {
+    expect(settings.gate).toBe('server');
+  });
+});

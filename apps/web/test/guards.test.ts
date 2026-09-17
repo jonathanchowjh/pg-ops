@@ -403,6 +403,15 @@ describe('the poll boundary', () => {
     join(APP, 'db', '[name]', 'sessions', 'page.tsx'),
     join(APP, 'db', '[name]', 'locks', 'page.tsx'),
     join(APP, 'db', '[name]', 'queries', 'page.tsx'),
+    // The one hygiene-gate route that polls, and the extension is
+    // deliberate rather than an oversight this guard failed to catch.
+    // /cleanup renders wraparound, replicationLag and slots — all
+    // `class: 'incident'` — and a wraparound horizon or a stalled slot gets
+    // worse while an operator watches. Its SUB-routes are the opposite:
+    // catalog scans that run on visit, and they share this page's layout, so
+    // the poll lives on the page and not in the layout. Nothing else under
+    // db/[name]/cleanup/ may appear in this list.
+    join(APP, 'db', '[name]', 'cleanup', 'page.tsx'),
   ];
 
   /**

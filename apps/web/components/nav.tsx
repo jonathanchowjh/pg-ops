@@ -13,6 +13,12 @@ const TABS = [
   { segment: 'sessions', href: '/sessions', label: 'Sessions' },
   { segment: 'locks', href: '/locks', label: 'Locks' },
   { segment: 'queries', href: '/queries', label: 'Queries' },
+  // Labelled `Cleanup`, not `Replication & cleanup`. The gate's title is the
+  // sentence a band on the triage page uses; a tab is a word on a strip, and
+  // the ampersand is where this row starts wrapping. test/nav.test.tsx holds
+  // the property that matters — every gate has a tab — by href segment
+  // rather than by label, precisely because the two differ here.
+  { segment: 'cleanup', href: '/cleanup', label: 'Cleanup' },
 ] as const;
 
 /**
