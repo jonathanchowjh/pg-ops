@@ -222,7 +222,11 @@ describe('the README parity claims', () => {
    * the same defect one level down.
    */
   it('states what each unfinished phase still owes', () => {
-    for (const phase of ['P4', 'P5', 'P6'] as Phase[]) {
+    // Derived, not listed. A hardcoded ['P4','P5','P6'] has to be hand-edited
+    // by the phase that completes — which is the same defect this block
+    // exists to catch, one level down: the guard would demand a "P4 owes 0"
+    // line the README should no longer carry.
+    for (const phase of PHASES.filter((p) => !COMPLETE_PHASES.includes(p))) {
       const m = new RegExp(`${phase} owes (\\d+)`).exec(README);
       expect(m, `README does not say what ${phase} owes`).not.toBeNull();
       expect(Number(m![1]), phase).toBe(parityBacklog(phase));

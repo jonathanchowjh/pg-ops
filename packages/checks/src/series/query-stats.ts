@@ -98,9 +98,57 @@ export const historicalQueryStats: Series<ShapeIntervals, HistoricalQueryStatsOp
     // `runSeries` returns `missing-store` before ever calling `read`, so the
     // store is present here by construction. Reached any other way this
     // throws, and `runSeries` converts that to ok:false like any other error.
-    const shapes = await readQueryStats(ctx.store!, opts.databaseName, range.from, range.to);
+    //
+    // `opts` is forwarded WHOLE, and that fifth argument is load-bearing. It
+    // was missing: `HistoricalQueryStatsOpts extends ReadOpts` precisely so a
+    // caller can bound the read, the queries page passes `maxSnapshots: 2`
+    // and the ~100 `queryids` it renders, and both were dropped here — so
+    // read.ts's I2 bound existed, was unit-tested, and applied to nothing
+    // reachable from a page. Every render of an INCIDENT page polling at 5s
+    // read every snapshot in a twenty-minute window for every shape in the
+    // database, each dragging its full query text: spec §5.1's "one indexed
+    // lookup per render and it must stay that way", inverted.
+    //
+    // The extra `databaseName` property rides along unread; `ReadOpts` is a
+    // supertype, so this is the whole options object arriving where its
+    // store-facing half is wanted, not a cast.
+    const shapes = await readQueryStats(ctx.store!, opts.databaseName, range.from, range.to, opts);
     return shapes
       .map((s) => ({ queryid: s.queryid, query: s.query, intervals: deltas(s.points) }))
       .filter((s) => s.intervals.length > 0);
+  },
+};
+
+/**
+ * #16. One shape's movement over a window, as intervals.
+ *
+ * A SECOND series rather than an option on `historicalQueryStats`, because
+ * they bound differently and answering both from one object would give it two
+ * incompatible defaults. That one answers "how has every shape on this page
+ * moved since the last capture" — many shapes, two snapshots. This answers
+ * "how has THIS shape moved over 24 hours" — one shape, every snapshot in the
+ * window. They share `readQueryStats` and `deltas`, which is where the
+ * sharing belongs.
+ *
+ * Returns `Interval[]`, not shapes: the caller already knows which shape it
+ * asked about, and returning a one-element array of shapes to be unwrapped at
+ * every call site is ceremony.
+ */
+export const queryShapeHistory: Series<Interval, {
+  databaseName: string;
+  queryid: string;
+  maxSnapshots?: number;
+}> = {
+  id: 'queryShapeHistory',
+  title: 'Query shape history',
+  read: async (ctx, range, opts) => {
+    const shapes = await readQueryStats(
+      ctx.store!, opts.databaseName, range.from, range.to,
+      { queryids: [opts.queryid], maxSnapshots: opts.maxSnapshots });
+    // A shape the store has never captured yields no rows. `[]` is the
+    // reading — `runSeries` reports ok:true with no points, and the page says
+    // "no history yet" rather than "we could not look".
+    const shape = shapes[0];
+    return shape === undefined ? [] : deltas(shape.points);
   },
 };

@@ -107,3 +107,127 @@ interface Row {
   total_exec_time: number; rows: string;
   shared_blks_hit: string; shared_blks_read: string; stats_reset: Date | null;
 }
+
+export interface StoredGrowth {
+  relation: string;
+  firstBytes: number;
+  lastBytes: number;
+  firstAt: Date;
+  lastAt: Date;
+  /** Captures in the window. 1 means there is no interval to measure. */
+  points: number;
+}
+
+interface GrowthRow {
+  relation: string;
+  /** bigint -> string, per this package's convention. */
+  first_bytes: string;
+  last_bytes: string;
+  first_at: Date;
+  last_at: Date;
+  points: string;
+}
+
+/**
+ * #40, and the divergence from pgHero is deliberate.
+ *
+ * `space_growth` takes the first captured size in the window and subtracts it
+ * from the relation's CURRENT, LIVE size — it re-runs `relation_sizes` against
+ * the monitored database to get the second endpoint. That mixes a stored
+ * reading with a live one: up to one capture interval of change is silently
+ * attributed to the whole window, and the number moves every time the page is
+ * re-rendered, so two operators looking at the same "7-day growth" see
+ * different figures. Both endpoints here come from the store, and `lastAt`
+ * travels with them so the surface can say how fresh the window is.
+ *
+ * One pass with `min`/`max` over `captured_at`, not two `DISTINCT ON`
+ * subqueries: `(database_id, relation, captured_at)` is the primary key, so
+ * this is an index scan per relation either way, and one aggregate is one
+ * plan to read.
+ */
+export async function readSpaceGrowth(
+  store: Pool | PoolClient,
+  databaseName: string,
+  from: Date,
+  to: Date,
+): Promise<StoredGrowth[]> {
+  const { rows } = await store.query<GrowthRow>(
+    `WITH bounds AS (
+       SELECT s.relation,
+              min(s.captured_at) AS first_at,
+              max(s.captured_at) AS last_at,
+              count(*)           AS points
+         FROM pgops.space_stats s
+         JOIN pgops.databases d ON d.id = s.database_id
+        WHERE d.name = $1 AND s.captured_at >= $2 AND s.captured_at <= $3
+        GROUP BY s.relation
+     )
+     SELECT b.relation,
+            f.size_bytes::text AS first_bytes,
+            l.size_bytes::text AS last_bytes,
+            b.first_at,
+            b.last_at,
+            b.points::text     AS points
+       FROM bounds b
+       JOIN pgops.databases d ON d.name = $1
+       JOIN pgops.space_stats f
+         ON f.database_id = d.id AND f.relation = b.relation AND f.captured_at = b.first_at
+       JOIN pgops.space_stats l
+         ON l.database_id = d.id AND l.relation = b.relation AND l.captured_at = b.last_at
+      ORDER BY (l.size_bytes - f.size_bytes) DESC, b.relation`,
+    [databaseName, from, to],
+  );
+
+  return rows.map((r) => ({
+    relation: r.relation,
+    firstBytes: Number(r.first_bytes),
+    lastBytes: Number(r.last_bytes),
+    firstAt: r.first_at,
+    lastAt: r.last_at,
+    points: Number(r.points),
+  }));
+}
+
+export interface StoredSize { capturedAt: Date; sizeBytes: number }
+
+interface SizeRow { captured_at: Date; size_bytes: string }
+
+/**
+ * #41. One relation's captured sizes, oldest first.
+ *
+ * `maxPoints` keeps the most RECENT N and then re-orders ascending, which is
+ * why the subquery exists: thirty days at the five-minute capture cadence is
+ * 8,640 rows for one relation (§5.1), and a chart truncated from the wrong end
+ * would show the history and hide the present. `ORDER BY ... DESC LIMIT n`
+ * inside, ascending outside.
+ */
+export async function readRelationSpace(
+  store: Pool | PoolClient,
+  databaseName: string,
+  relation: string,
+  from: Date,
+  to: Date,
+  opts: { maxPoints?: number } = {},
+): Promise<StoredSize[]> {
+  const values: unknown[] = [databaseName, relation, from, to];
+  let bound = '';
+  if (opts.maxPoints !== undefined) {
+    values.push(opts.maxPoints);
+    bound = `ORDER BY s.captured_at DESC LIMIT $${values.length}`;
+  }
+  const { rows } = await store.query<SizeRow>(
+    `SELECT p.captured_at, p.size_bytes::text AS size_bytes
+       FROM (
+         SELECT s.captured_at, s.size_bytes
+           FROM pgops.space_stats s
+           JOIN pgops.databases d ON d.id = s.database_id
+          WHERE d.name = $1 AND s.relation = $2
+            AND s.captured_at >= $3 AND s.captured_at <= $4
+          ${bound}
+       ) p
+      ORDER BY p.captured_at ASC`,
+    values,
+  );
+
+  return rows.map((r) => ({ capturedAt: r.captured_at, sizeBytes: Number(r.size_bytes) }));
+}

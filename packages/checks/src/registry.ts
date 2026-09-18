@@ -171,7 +171,8 @@ import { slots } from './checks/slots.js';
 import { databaseSize, relationSizes, tableSizes } from './checks/space.js';
 import { tableCaching, tableHitRate, tableStats, unusedTables } from './checks/tables.js';
 import { wraparound } from './checks/wraparound.js';
-import { historicalQueryStats } from './series/query-stats.js';
+import { historicalQueryStats, queryShapeHistory } from './series/query-stats.js';
+import { relationSpace, spaceGrowth } from './series/space.js';
 
 export const CHECKS = {
   autovacuumDanger,
@@ -239,7 +240,9 @@ export const ACTIONS = { kill: killBackend } as const;
  * The over-time half. Keyed the same way CHECKS is, so `series:` in the
  * parity map can name a real thing and the test can prove it exists.
  */
-export const SERIES = { historicalQueryStats } as const;
+export const SERIES = {
+  historicalQueryStats, queryShapeHistory, relationSpace, spaceGrowth,
+} as const;
 export type SeriesId = keyof typeof SERIES;
 
 /**
@@ -383,7 +386,7 @@ export const PGHERO: Record<number, ParityEntry> = {
   15: { name: 'historical_query_stats', source: 'methods/query_stats.rb',
     gate: 'work', series: 'historicalQueryStats' },
   16: { name: 'query_hash_stats', source: 'methods/query_stats.rb',
-    gate: 'work', planned: 'P4' },
+    gate: 'work', series: 'queryShapeHistory' },
   // A FILTER over #14's rows, not a query: pgHero's slow_queries selects
   // from query_stats on calls >= 100 && average_time >= 20ms. Derived by
   // `slowQueries(data)` in query-stats.ts — same precedent as #5, where an
@@ -451,9 +454,9 @@ export const PGHERO: Record<number, ParityEntry> = {
   39: { name: 'table_sizes', source: 'methods/space.rb',
     gate: 'keep-up', check: 'tableSizes' },
   40: { name: 'space_growth', source: 'methods/space.rb',
-    gate: 'keep-up', planned: 'P4' },
+    gate: 'keep-up', series: 'spaceGrowth' },
   41: { name: 'relation_space_stats', source: 'methods/space.rb',
-    gate: 'keep-up', planned: 'P4' },
+    gate: 'keep-up', series: 'relationSpace' },
   42: { name: 'capture_space_stats', source: 'methods/space.rb',
     gate: 'keep-up', job: 'captureSpaceStats' },
 
@@ -581,7 +584,7 @@ export const PGHERO: Record<number, ParityEntry> = {
  * since a capability is owed by P1 whether P1a or P1b was meant to deliver
  * it.
  */
-export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1', 'P3', 'P2'];
+export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1', 'P3', 'P2', 'P4'];
 
 /**
  * Build order, as data. `planned: 'P3'` means "P3 OWNS this", not "P3 happens

@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg';
 import type {
   Check, CheckContext, CheckResult, FailureReason, Requirement, Series, SeriesResult, SqlQuery, TimeRange,
 } from './types.js';
@@ -52,6 +53,45 @@ export function messageOf(err: unknown): string {
   return String(err);
 }
 
+/**
+ * Check-out guard for a pooled client: attach an 'error' listener, and hand
+ * back the `release` that removes it again.
+ *
+ * pg emits a low-level 'error' event directly on the client when its
+ * connection drops unexpectedly (e.g. the backend is killed mid-query, the
+ * server restarts, a failover moves the primary), IN ADDITION TO rejecting
+ * any in-flight query — the query rejection is the signal callers actually
+ * act on. `Client` extends EventEmitter, and an 'error' event with no
+ * listener is a Node FATAL error. While a client is checked out it has no
+ * listener: pg-pool removes its own on acquire (pg-pool/index.js, in
+ * `_acquireClient`) and re-attaches it only on release (`_release`). So
+ * without this, an unexpected disconnect does not fail the one operation
+ * that hit it — it takes down the whole pgops process.
+ *
+ * Removed again on release so a long-lived, reused connection does not
+ * accumulate one listener per check-out.
+ *
+ * A bare exported function, and it lives HERE for the same reason `messageOf`
+ * does (see its docblock): every checkout in this package needs it, and three
+ * hand-rolled copies of a subtle four-line idiom is how one of them ends up
+ * missing — which is exactly what happened. `queryWithTimeout` had it and
+ * carried this reasoning; `captureOnce` and `withAdvisoryLock` each hold a
+ * client across far LONGER windows and had nothing. captureOnce's window
+ * spans two scans of the monitored database plus the whole write transaction,
+ * every five minutes, forever, on a file whose contract is "NEVER throws,
+ * because an unhandled rejection on a background timer terminates the web
+ * process". Not re-exported from index.ts — internal to the package, like
+ * `messageOf`.
+ */
+export function guardClient(client: PoolClient): (err?: Error) => void {
+  const swallowConnectionError = () => {};
+  client.on('error', swallowConnectionError);
+  return (err?: Error): void => {
+    client.removeListener('error', swallowConnectionError);
+    client.release(err);
+  };
+}
+
 function toQuery<Opts>(sql: Check<never, never, Opts>['sql'], opts: Opts): SqlQuery {
   return typeof sql === 'string' ? { text: sql } : sql(opts);
 }
@@ -81,24 +121,7 @@ async function queryWithTimeout(
   }
   const ms = Math.trunc(timeoutMs);
   const client = await ctx.target.connect();
-  // pg emits a low-level 'error' event directly on the client when its
-  // connection drops unexpectedly (e.g. the backend is killed mid-query),
-  // IN ADDITION TO rejecting the in-flight query — the query rejection is
-  // the signal the try/catch below actually acts on. `Client` extends
-  // EventEmitter, and an 'error' event with no listener is a Node fatal
-  // error: while a client is checked out, pg-pool has already removed its
-  // own listener (it re-attaches one only once the client is idle again),
-  // so without this, an unexpected disconnect crashes the entire pgops
-  // process rather than failing the one check that hit it — the opposite
-  // of the isolation `runCheck` exists to guarantee. Removed again in
-  // `release` below so a long-lived, reused connection doesn't accumulate
-  // one of these per call.
-  const swallowConnectionError = () => {};
-  client.on('error', swallowConnectionError);
-  const release = (err?: Error): void => {
-    client.removeListener('error', swallowConnectionError);
-    client.release(err);
-  };
+  const release = guardClient(client);
   try {
     await client.query('BEGIN');
     await client.query(`SET LOCAL statement_timeout = ${ms}`);

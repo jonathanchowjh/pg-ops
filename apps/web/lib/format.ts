@@ -70,3 +70,17 @@ export function formatBytes(bytes: number | null): string {
   // "847.3 MB" are the same decision.
   return `${value < 10 ? Number(value.toFixed(1)) : Math.round(value)} ${units[unit]}`;
 }
+
+/**
+ * A byte DELTA, signed.
+ *
+ * `formatBytes` clamps to zero — correct for a size, which cannot be
+ * negative, and wrong for growth, which routinely is: VACUUM FULL, a dropped
+ * index and a detached partition all shrink a relation, and an operator who
+ * has just done one of those needs to see that it worked. Sign carried
+ * explicitly, magnitude formatted by `formatBytes` so the two agree on units.
+ */
+export function formatDelta(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  return `${bytes < 0 ? '−' : '+'}${formatBytes(Math.abs(bytes))}`;
+}

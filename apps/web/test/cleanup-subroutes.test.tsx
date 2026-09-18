@@ -6,7 +6,10 @@ import Sequences from '@/app/db/[name]/cleanup/sequences/page';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const { overrides } = vi.hoisted(() => ({ overrides: new Map<string, unknown>() }));
+const { overrides, seriesOverrides } = vi.hoisted(() => ({
+  overrides: new Map<string, unknown>(),
+  seriesOverrides: new Map<string, unknown>(),
+}));
 
 const ok = (data: unknown, verdict: unknown = null) => ({ ok: true, data, verdict, measuredAt: 0 });
 
@@ -28,6 +31,8 @@ const HEALTHY: Record<string, unknown> = {
 vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async (_name: string, check: { id: string }) =>
     overrides.get(check.id) ?? ok(HEALTHY[check.id] ?? {})),
+  runSeriesFor: vi.fn(async (_name: string, series: { id: string }) =>
+    seriesOverrides.get(series.id) ?? { ok: true, points: [], readAt: 0 }),
 }));
 
 vi.mock('next/navigation', () => ({
@@ -39,6 +44,7 @@ let rendered: Rendered | undefined;
 afterEach(() => {
   rendered = undefined;
   overrides.clear();
+  seriesOverrides.clear();
   vi.clearAllMocks();
 });
 
@@ -96,6 +102,99 @@ describe('/cleanup/space', () => {
     const r = await show(Space);
     expect(r.text()).toContain('3 GB');
     expect(r.text()).not.toContain('3221225472');
+  });
+
+  it('shows growth for each relation and links to its history', async () => {
+    overrides.set('relationSizes', ok({
+      relations: [{ name: 'public.events', type: 'table', sizeBytes: 3_221_225_472 }],
+      total: 1, truncated: false,
+    }));
+    seriesOverrides.set('spaceGrowth', {
+      ok: true, readAt: 0,
+      points: [{
+        relation: 'public.events', firstBytes: 1_073_741_824, lastBytes: 3_221_225_472,
+        growthBytes: 2_147_483_648, firstAt: new Date('2026-09-10T00:00:00Z'),
+        lastAt: new Date('2026-09-17T00:00:00Z'), points: 2_016,
+      }],
+    });
+
+    const r = await show(Space);
+
+    expect(r.text()).toContain('2 GB');
+    const hrefs = [...r.container.querySelectorAll('a')].map((a) => a.getAttribute('href') ?? '');
+    expect(hrefs).toContain('/db/prod/cleanup/space/public.events');
+  });
+
+  /**
+   * A relation that shrank is a real reading — VACUUM FULL, a dropped index, a
+   * detached partition. `formatBytes` clamps negatives to 0, so using it
+   * directly here would render every one of those as "0 B" and tell an operator
+   * their reclaim did nothing.
+   */
+  it('renders a relation that shrank as negative, not as zero', async () => {
+    overrides.set('relationSizes', ok({
+      relations: [{ name: 'public.events', type: 'table', sizeBytes: 1_073_741_824 }],
+      total: 1, truncated: false,
+    }));
+    seriesOverrides.set('spaceGrowth', {
+      ok: true, readAt: 0,
+      points: [{
+        relation: 'public.events', firstBytes: 3_221_225_472, lastBytes: 1_073_741_824,
+        growthBytes: -2_147_483_648, firstAt: new Date('2026-09-10T00:00:00Z'),
+        lastAt: new Date('2026-09-17T00:00:00Z'), points: 2_016,
+      }],
+    });
+
+    const r = await show(Space);
+
+    expect(r.text()).toMatch(/-\s?2 GB|\u22122 GB/);
+    expect(r.text()).not.toMatch(/\b0 B\b/);
+  });
+
+  /**
+   * One capture is not a trend. growthBytes is arithmetically 0 and rendering
+   * "0 B" would claim a week of flatness from a single reading.
+   */
+  it('says so when a relation has only one capture, rather than claiming no growth', async () => {
+    overrides.set('relationSizes', ok({
+      relations: [{ name: 'public.events', type: 'table', sizeBytes: 500 }],
+      total: 1, truncated: false,
+    }));
+    seriesOverrides.set('spaceGrowth', {
+      ok: true, readAt: 0,
+      points: [{
+        relation: 'public.events', firstBytes: 500, lastBytes: 500,
+        growthBytes: 0, firstAt: new Date('2026-09-17T00:00:00Z'),
+        lastAt: new Date('2026-09-17T00:00:00Z'), points: 1,
+      }],
+    });
+
+    const r = await show(Space);
+
+    expect(r.text()).toContain('not enough history');
+  });
+
+  /**
+   * §5.1's rule, applied here: the column is ABSENT with no store, not empty. A
+   * blank growth column reads as "this relation has not grown" when it means
+   * "we never looked" — and this page must still render everything else.
+   */
+  it('omits the growth column entirely when no store is configured', async () => {
+    overrides.set('relationSizes', ok({
+      relations: [{ name: 'public.events', type: 'table', sizeBytes: 3_221_225_472 }],
+      total: 1, truncated: false,
+    }));
+    seriesOverrides.set('spaceGrowth', {
+      ok: false, reason: 'missing-store',
+      message: 'spaceGrowth needs the pgops store, which is not configured.',
+      remedy: 'Set PGOPS_STORE_URL to a Postgres database pgops may create its own schema in.',
+    });
+
+    const r = await show(Space);
+
+    expect(r.text()).not.toContain('Growth');
+    // Everything else still renders.
+    expect(r.text()).toContain('Database size');
   });
 });
 

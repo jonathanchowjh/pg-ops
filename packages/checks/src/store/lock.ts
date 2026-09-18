@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { guardClient } from '../run.js';
 
 /**
  * A fixed key for the migration lock. Arbitrary, but it must never change:
@@ -29,6 +30,15 @@ export async function withAdvisoryLock<T>(
   fn: (client: import('pg').PoolClient) => Promise<T> | T,
 ): Promise<T> {
   const client = await pool.connect();
+  // A checked-out pg client has no 'error' listener of its own, and an
+  // 'error' event without one is fatal to the process — see guardClient in
+  // run.ts. This client is held for the whole of `fn`, which for the
+  // migration lock means every migration in the list: the longest checkout
+  // in the package, taken at boot, against a store that may still be coming
+  // up. A store that drops the connection mid-migration must fail the
+  // migration (which `startScheduler` already swallows into "history is
+  // disabled for this process"), not kill the console.
+  const release = guardClient(client);
   try {
     await client.query('SELECT pg_advisory_lock($1)', [key]);
     try {
@@ -37,7 +47,7 @@ export async function withAdvisoryLock<T>(
       await client.query('SELECT pg_advisory_unlock($1)', [key]).catch(() => {});
     }
   } finally {
-    client.release();
+    release();
   }
 }
 

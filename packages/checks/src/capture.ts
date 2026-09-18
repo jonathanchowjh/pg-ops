@@ -1,5 +1,5 @@
 import { redactSecrets } from './redact.js';
-import { messageOf } from './run.js';
+import { guardClient, messageOf } from './run.js';
 import { releaseCaptureLock, tryCaptureLock } from './store/lock.js';
 import {
   RETENTION, insertQueryStats, insertSpaceStats, prune, upsertDatabase, upsertQueries,
@@ -93,20 +93,36 @@ SELECT s.queryid::text                AS queryid,
  * indexes and TOAST, which is the number an operator watching disk cares
  * about — the table's heap alone understates growth on any indexed table.
  *
- * The NOT NULL is not redundant. `pg_total_relation_size` returns NULL for a
- * relation dropped between this scan and the size call, and `Number(null)` is
- * 0 — so a table dropped mid-capture was stored as a 0-byte snapshot, which in
- * a space chart reads as it shrinking to nothing rather than as it being gone.
- * Omitting the row is the honest answer: pgops did not measure it.
+ * `pg_total_relation_size` returns NULL for a relation dropped between this
+ * scan and the size call, and `Number(null)` is 0 — so a table dropped
+ * mid-capture would be stored as a 0-byte snapshot, which in a space chart
+ * reads as it shrinking to nothing rather than as it being gone. Omitting the
+ * row is the honest answer: pgops did not measure it.
+ *
+ * That omission is now done in `captureOnce`, not here, and the function is
+ * called exactly ONCE. It used to appear in both the select list and an
+ * `AND pg_total_relation_size(c.oid) IS NOT NULL` — two separate evaluations,
+ * which cannot guard each other: WHERE is evaluated first, so a relation
+ * dropped between the two calls passed the IS NOT NULL and then handed NULL to
+ * the select list, and the 0-byte snapshot landed anyway. The filter claimed to
+ * close a race it left open, and the integration test covering it says as much
+ * ("a race no test can stage deterministically, and deliberately NOT asserted
+ * here").
+ *
+ * Filtering in JavaScript is what makes it testable: a null `size_bytes` is an
+ * ordinary row to feed a fake target, so the branch has a real unit test
+ * instead of a claim. Wrapping the SQL in a subquery to fence the double call
+ * was tried first and measured to work on PG 17 — but it rests on the planner
+ * declining to flatten it, which is not a property to hang "never store a
+ * measurement pgops did not take" on.
  */
 const SPACE_SQL = `
-SELECT (n.nspname || '.' || c.relname)             AS relation,
-       pg_total_relation_size(c.oid)::text          AS size_bytes
+SELECT (n.nspname || '.' || c.relname)            AS relation,
+       pg_total_relation_size(c.oid)::text        AS size_bytes
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE c.relkind IN ('r', 'm', 'p')
    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pgops')
-   AND pg_total_relation_size(c.oid) IS NOT NULL
 `;
 
 /**
@@ -133,8 +149,18 @@ export async function captureOnce(
   }
   const store = ctx.store;
   let client;
+  let release;
   try {
     client = await store.connect();
+    // Before the first await that could see the connection drop. This client
+    // is held across BOTH scans of the monitored database and the whole write
+    // transaction — seconds, every five minutes, forever — and a checked-out
+    // pg client has no 'error' listener of its own, so a store restart or
+    // failover inside that window is a FATAL unhandled event, not a failed
+    // capture. See guardClient in run.ts: that is the difference between this
+    // function honouring its "never throws" contract and taking the web
+    // process down with it.
+    release = guardClient(client);
   } catch (err) {
     return { ok: false, reason: 'unreachable', message: messageOf(err) };
   }
@@ -212,10 +238,17 @@ export async function captureOnce(
       }
       await insertQueryStats(client, stats);
 
-      const space: SpaceSnapshot[] = spaceResult.rows.map((r) => ({
-        databaseId: dbId, relation: r.relation,
-        capturedAt, sizeBytes: Number(r.size_bytes),
-      }));
+      // `size_bytes === null` means the relation was dropped between the
+      // pg_class scan and the size call. Skipped, never stored: `Number(null)`
+      // is 0, and a 0-byte snapshot reads on a space chart as the table
+      // shrinking to nothing rather than as pgops not having measured it. See
+      // SPACE_SQL, and why this lives here rather than in its WHERE clause.
+      const space: SpaceSnapshot[] = spaceResult.rows
+        .filter((r) => r.size_bytes !== null)
+        .map((r) => ({
+          databaseId: dbId, relation: r.relation,
+          capturedAt, sizeBytes: Number(r.size_bytes),
+        }));
       await insertSpaceStats(client, space);
 
       // Same transaction as the inserts: retention cannot drift from capture.
@@ -237,7 +270,10 @@ export async function captureOnce(
     // the STORE's log on every skipped tick — noise that reads, to whoever
     // finds it, like pgops mismanaging locks.
     if (locked && databaseId !== null) await releaseCaptureLock(client, databaseId);
-    client.release();
+    // `release()`, not `client.release()`: this is guardClient's release, which
+    // removes the 'error' listener before handing the connection back, so a
+    // reused connection does not accumulate one per capture.
+    release();
   }
 }
 
@@ -247,4 +283,5 @@ interface QueryRow {
   shared_blks_hit: string; shared_blks_read: string;
   stats_reset: Date | null;
 }
-interface SpaceRow { relation: string; size_bytes: string }
+/** `size_bytes` is NULL for a relation dropped mid-scan — see SPACE_SQL. */
+interface SpaceRow { relation: string; size_bytes: string | null }

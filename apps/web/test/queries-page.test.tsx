@@ -242,3 +242,31 @@ describe('Queries page — the slow shapes are marked, not just counted', () => 
     expect(rendered.text()).toContain('No shape averages');
   });
 });
+
+describe('each shape links to its own history', () => {
+  /**
+   * `pg_stat_statements.queryid` is nullable — a row whose text could not be
+   * normalised has none — and the check passes that null through. A link to
+   * `/queries/null` would 404 into a page that can only ever say "no history",
+   * so a row with no queryid gets no link at all.
+   */
+  it('links a shape with a queryid, and links nothing when there is none', async () => {
+    rowsState.rows = [
+      { ...BASE_ROW, queryid: '1234567890', query: 'select 1' },
+      { ...BASE_ROW, queryid: null as unknown as string, query: 'select 2' },
+    ];
+    const element = await Queries({
+      params: Promise.resolve({ name: 'prod' }),
+      searchParams: Promise.resolve({}),
+    });
+    rendered = await render(element);
+
+    const hrefs = [...rendered.container.querySelectorAll('a')].map((a) => a.getAttribute('href') ?? '');
+    expect(hrefs).toContain('/db/prod/queries/1234567890');
+    expect(hrefs).not.toContain('/db/prod/queries/null');
+    // Exactly one of the two rows is linked. Matched on a numeric last
+    // segment, not on the prefix: the SubNav above the table already renders
+    // /db/prod/queries/indexes and /db/prod/queries/tables, which share it.
+    expect(hrefs.filter((h) => /^\/db\/prod\/queries\/\d+$/.test(h)).length).toBe(1);
+  });
+});

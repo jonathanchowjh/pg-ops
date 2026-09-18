@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatDuration, formatMillis } from '@/lib/format';
+import { formatBytes, formatDelta, formatDuration, formatMillis } from '@/lib/format';
 
 describe('formatDuration', () => {
   it('renders null as an em dash rather than "0s" or "null"', () => {
@@ -79,5 +79,15 @@ describe('formatBytes', () => {
     // has no size, which is not the same as a slot retaining nothing.
     expect(formatBytes(null)).toBe('—');
     expect(formatBytes(Number.NaN)).toBe('—');
+  });
+});
+
+describe('formatDelta', () => {
+  it('carries the sign of a byte delta, which formatBytes clamps away', () => {
+    expect(formatDelta(2_147_483_648)).toBe('+2 GB');
+    expect(formatDelta(-2_147_483_648)).toBe('\u22122 GB');
+    expect(formatDelta(0)).toBe('0 B');
+    // The clamp this exists to route around.
+    expect(formatBytes(-2_147_483_648)).toBe('0 B');
   });
 });

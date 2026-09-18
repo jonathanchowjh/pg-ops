@@ -243,7 +243,23 @@ export default async function Queries({
                     key still changes when the ranking genuinely changes. */}
                 {d.rows.map((q, i) => (
                   <TableRow key={`${q.queryid ?? 'null'}-${i}`} className={slow.has(q) ? 'bg-warning/5' : undefined}>
-                    <TableCell>{formatCount(q.calls)}</TableCell>
+                    <TableCell>
+                      {/* `queryid` is NULLABLE — pg_stat_statements has no id
+                          for a statement it could not normalise, and the check
+                          passes that null through. A link to /queries/null
+                          would 404 into a page that can only ever say "no
+                          history", so a row without one gets no link. */}
+                      {q.queryid === null
+                        ? formatCount(q.calls)
+                        : (
+                          <Link
+                            href={`/db/${name}/queries/${q.queryid}`}
+                            className="underline underline-offset-2"
+                          >
+                            {formatCount(q.calls)}
+                          </Link>
+                        )}
+                    </TableCell>
                     {/* totalMs/meanMs are MILLISECONDS. These went through
                         formatDuration(ms / 1000), which floors to whole
                         seconds — so every mean under a second rendered "0s",

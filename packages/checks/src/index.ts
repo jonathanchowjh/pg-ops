@@ -11,6 +11,9 @@ export { captureOnce } from './capture.js';
 export { deltas, historicalQueryStats } from './series/query-stats.js';
 export { migrate, CURRENT_VERSION } from './store/schema.js';
 export type * from './series/query-stats.js';
+// `export type *`: the series objects stay reachable through SERIES, so there
+// remains exactly one way to get one.
+export type * from './series/space.js';
 
 /**
  * The per-check domain types.

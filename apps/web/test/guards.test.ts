@@ -492,6 +492,15 @@ describe('the DDL boundary', () => {
         // files under different routes must not report as the same offender.
         .map((p) => `${label}/${p.slice(root.length + 1)}`),
     );
+    // run.ts is the ONE expected match, and it issues no DDL: `remedyFor`
+    // builds the advice string `CREATE EXTENSION <name>;` that a check with a
+    // `requires` block shows the operator when the extension is absent. The
+    // regex cannot tell a statement from a sentence about one, so the file is
+    // pinned here by exact list equality rather than skipped — a second
+    // offender, or this one growing a real statement alongside the string,
+    // still fails. Stated because a security guard that asserts a source file
+    // contains DDL, with no explanation, reads as the guard having been
+    // silenced.
     expect(matched).toEqual(['packages/checks/src/run.ts']);
   });
 });

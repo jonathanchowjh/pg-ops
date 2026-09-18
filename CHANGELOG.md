@@ -4,6 +4,65 @@ All notable changes to pgops are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-09-18
+
+Trends over the captured history. P3 shipped the store and the five-minute
+capture; this is the first release that reads it back as a shape rather than a
+single delta.
+
+**Minor, not major.** Nothing is removed, no route changes meaning, and the nav
+keeps its shape: both new routes are drill-downs reached by clicking a row on a
+page that already exists. There is no *Trends* tab — space growth belongs to
+`keep-up` and query-shape history belongs to `work`, and a tab that cut across
+both would give `gates.ts` a second organising axis competing with the first.
+
+Parity, read from `registry.ts` rather than counted by hand: **52 of the 65
+capabilities ship, 1 is declined on purpose, and 12 remain.** `parityBacklog`
+reports P4 as 0 and the phase gate is green; P5 and P6 owe 6 each.
+
+### Added
+
+- **Seven-day growth on** `/db/<name>/cleanup/space` — a signed byte delta
+  beside every relation size, computed between the first and last capture in
+  the window. Relations link to their own history.
+- **Relation history** (`/db/<name>/cleanup/space/<relation>`) — one relation's
+  captured size over thirty days as a sparkline, with the endpoints, the change
+  and the capture count stated beneath it. Closes #41 `relation_space_stats`.
+- **Query-shape history** (`/db/<name>/queries/<queryid>`) — one statement
+  shape's calls and total time per interval over twenty-four hours. Reached by
+  clicking a row on the Queries tab. Closes #16 `query_hash_stats`.
+- `spaceGrowth`, `relationSpace` and `queryShapeHistory` in `SERIES`, with
+  `readSpaceGrowth` and `readRelationSpace` behind them. Closes #40
+  `space_growth`.
+
+### Changed
+
+- **`space_growth` measures between two stored captures, not against a live
+  size** — the thirteenth catalogued divergence from pgHero. pgHero takes the
+  oldest size in the window and subtracts it from the relation's size *right
+  now*, re-measured against the monitored database. That mixes a stored reading
+  with a live one: up to one capture interval of change is attributed to the
+  whole window, and the number moves every time the page is re-rendered, so two
+  operators looking at the same "7-day growth" see different figures. Both
+  endpoints come from the store here, and the last capture time travels with
+  them.
+- The README parity guard now derives which phases to check from
+  `COMPLETE_PHASES` instead of a hardcoded list, so a phase that finishes no
+  longer leaves the guard demanding a "P4 owes 0" line.
+
+### Notes
+
+- **Neither new route polls.** They render history, which does not move between
+  refreshes. The poll boundary guard holds this from both directions.
+- **Both bound their reads.** Thirty days of one relation at the five-minute
+  cadence is 8,640 points; twenty-four hours of one shape is 288 snapshots.
+  §5.1 requires the bound, and it is asserted on the arguments the page passes
+  rather than on what renders — a page that forgot it looks identical against a
+  small fixture.
+- **A relation with one capture says "not enough history".** Its growth is
+  arithmetically zero, and "0 B" would claim a week of flatness from a single
+  reading.
+
 ## [2.0.0] — 2026-09-17
 
 The hygiene half ships. v1 answered the questions you have in the first five

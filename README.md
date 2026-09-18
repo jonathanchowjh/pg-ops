@@ -19,8 +19,8 @@ That superset claim is checked rather than asserted.
 [packages/checks/src/registry.ts](packages/checks/src/registry.ts) maps all 65
 capabilities of pgHero 4.0.1 onto a shipped check, a shipped action, a platform
 feature, or a numbered phase, and the test suite fails if a phase marked
-complete still owes one. **49 of the 65 are shipped, 1 is declined on purpose,
-and 15 remain** — see [Parity with pgHero](#parity-with-pghero).
+complete still owes one. **52 of the 65 are shipped, 1 is declined on purpose,
+and 12 remain** — see [Parity with pgHero](#parity-with-pghero).
 
 One URL, many databases. What is built so far is what you need in the first
 five minutes — who's connected and in what state, is
@@ -378,12 +378,14 @@ destination. It has one now:
 | Route | What it answers |
 |---|---|
 | `/db/<name>/cleanup` | Wraparound horizon, replication role and lag, replication slots |
-| `/db/<name>/cleanup/space` | Database size, largest relations, largest tables |
+| `/db/<name>/cleanup/space` | Database size, largest relations, largest tables, seven-day growth |
+| `/db/<name>/cleanup/space/<relation>` | One relation's captured size over thirty days |
 | `/db/<name>/cleanup/maintenance` | Running vacuums, last vacuum and analyze, transaction-ID age by relation |
 | `/db/<name>/cleanup/sequences` | Every sequence against the ceiling of the column it feeds |
 | `/db/<name>/queries/indexes` | Index usage, missing and unused indexes, duplicates, invalid indexes |
 | `/db/<name>/queries/indexes/bloat` | Index bloat, estimated — on its own route, run on request |
 | `/db/<name>/queries/tables` | Table hit rate, caching, unused tables, table statistics |
+| `/db/<name>/queries/<queryid>` | One statement shape's calls and total time over twenty-four hours |
 
 **The poll boundary is the load-bearing distinction.** `/cleanup` renders
 incident checks and refreshes every five seconds, because a wraparound horizon
@@ -406,23 +408,23 @@ file and resolves to exactly one state, checked on every test run.
 
 | State | Count |
 |---|---:|
-| Shipped | 49 |
+| Shipped | 52 |
 | Declined on purpose | 1 |
-| Remaining | 15 |
+| Remaining | 12 |
 
 The remaining work is phased, and `parityBacklog(phase)` reports each phase's
-size rather than leaving it to be counted by hand: **P4 owes 3, P5 owes 6 and
-P6 owes 6** — the charts over the captured history, the `reset_stats` and
-`analyze` actions, `EXPLAIN`, and index suggestions. P0, P1, P2 and P3 are
-done. Build order is data in `PHASE_ORDER`, which is why P3, the store and the
+size rather than leaving it to be counted by hand: **P5 owes 6 and
+P6 owes 6** — the `reset_stats` and `analyze` actions, `EXPLAIN`, and index
+suggestions. P0, P1, P2, P3 and P4 are done. Build order is data in `PHASE_ORDER`, which is why P3, the store and the
 capture scheduler, shipped ahead of P2.
 
 Every number above comes from `registry.ts`. If one of them is wrong, the test
 suite is wrong with it — `parityBacklog` is what the phase gate reads, and a
 phase marked complete that still owes an entry fails by name.
 
-Twelve deliberate divergences, all of them documented at the code that
-implements them — six from v1, six that arrived with the hygiene routes:
+Thirteen deliberate divergences, all of them documented at the code that
+implements them — six from v1, six that arrived with the hygiene routes, and
+one with the trends:
 
 - **`kill` is guarded.** pgHero's is a bare `pg_terminate_backend` behind a
   button. See [Safety](#safety).
@@ -478,6 +480,14 @@ implements them — six from v1, six that arrived with the hygiene routes:
 - **`maintenance_info` is answered by `table_stats`.** The two read the same
   view and return the same eight fields, so #43 and #36 resolve to one check
   rather than two answers to one question. See `tables.ts`.
+- **`space_growth` measures between two stored captures, not against a live
+  size.** pgHero takes the oldest size in the window and subtracts it from the
+  relation's size *right now*, re-measured against the monitored database. That
+  mixes a stored reading with a live one — up to one capture interval of change
+  is attributed to the whole window, and the number moves every time the page is
+  re-rendered, so two operators looking at the same "7-day growth" see different
+  figures. Both endpoints come from the store, and the last capture time is
+  rendered beside them. See `store/read.ts`.
 
 
 ## Safety

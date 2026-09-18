@@ -80,3 +80,51 @@ describe('runSeries’ arity is part of its type (I4)', () => {
     expect(typeof neverCalled).toBe('function');
   });
 });
+
+/**
+ * The seam, not either side of it.
+ *
+ * `store.int.test.ts` proves `readQueryStats` honours `maxSnapshots` and
+ * `queryids`; `queries-page.test.tsx` proves the page renders a delta. Both
+ * passed while `historicalQueryStats.read` called `readQueryStats` with four
+ * arguments where it takes five, so neither bound reached the store and the
+ * queries page — an INCIDENT page polling at 5s — read every snapshot for
+ * every shape on every render. A test on each side of a boundary is not a
+ * test of the boundary.
+ *
+ * Asserting on the bound PARAMETERS rather than on returned rows is what
+ * makes this cheap enough to live in the unit suite: the defect is entirely
+ * "the options did not travel", and that is visible in the values list
+ * without a database. `series.int.test.ts` holds the behavioural half.
+ */
+describe('historicalQueryStats forwards its read bounds to the store', () => {
+  it('passes maxSnapshots and queryids through to the query', async () => {
+    const values: unknown[][] = [];
+    const store = {
+      query: async (_text: string, v: unknown[]) => { values.push(v); return { rows: [] }; },
+    } as never;
+    const ctx = { target: {}, store, serverVersion: 170000 } as unknown as CheckContext;
+
+    await historicalQueryStats.read(
+      ctx, { from: new Date(0), to: new Date() },
+      { databaseName: 'prod', maxSnapshots: 2, queryids: ['111', '222'] },
+    );
+
+    expect(values).toHaveLength(1);
+    // 'prod', from, to, then the two bounds — in the order read.ts pushes them.
+    expect(values[0]).toEqual(['prod', expect.any(Date), expect.any(Date), 2, ['111', '222']]);
+  });
+
+  it('sends no bounds when the caller asks for none', async () => {
+    const values: unknown[][] = [];
+    const store = {
+      query: async (_text: string, v: unknown[]) => { values.push(v); return { rows: [] }; },
+    } as never;
+    const ctx = { target: {}, store, serverVersion: 170000 } as unknown as CheckContext;
+
+    await historicalQueryStats.read(
+      ctx, { from: new Date(0), to: new Date() }, { databaseName: 'prod' },
+    );
+    expect(values[0]).toHaveLength(3);
+  });
+});

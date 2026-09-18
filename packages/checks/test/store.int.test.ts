@@ -1,17 +1,43 @@
+import type { PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { migrate } from '../src/store/schema.js';
+import { CURRENT_VERSION, migrate } from '../src/store/schema.js';
 import { withAdvisoryLock } from '../src/store/lock.js';
 import {
   RETENTION, insertQueryStats, insertSpaceStats, prune, upsertDatabase, upsertQueries,
 } from '../src/store/write.js';
-import { readQueryStats } from '../src/store/read.js';
+import { readQueryStats, readRelationSpace, readSpaceGrowth } from '../src/store/read.js';
 import { withPostgres } from './harness.js';
+
+/**
+ * A migrated store and a checked-out client, released whatever happens.
+ *
+ * `upsertDatabase`, `insertSpaceStats` and the rest take a `PoolClient`, not a
+ * `Pool` — they are written to run inside one transaction — so every test that
+ * writes needs this same four-line preamble. It was already repeated five
+ * times before P4 added three more.
+ */
+async function withStore(fn: (client: PoolClient) => Promise<void>): Promise<void> {
+  await withPostgres(async (_ctx, pool) => {
+    await migrate(pool);
+    const client = await pool.connect();
+    try {
+      await fn(client);
+    } finally {
+      client.release();
+    }
+  });
+}
 
 describe('migrate', () => {
   it('creates the pgops schema and records the version', async () => {
     await withPostgres(async (_ctx, pool) => {
+      // `CURRENT_VERSION`, not a literal: the assertion worth making is
+      // "migrate brings the store to the version this build knows how to
+      // produce". A literal only restates MIGRATIONS.length, and has to be
+      // hand-edited by every migration that lands — which is a step someone
+      // forgets, on the one test that would otherwise notice.
       const version = await migrate(pool);
-      expect(version).toBe(1);
+      expect(version).toBe(CURRENT_VERSION);
 
       const { rows } = await pool.query<{ table_name: string }>(
         `SELECT table_name FROM information_schema.tables
@@ -26,7 +52,7 @@ describe('migrate', () => {
   it('is idempotent — a second run is a no-op at the same version', async () => {
     await withPostgres(async (_ctx, pool) => {
       await migrate(pool);
-      expect(await migrate(pool)).toBe(1);
+      expect(await migrate(pool)).toBe(CURRENT_VERSION);
     });
   });
 
@@ -51,6 +77,67 @@ describe('migrate', () => {
           WHERE table_schema = 'public'`,
       );
       expect(after.rows[0]!.n).toBe(before.rows[0]!.n);
+    });
+  });
+});
+
+/**
+ * The property the runner was written for and nothing exercised, because for
+ * two phases there was only ever one migration: a store ALREADY at an older
+ * version gets brought forward. `migrate` is called on every dev-server
+ * restart and on every replica boot, so the path that matters most in
+ * production — "this store is at N, this build is at N+1" — was the one path
+ * with no test at all.
+ *
+ * Rewinding a real store is the only honest way to stage it: dropping what
+ * 002 added and setting the recorded version back to 1 IS a version-1 store,
+ * where reconstructing one by hand would test a fixture instead.
+ */
+describe('migrate, forward from an older store', () => {
+  it('applies a migration a store has not seen yet', async () => {
+    await withPostgres(async (_ctx, pool) => {
+      await migrate(pool);
+
+      const indexed = async (): Promise<boolean> => {
+        const { rows } = await pool.query<{ present: string | null }>(
+          `SELECT to_regclass('pgops.query_stats_query_id_idx')::text AS present`,
+        );
+        return rows[0]!.present !== null;
+      };
+      expect(await indexed()).toBe(true);
+
+      // Rewind to a version-1 store.
+      await pool.query('DROP INDEX pgops.query_stats_query_id_idx');
+      await pool.query('UPDATE pgops.schema_version SET version = 1');
+      expect(await indexed()).toBe(false);
+
+      expect(await migrate(pool)).toBe(CURRENT_VERSION);
+      expect(await indexed()).toBe(true);
+    });
+  });
+
+  /**
+   * The index is not cosmetic and this records why, so a later change cannot
+   * drop it as redundant-looking next to the primary key.
+   *
+   * `query_stats.query_id` carries an ON DELETE CASCADE foreign key, and
+   * `prune`'s orphan sweep over `pgops.queries` anti-joins on it. Neither the
+   * PK (database_id, query_id, captured_at) nor
+   * query_stats_captured_at_idx (database_id, captured_at DESC) leads with
+   * query_id, so before 002 the FK check was one sequential scan PER DELETED
+   * ROW: measured at 1,297ms of trigger time to remove 100 orphans from a
+   * 290,000-row table, against 0.47ms with the index — inside the
+   * transaction capture holds open, every five minutes.
+   */
+  it('gives the cascading foreign key an index to use', async () => {
+    await withPostgres(async (_ctx, pool) => {
+      await migrate(pool);
+      const { rows } = await pool.query<{ indexdef: string }>(
+        `SELECT indexdef FROM pg_indexes
+          WHERE schemaname = 'pgops' AND tablename = 'query_stats'
+          ORDER BY indexname`,
+      );
+      expect(rows.some((r) => /\(query_id\)/.test(r.indexdef))).toBe(true);
     });
   });
 });
@@ -289,6 +376,134 @@ describe('upsertQueries', () => {
         ]);
         expect(ids.size).toBe(1);
       } finally { client.release(); }
+    });
+  });
+});
+
+describe('readSpaceGrowth', () => {
+  it('reports growth between the first and last capture in the window, per relation', async () => {
+    await withStore(async (store) => {
+      const dbId = await upsertDatabase(store, 'growthdb');
+      const t0 = new Date('2026-09-01T00:00:00Z');
+      const t1 = new Date('2026-09-04T00:00:00Z');
+      const t2 = new Date('2026-09-07T00:00:00Z');
+      await insertSpaceStats(store, [
+        { databaseId: dbId, relation: 'public.grew',   capturedAt: t0, sizeBytes: 1_000 },
+        { databaseId: dbId, relation: 'public.grew',   capturedAt: t1, sizeBytes: 4_000 },
+        { databaseId: dbId, relation: 'public.grew',   capturedAt: t2, sizeBytes: 9_000 },
+        { databaseId: dbId, relation: 'public.shrank', capturedAt: t0, sizeBytes: 8_000 },
+        { databaseId: dbId, relation: 'public.shrank', capturedAt: t2, sizeBytes: 2_000 },
+        { databaseId: dbId, relation: 'public.once',   capturedAt: t2, sizeBytes: 500 },
+      ]);
+
+      const rows = await readSpaceGrowth(store, 'growthdb', t0, t2);
+      const by = new Map(rows.map((r) => [r.relation, r]));
+
+      expect(by.get('public.grew')).toMatchObject({
+        firstBytes: 1_000, lastBytes: 9_000, points: 3,
+      });
+      // A relation that shrank is a real reading, not an error and not zero.
+      expect(by.get('public.shrank')).toMatchObject({
+        firstBytes: 8_000, lastBytes: 2_000, points: 2,
+      });
+      // One capture is NOT zero growth -- the page has to say "not enough
+      // history" rather than draw a flat line through a single point.
+      expect(by.get('public.once')).toMatchObject({
+        firstBytes: 500, lastBytes: 500, points: 1,
+      });
+      // The fastest-growing relation leads: the list carries no cap, so
+      // ordering is the only thing that puts the relation an operator came
+      // for at the top.
+      expect(rows[0]!.relation).toBe('public.grew');
+    });
+  });
+
+  it('excludes captures outside the window rather than clamping to it', async () => {
+    await withStore(async (store) => {
+      const dbId = await upsertDatabase(store, 'windowdb');
+      const before = new Date('2026-08-01T00:00:00Z');
+      const from = new Date('2026-09-01T00:00:00Z');
+      const to = new Date('2026-09-07T00:00:00Z');
+      await insertSpaceStats(store, [
+        { databaseId: dbId, relation: 'public.t', capturedAt: before, sizeBytes: 1 },
+        { databaseId: dbId, relation: 'public.t', capturedAt: from,   sizeBytes: 100 },
+        { databaseId: dbId, relation: 'public.t', capturedAt: to,     sizeBytes: 300 },
+      ]);
+
+      const rows = await readSpaceGrowth(store, 'windowdb', from, to);
+
+      // firstBytes 100, not 1: the August capture is outside the window and a
+      // reader that ignored `from` would report 299 bytes of growth as 1 -> 300.
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!).toMatchObject({ firstBytes: 100, lastBytes: 300, points: 2 });
+    });
+  });
+
+  it('reads only the database it was asked for', async () => {
+    await withStore(async (store) => {
+      const mine = await upsertDatabase(store, 'mine');
+      const other = await upsertDatabase(store, 'other');
+      const earlier = new Date('2026-08-30T00:00:00Z');
+      const at = new Date('2026-09-01T00:00:00Z');
+      await insertSpaceStats(store, [
+        { databaseId: mine,  relation: 'public.t', capturedAt: at,      sizeBytes: 10 },
+        // The other database shares the relation name AND captures it at a
+        // DIFFERENT instant. Same-instant fixtures cannot catch a bounds
+        // aggregate that forgot to filter by database: min, max and count
+        // all come back unchanged, and the outer join still lands on our
+        // row. Staggering them means an unfiltered aggregate reports
+        // first_at = 2026-08-30, which OUR database has no capture at, so
+        // `public.t` disappears from the result entirely.
+        { databaseId: other, relation: 'public.t', capturedAt: earlier, sizeBytes: 999 },
+        { databaseId: other, relation: 'public.t', capturedAt: at,      sizeBytes: 999 },
+      ]);
+
+      const rows = await readSpaceGrowth(store, 'mine', earlier, at);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!).toMatchObject({ lastBytes: 10, points: 1 });
+    });
+  });
+});
+
+describe('readRelationSpace', () => {
+  it('reads one relation\u2019s sizes in order, oldest first', async () => {
+    await withStore(async (store) => {
+      const dbId = await upsertDatabase(store, 'relspace');
+      const t = (d: number) => new Date(`2026-09-0${d}T00:00:00Z`);
+      await insertSpaceStats(store, [
+        { databaseId: dbId, relation: 'public.t', capturedAt: t(3), sizeBytes: 300 },
+        { databaseId: dbId, relation: 'public.t', capturedAt: t(1), sizeBytes: 100 },
+        { databaseId: dbId, relation: 'public.t', capturedAt: t(2), sizeBytes: 200 },
+        { databaseId: dbId, relation: 'public.other', capturedAt: t(1), sizeBytes: 999 },
+      ]);
+
+      const points = await readRelationSpace(store, 'relspace', 'public.t', t(1), t(3));
+
+      expect(points.map((p) => p.sizeBytes)).toEqual([100, 200, 300]);
+    });
+  });
+
+  /**
+   * §5.1. Thirty days at a five-minute cadence is 8,640 points for ONE
+   * relation. The bound is what makes the detail page a chart rather than a
+   * download, and the MOST RECENT points are the ones kept -- a chart truncated
+   * from the wrong end shows the history and hides the present.
+   */
+  it('keeps the most recent N points when the caller bounds the read', async () => {
+    await withStore(async (store) => {
+      const dbId = await upsertDatabase(store, 'boundspace');
+      const base = Date.parse('2026-09-01T00:00:00Z');
+      await insertSpaceStats(store, Array.from({ length: 10 }, (_, i) => ({
+        databaseId: dbId, relation: 'public.t',
+        capturedAt: new Date(base + i * 60_000), sizeBytes: i,
+      })));
+
+      const points = await readRelationSpace(
+        store, 'boundspace', 'public.t',
+        new Date(base), new Date(base + 10 * 60_000), { maxPoints: 3 });
+
+      expect(points.map((p) => p.sizeBytes)).toEqual([7, 8, 9]);
     });
   });
 });
