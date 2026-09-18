@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { NextRequest } from 'next/server';
-import { proxy } from '@/proxy';
+import { ACTION_PATH, proxy } from '@/proxy';
 import { ACTOR_HEADER } from '@/lib/auth';
 
 const basic = (u: string, p: string) => `Basic ${btoa(`${u}:${p}`)}`;
@@ -132,5 +132,34 @@ describe('proxy', () => {
 
       expect(res.status).toBe(200);
     });
+  });
+});
+
+describe('the proxy action gate', () => {
+  it('matches every action path', () => {
+    for (const p of ['kill', 'kill-long-running', 'reset-query-stats', 'reset-stats', 'analyze']) {
+      expect(ACTION_PATH.test(`/api/db/prod/${p}`), p).toBe(true);
+      // With and without the trailing slash, which Next may or may not
+      // normalise depending on config.
+      expect(ACTION_PATH.test(`/api/db/prod/${p}/`), `${p}/`).toBe(true);
+    }
+  });
+
+  /**
+   * The prefix question, asserted rather than read off the regex. `kill` must
+   * not swallow a longer sibling, and no action path may match something
+   * deeper — a matcher that over-matched would 404 ordinary routes on a
+   * flagless deployment.
+   */
+  it('does not match a path that merely starts like one', () => {
+    for (const p of [
+      '/api/db/prod/kill-everything',
+      '/api/db/prod/analyze/extra',
+      '/api/db/prod/killer',
+      '/api/db/prod/reset-stats/all',
+      '/db/prod/kill',
+    ]) {
+      expect(ACTION_PATH.test(p), p).toBe(false);
+    }
   });
 });

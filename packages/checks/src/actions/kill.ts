@@ -1,4 +1,4 @@
-import type { CheckContext } from '../types.js';
+import type { ActionMeta, CheckContext } from '../types.js';
 import { writeAudit } from './audit.js';
 
 /**
@@ -21,27 +21,8 @@ export interface KillTarget {
   backendStart: string | null;
 }
 
-export interface KillMeta {
-  /** Which view/command issued the kill — audit-log field. */
-  subcommand: string;
-  /** Human-readable justification — audit-log field. */
-  reason: string;
-  /**
-   * Who did it, when the caller knows better than this process does.
-   *
-   * `writeAudit` derives `user` from `currentActor()` — the OS user, plus
-   * `process.env.HOSTNAME || hostname()`. That is right for a CLI on a
-   * bastion host and wrong inside a container, where HOSTNAME is the
-   * container ID, and wronger still once a Next standalone server pins it to
-   * 0.0.0.0 so it binds on all interfaces (verified: next/dist/build/utils.js
-   * generates `process.env.HOSTNAME || '0.0.0.0'` into server.js). A web
-   * console authenticating an operator knows their name; nothing else in
-   * this process does. Omitted, the fallback is unchanged.
-   */
-  actor?: string;
-  /** Extra target metadata for the audit entry (user, app, held_mode, state…). */
-  extra?: Record<string, unknown>;
-}
+/** The name this file's call sites and docblocks already use. */
+export type KillMeta = ActionMeta;
 
 /**
  * Terminate a backend. The only code path in this package that issues
@@ -163,4 +144,66 @@ export async function killBackend(ctx: CheckContext, target: KillTarget, meta: K
       console.error('pgops: writeAudit threw despite its no-reject contract; kill outcome unaffected:', err);
     }
   }
+}
+
+export interface BulkKillResult {
+  pid: number;
+  outcome: KillOutcome;
+  /**
+   * Present only when `killBackend` threw — most plausibly the console's role
+   * lacking `pg_signal_backend`.
+   *
+   * A field rather than a fourth `KillOutcome`: widening that union would
+   * change the single-kill route's contract, which already surfaces a throw
+   * as a 502 carrying the message and has no use for a new outcome. The
+   * outcome stays `gone` because nothing was OBSERVED to die — and this
+   * field is what stops that reading as "it had already finished".
+   */
+  error?: string;
+}
+
+/**
+ * #12, and the reason it is not #13.
+ *
+ * pgHero's `kill_long_running_queries` is `running_queries.each { kill(pid) }`
+ * over a bare `pg_terminate_backend`. `kill_all` is declined here permanently
+ * as "an action with no diagnosis"; what makes THIS one legitimate is that its
+ * targets were named by a duration filter and shown to the operator before
+ * anything happened.
+ *
+ * So it is not a sweep. It is `killBackend` applied N times, and every
+ * property of the single kill survives intact: each target is pinned to the
+ * `backend_start` captured while the operator was looking at it, each is
+ * refused independently if its pid was recycled onto another session, and each
+ * writes its own audit record. N records, not one summary — a batch is not a
+ * single event, and recording it as one would lose which session was which.
+ *
+ * Sequential, deliberately. These are `pg_terminate_backend` calls against a
+ * database already unwell enough for someone to be pressing this; firing them
+ * concurrently is the opposite of what that operator needs, and it would
+ * interleave the audit trail for no gain.
+ *
+ * One target failing does not abandon the rest. `killBackend` rethrows on a
+ * database error — its `finally` audits first, then the catch re-raises — and
+ * a bulk kill that stopped at the first permission error would leave the
+ * operator unable to say which of the remaining sessions had been touched.
+ */
+export async function killLongRunning(
+  ctx: CheckContext,
+  targets: readonly KillTarget[],
+  meta: KillMeta,
+): Promise<BulkKillResult[]> {
+  const results: BulkKillResult[] = [];
+  for (const target of targets) {
+    try {
+      results.push({ pid: target.pid, outcome: await killBackend(ctx, target, meta) });
+    } catch (err) {
+      results.push({
+        pid: target.pid,
+        outcome: 'gone',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return results;
 }

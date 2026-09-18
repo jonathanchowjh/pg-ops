@@ -405,6 +405,18 @@ this reason and #59 is the same shape. It becomes the second entry in
 **Final trajectory: 43 planned → 0 planned, 2 declined.** `parityBacklog()`
 reaching zero is the claim, and CI reports it.
 
+> **Amended 2026-09-18 (P5).** The count is **4 declined**, and the sentence
+> opening this section — *"All of the hard 'lite' calls are in P6"* — was
+> wrong. P5 was never examined for them. #19 `enable_query_stats` and #61
+> `disable_query_stats` are DDL against a *monitored* database, which §3.3
+> promises never to run, which the DDL guard mechanically forbids, which the
+> web spec's §7.1 places at tier 3 (*"CLI only. Never reachable from the
+> web"*), and for which §8 removed the only tier-3 vehicle by cutting
+> `packages/cli`. Four independent commitments, made at three different times,
+> all pointing the same way. The remedy path already exists and is better:
+> `run.ts`'s `remedyFor` hands the operator the exact statement to run through
+> their own migration tooling. See the registry entries for the full argument.
+
 ---
 
 ## 8. Cut

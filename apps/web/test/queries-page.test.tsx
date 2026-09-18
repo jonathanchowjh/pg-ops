@@ -270,3 +270,50 @@ describe('each shape links to its own history', () => {
     expect(hrefs.filter((h) => /^\/db\/prod\/queries\/\d+$/.test(h)).length).toBe(1);
   });
 });
+
+/**
+ * #20 and #31's surface. Both live here, in one panel, on purpose: an
+ * operator needs to know that resetting STATEMENT statistics is not the same
+ * as resetting the database's TABLE and INDEX statistics, and two controls
+ * with distinct wording side by side teach that where two controls on two
+ * routes would not.
+ */
+describe('the statistics controls', () => {
+  const show = async () => {
+    const element = await Queries({
+      params: Promise.resolve({ name: 'prod' }),
+      searchParams: Promise.resolve({}),
+    });
+    rendered = await render(element);
+    return rendered;
+  };
+
+  afterEach(() => { delete process.env.PGOPS_ALLOW_ACTIONS; });
+
+  it('offers both resets, named for what each one clears', async () => {
+    process.env.PGOPS_ALLOW_ACTIONS = 'true';
+    const r = await show();
+    const labels = [...r.container.querySelectorAll('button')].map((b) => b.textContent);
+    expect(labels).toContain('Reset query statistics');
+    expect(labels).toContain('Reset database statistics');
+  });
+
+  it('offers neither when actions are disabled', async () => {
+    const r = await show();
+    const labels = [...r.container.querySelectorAll('button')].map((b) => b.textContent);
+    expect(labels).not.toContain('Reset query statistics');
+    expect(labels).not.toContain('Reset database statistics');
+  });
+
+  /**
+   * The two are easy to confuse and one is much broader. The page has to say
+   * which is which BEFORE the press, because afterwards the only evidence is
+   * a stats_reset timestamp.
+   */
+  it('says what each reset actually clears', async () => {
+    process.env.PGOPS_ALLOW_ACTIONS = 'true';
+    const r = await show();
+    expect(r.text()).toMatch(/pg_stat_statements|statement statistics/i);
+    expect(r.text()).toMatch(/table and index statistics/i);
+  });
+});

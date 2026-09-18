@@ -1,6 +1,6 @@
 {
   "name": "pgops",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "description": "Postgres on-call console. Run it during the incident.",
   "type": "module",

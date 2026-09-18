@@ -15,6 +15,12 @@ import Sessions from '@/app/db/[name]/sessions/page';
 // caught fix 2 and fix 4 before review — every mock in this file used to
 // return the empty shape, so a null IP or a colliding key never had a row to
 // render against.
+const longRunningState = vi.hoisted(() => ({
+  queries: [] as Array<{
+    pid: number; runningSecs: number; query: string | null; backendStart: string | null;
+  }>,
+}));
+
 const connectionDetailState = vi.hoisted(() => ({
   sources: [] as Array<{
     database: string | null; user: string | null; source: string | null;
@@ -45,6 +51,14 @@ vi.mock('@/lib/check', () => ({
           total: connectionDetailState.sources.length,
           truncated: false,
         },
+        verdict: { level: 'ok' },
+        measuredAt: 0,
+      };
+    }
+    if (check.id === 'longRunning') {
+      return {
+        ok: true,
+        data: { queries: longRunningState.queries, truncated: false },
         verdict: { level: 'ok' },
         measuredAt: 0,
       };
@@ -194,5 +208,62 @@ describe('Sessions page — Connection sources', () => {
     // The real content is still there — a null IP renders as the same
     // "we don't know" dash every other null field on this page already uses.
     expect(rendered.find('—')).not.toBeNull();
+  });
+});
+
+/**
+ * #12's surface. The bulk kill lives beside the per-session kill it is a
+ * bulk version of, and the panel lists the matching sessions FIRST — that
+ * diagnosis is the property separating this capability from the permanently
+ * declined kill_all, so a control without the list would be the wrong thing
+ * shipped under the right name.
+ */
+describe('the long-running panel', () => {
+  const show = async () => {
+    const element = await Sessions({
+      params: Promise.resolve({ name: 'primary' }),
+      searchParams: Promise.resolve({}),
+    });
+    rendered = await render(element);
+    return rendered;
+  };
+
+  afterEach(() => { longRunningState.queries = []; delete process.env.PGOPS_ALLOW_ACTIONS; });
+
+  it('lists the long-running sessions before offering to kill them', async () => {
+    process.env.PGOPS_ALLOW_ACTIONS = 'true';
+    longRunningState.queries = [
+      { pid: 77, runningSecs: 300, query: 'SELECT slow()', backendStart: '2026-01-01T00:00:00Z' },
+    ];
+    const r = await show();
+    expect(r.text()).toContain('77');
+    expect(r.text()).toContain('SELECT slow()');
+    expect([...r.container.querySelectorAll('button')].map((b) => b.textContent))
+      .toContain('Terminate all');
+  });
+
+  /**
+   * Nothing, not a disabled button: a disabled control advertises a capability
+   * that is switched off, which is the same disclosure the route's 404
+   * prevents.
+   */
+  it('offers no control at all when actions are disabled', async () => {
+    longRunningState.queries = [
+      { pid: 77, runningSecs: 300, query: 'SELECT slow()', backendStart: '2026-01-01T00:00:00Z' },
+    ];
+    const r = await show();
+    // The diagnosis still renders — an operator without actions still needs
+    // to SEE what is running long.
+    expect(r.text()).toContain('77');
+    expect([...r.container.querySelectorAll('button')].map((b) => b.textContent))
+      .not.toContain('Terminate all');
+  });
+
+  it('offers nothing to terminate when nothing is running long', async () => {
+    process.env.PGOPS_ALLOW_ACTIONS = 'true';
+    longRunningState.queries = [];
+    const r = await show();
+    expect([...r.container.querySelectorAll('button')].map((b) => b.textContent))
+      .not.toContain('Terminate all');
   });
 });

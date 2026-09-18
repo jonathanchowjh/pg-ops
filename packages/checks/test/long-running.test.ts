@@ -2,13 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { longRunning, type LongRunningRow } from '../src/checks/long-running.js';
 
 const lrRow = (o: Partial<LongRunningRow>): LongRunningRow => ({
-  pid: 1, running_secs: '61.2', query: 'select 1', total_matching: 1, ...o,
+  pid: 1, running_secs: '61.2', query: 'select 1',
+  backend_start: '2026-09-18 00:00:00+00', total_matching: 1, ...o,
 });
 
 describe('longRunning.map', () => {
   it('converts running_secs from text without renaming it to a wait quantity', () => {
     const d = longRunning.map([lrRow({ pid: 123, running_secs: '61.2', query: 'select 1', total_matching: 1 })]);
-    expect(d).toEqual({ queries: [{ pid: 123, runningSecs: 61.2, query: 'select 1' }], truncated: false });
+    expect(d).toEqual({
+      queries: [{
+        pid: 123, runningSecs: 61.2, query: 'select 1',
+        backendStart: '2026-09-18 00:00:00+00',
+      }],
+      truncated: false,
+    });
   });
 
   // A7, same technique as sessions.ts's own `total_matching`: `limit` is a
@@ -27,6 +34,22 @@ describe('longRunning.map', () => {
     expect(longRunning.map([lrRow({ pid: 1, total_matching: 1 })]).truncated).toBe(false);
   });
 
+  it('carries the session identity, which is what a kill is pinned to', () => {
+    const d = longRunning.map([lrRow({ backend_start: '2026-09-18 01:00:00+00' })]);
+    expect(d.queries[0]!.backendStart).toBe('2026-09-18 01:00:00+00');
+  });
+
+  /**
+   * Null is a real reading, not a gap to paper over. `killBackend` accepts a
+   * null identity and means "kill on pid alone" by it, so substituting a
+   * string here would fabricate an identity that never matches and turn every
+   * kill into `session-changed`.
+   */
+  it('passes a null identity through rather than inventing one', () => {
+    const d = longRunning.map([lrRow({ backend_start: null })]);
+    expect(d.queries[0]!.backendStart).toBeNull();
+  });
+
   it('does not signal truncation on an empty result', () => {
     expect(longRunning.map([]).truncated).toBe(false);
   });
@@ -42,7 +65,9 @@ describe('longRunning.verdict', () => {
   it('warns past the warn threshold and critical past the critical one', () => {
     const warnAt = t.find((x) => x.level === 'warn')!.value;
     const critAt = t.find((x) => x.level === 'critical')!.value;
-    const q = (runningSecs: number) => ({ queries: [{ pid: 1, runningSecs, query: null }], truncated: false });
+    const q = (runningSecs: number) => ({
+      queries: [{ pid: 1, runningSecs, query: null, backendStart: null }], truncated: false,
+    });
     expect(longRunning.verdict!(q(warnAt + 1), t).level).toBe('warn');
     expect(longRunning.verdict!(q(critAt + 1), t).level).toBe('critical');
   });
@@ -67,7 +92,7 @@ describe('longRunning.verdict', () => {
     const warnAt = t.find((x) => x.level === 'warn')!.value;
     const critAt = t.find((x) => x.level === 'critical')!.value;
     const at = (runningSecs: number) => longRunning.verdict!(
-      { queries: [{ pid: 1, runningSecs, query: null }], truncated: false }, t,
+      { queries: [{ pid: 1, runningSecs, query: null, backendStart: null }], truncated: false }, t,
     ).level;
 
     expect(at(warnAt - 1)).toBe('ok');
@@ -82,7 +107,10 @@ describe('longRunning.verdict', () => {
   // Same Convention 3 proof as blocked.verdict above, for this check's own
   // two-threshold lookup.
   it('does not throw when a threshold level is absent from the array', () => {
-    const v = longRunning.verdict!({ queries: [{ pid: 1, runningSecs: 99999, query: null }], truncated: false }, []);
+    const v = longRunning.verdict!(
+      { queries: [{ pid: 1, runningSecs: 99999, query: null, backendStart: null }], truncated: false },
+      [],
+    );
     expect(v.level).toBe('ok');
   });
 });

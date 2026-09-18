@@ -4,6 +4,87 @@ All notable changes to pgops are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-09-18
+
+The remaining actions. pgops could terminate one session; it can now terminate
+every query running past the floor, reset either kind of statistics, and
+refresh planner statistics — each behind the same flag, each audited, each
+confirmed.
+
+**Minor, not major.** No route changes meaning, nothing is removed, and the nav
+keeps its shape. Every control lands on a page that already existed, beside the
+data it affects, and a deployment that never sets `PGOPS_ALLOW_ACTIONS` sees
+none of it.
+
+Parity, read from `registry.ts` rather than counted by hand: **56 of the 65
+capabilities ship, 3 are declined on purpose, and 6 remain.** `parityBacklog`
+reports P5 as 0 and the phase gate is green; only P6 is left.
+
+### Added
+
+- **Terminate long-running queries** on `/db/<name>/sessions` — the matching
+  sessions are listed first, one reason covers the batch, and each is
+  terminated through the same identity-pinned statement a single kill uses.
+  Per-session outcomes, never a boolean. Closes #12.
+- **Reset query statistics** and **reset database statistics** on
+  `/db/<name>/queries`, side by side so the difference between them is legible
+  before either is pressed. Closes #20 and #31.
+- **Analyze tables** on `/db/<name>/cleanup/maintenance`, on the page that
+  renders the last-analyze times it refreshes. Closes #47.
+- **Tier 2 and server-side typed confirmation.** The web spec's action ladder
+  had a tier that nothing implemented; the three destructive actions now
+  require the database name typed back, checked in `openAction` rather than
+  only in the browser.
+- `lib/action-route.ts`, one preamble shared by all five action routes — the
+  tier gate, the CSRF media-type check, the reason, the confirmation, the
+  context and the actor.
+
+### Declined
+
+- **#19 `enable_query_stats` and #61 `disable_query_stats`**, permanently. Both
+  are DDL against a *monitored* database, which four separate commitments in
+  this project forbid: the §3.3 promise confining schema changes to the store
+  "and nowhere else", the DDL guard's regex over both packages, the action
+  ladder's tier 3 ("CLI only, never reachable from the web"), and §8, which cut
+  the CLI that was tier 3's only vehicle. Removing the extension is worse than
+  installing it — it destroys every query statistic on the database, and
+  pgops's own capture reads that extension every five minutes. The parity
+  spec's §7 claimed "all of the hard lite calls are in P6"; it had not examined
+  P5, and this release amends it.
+
+### Changed
+
+- **The reset tripwire in `guards.test.ts` narrowed from a blanket ban to an
+  exact allowlist**, and this is the change to read if you are auditing this
+  project's safety claims. It forbade any file under `packages/checks/src` from
+  naming `pg_stat_statements_reset` or `pg_stat_reset`, because pgHero calls
+  one *as part of capture* and not doing that is what the parent spec §4.3
+  calls the strongest product claim in the design. That claim is unchanged.
+  What changed is the guard's shape: a blanket ban was right while pgops had no
+  reset at all and wrong once it had a gated, confirmed, audited one. The
+  allowlist names `actions/stats.ts` and nothing else, and a **second** test
+  now names `capture.ts`, `store/write.ts`, `store/read.ts` and
+  `series/query-stats.ts` directly — because an allowlist that merely happens
+  to exclude the capture path is weaker than one that says so.
+- `longRunning` returns `backendStart`. The bulk kill is pinned to it, so it
+  has to be captured when the operator is looking at the row.
+- The `ANALYZE` relation list is sized from `c.relpages`, not
+  `pg_total_relation_size`. The latter opens each relation, taking a lock that
+  conflicts with `ACCESS EXCLUSIVE` — so one table locked by a concurrent
+  migration blocked the *listing*, before any `ANALYZE` was attempted, and the
+  action hung for its full statement timeout. pgHero has the same hang.
+
+### Notes
+
+- **`pg_stat_statements_reset` is called with three arguments, never four.**
+  `minmax_only` arrived in PG 15 and the supported floor is 14. The return type
+  also differs across that boundary (`void` vs `timestamptz`) and is not read.
+- **The reset is scoped to the current database's oid.** `pg_stat_statements`
+  is shared across the cluster and the zero-argument form wipes every
+  database's statements.
+- **Nothing new polls.** The three pages gaining controls keep exactly the poll
+  status they had.
+
 ## [2.1.0] — 2026-09-18
 
 Trends over the captured history. P3 shipped the store and the five-minute

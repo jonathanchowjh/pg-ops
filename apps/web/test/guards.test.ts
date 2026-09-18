@@ -346,18 +346,30 @@ describe('the kill gate', () => {
    * fail for the wrong reason, or — if "fixed" by dropping the assertion
    * instead — would pass while a second caller quietly used `ACTIONS.kill`.
    * So this matches EITHER spelling: a file is an importer if it names
-   * `killBackend` (the type) or `ACTIONS` (the runtime value). `ACTIONS` has
-   * exactly one member today, and every member of it is destructive by
-   * definition, so "imports ACTIONS at all" is the right granularity, not a
-   * loosening of the guard.
+   * `killBackend` (the type) or `ACTIONS` (the runtime value). Every member
+   * of `ACTIONS` writes to a monitored database by definition, so "imports
+   * ACTIONS at all" is the right granularity, not a loosening of the guard.
+   *
+   * P5 took this from one file to five. The list stays EXACT rather than
+   * becoming a pattern over `api/db/[name]/*`: a new action route is a
+   * deliberate edit here, which is the point — the question this guard
+   * answers is "which files may reach an action at all", and a pattern would
+   * answer "any file someone puts in the right directory".
    *
    * Written as "the set of importing files", not "no file other than X
    * imports it": the correct file is a substring of any wrong path under it,
    * and an exclusion written the other way round matched itself in both P0
    * and P1a.
    */
-  it('names killBackend or ACTIONS in exactly one file — the gated route', () => {
-    const ROUTE = join(APP, 'api', 'db', '[name]', 'kill', 'route.ts');
+  it('names killBackend or ACTIONS in exactly the five gated routes', () => {
+    const API = join(APP, 'api', 'db', '[name]');
+    const ROUTES = [
+      join(API, 'analyze', 'route.ts'),
+      join(API, 'kill', 'route.ts'),
+      join(API, 'kill-long-running', 'route.ts'),
+      join(API, 'reset-query-stats', 'route.ts'),
+      join(API, 'reset-stats', 'route.ts'),
+    ].sort();
     // WEB_ROOT's top-level files join the three roots here — review finding:
     // `proxy.ts` sits at apps/web/proxy.ts, runs on every request, and was
     // invisible to this guard until now. `topLevel`, not `sources`/`walk`:
@@ -368,7 +380,7 @@ describe('the kill gate', () => {
     const importers = [...sources(APP), ...sources(COMPONENTS), ...sources(LIB), ...topLevelSources]
       .filter((f) => /\bkillBackend\b|\bACTIONS\b/.test(strip(readFileSync(f, 'utf8'))))
       .sort();
-    expect(importers).toEqual([ROUTE]);
+    expect(importers).toEqual(ROUTES);
   });
 });
 
@@ -506,17 +518,50 @@ describe('the DDL boundary', () => {
 });
 
 describe('capture', () => {
-  it('contains no call that resets a shared statistics view', () => {
-    // The parent spec §4.3 calls this the strongest product claim in the
-    // design. pgHero's capture_query_stats calls pg_stat_statements_reset(),
-    // which silently breaks every other consumer on the database. The
-    // behavioural proof is capture.int.test.ts's monotonicity assertion; this
-    // is the cheap source-level tripwire that fails the moment someone types
-    // it, in any file, without waiting for an integration run.
-    const RESET = /pg_stat_statements_reset|pg_stat_reset\b/i;
+  const RESET = /pg_stat_statements_reset|pg_stat_reset\b/i;
+
+  /**
+   * The parent spec §4.3 calls this the strongest product claim in the design.
+   * pgHero's capture_query_stats calls pg_stat_statements_reset() AS PART OF
+   * CAPTURE, which silently breaks every other consumer on the database. The
+   * behavioural proof is capture.int.test.ts's monotonicity assertion; this is
+   * the cheap source-level tripwire that fails the moment someone types it,
+   * without waiting for an integration run.
+   *
+   * P5 changed this guard's SHAPE, and deliberately not its subject. A blanket
+   * ban was the right implementation while pgops had no reset at all. It
+   * became the wrong one when P5 shipped a reset an operator has to reach
+   * through the tier-2 gate, a typed confirmation and an audit record — so the
+   * ban NARROWS to an exact allowlist rather than being deleted or having its
+   * regex weakened.
+   *
+   * Exact list equality, like the DDL guard's run.ts pin: a second file fails
+   * even though the first is expected.
+   */
+  it('names a statistics reset in exactly one file — the gated action', () => {
     const offenders = walk(CHECKS_SRC)
       .filter((p) => p.endsWith('.ts'))
-      .filter((p) => RESET.test(strip(readFileSync(p, 'utf8'))));
-    expect(offenders).toEqual([]);
+      .filter((p) => RESET.test(strip(readFileSync(p, 'utf8'))))
+      .map((p) => p.slice(CHECKS_SRC.length + 1));
+    expect(offenders).toEqual([join('actions', 'stats.ts')]);
+  });
+
+  /**
+   * The claim itself, stated rather than inferred.
+   *
+   * The allowlist above could be edited to add a file; this names the files
+   * that may NEVER do it, which is what the spec's claim is actually about.
+   * An allowlist that merely happens to exclude the capture path is weaker
+   * than one that says so.
+   */
+  it('never resets from the capture path', () => {
+    for (const f of [
+      'capture.ts',
+      join('store', 'write.ts'),
+      join('store', 'read.ts'),
+      join('series', 'query-stats.ts'),
+    ]) {
+      expect(RESET.test(strip(readFileSync(join(CHECKS_SRC, f), 'utf8'))), f).toBe(false);
+    }
   });
 });

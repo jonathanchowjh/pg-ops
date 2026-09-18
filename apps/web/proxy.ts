@@ -15,11 +15,19 @@ import { actionsAllowed } from '@/lib/actions';
  * That contradicted the property both README.md and route.ts claim: a
  * flagless deployment is indistinguishable from a build without the file.
  *
- * The gate belongs above the method dispatch, which means here. route.ts
- * KEEPS its own copy — this one is what works, that one is what stays true
- * if this matcher is ever narrowed. Neither is redundant with the other.
+ * The gate belongs above the method dispatch, which means here. Each route
+ * KEEPS its own copy (in lib/action-route.ts now) — this one is what works,
+ * that one is what stays true if this matcher is ever narrowed. Neither is
+ * redundant with the other.
+ *
+ * Alternation, one branch per action route. `kill` cannot swallow
+ * `kill-long-running` by prefix because every branch is anchored by `/?$`,
+ * and proxy.test.ts asserts exactly that rather than leaving it to be read
+ * off the regex. Exported for that test: a regex is cheaper to assert on
+ * directly than to infer from five request round trips.
  */
-const ACTION_PATH = /^\/api\/db\/[^/]+\/kill\/?$/;
+export const ACTION_PATH =
+  /^\/api\/db\/[^/]+\/(?:kill|kill-long-running|reset-query-stats|reset-stats|analyze)\/?$/;
 
 /**
  * The adapter over lib/auth.ts. Everything decidable lives there; this file

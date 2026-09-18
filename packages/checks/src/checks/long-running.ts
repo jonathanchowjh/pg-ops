@@ -7,6 +7,17 @@ export interface LongRunningRow {
   running_secs: string;
   query: string | null;
   /**
+   * `::text`, exactly as sessions.ts casts it, and for the same reason: this
+   * value round-trips through JSON to the browser and back into
+   * `$2::timestamptz` as killBackend's PID-reuse guard. A `Date` would be
+   * re-serialised on the way with millisecond truncation and stop matching
+   * the session it identifies.
+   *
+   * Nullable because pg_stat_activity.backend_start is null for some backend
+   * types. `killBackend` accepts null and reads it as "kill on pid alone".
+   */
+  backend_start: string | null;
+  /**
    * `count(*) OVER ()` (int4, cast `::int` below), computed over every row
    * that matched WHERE, BEFORE `ORDER BY`/`LIMIT` clip the result — same
    * technique, and the same reason, as sessions.ts's own `total_matching`.
@@ -32,6 +43,16 @@ export interface LongRunning {
    */
   runningSecs: number;
   query: string | null;
+  /**
+   * Session identity, captured at selection — see LongRunningRow.
+   *
+   * Here rather than derived later because that is the whole PID-reuse guard:
+   * killBackend compares this, inside the same statement as the terminate,
+   * against one snapshot of pg_stat_activity. A bulk kill that re-derived it
+   * server-side would compare the server's current idea of the session
+   * against itself and always agree.
+   */
+  backendStart: string | null;
 }
 
 export interface LongRunningOpts { minSecs?: number; limit?: number }
@@ -70,6 +91,7 @@ export interface LongRunningData {
 const SQL = (o: LongRunningOpts) => ({
   text: `
     SELECT pid, EXTRACT(EPOCH FROM (now() - query_start))::text AS running_secs, query,
+           backend_start::text AS backend_start,
            count(*) OVER ()::int AS total_matching
     FROM pg_stat_activity
     WHERE state = 'active' AND backend_type = 'client backend'
@@ -102,6 +124,7 @@ export const longRunning: Check<LongRunningRow, LongRunningData, LongRunningOpts
         pid: r.pid,
         runningSecs: Number(r.running_secs),
         query: r.query,
+        backendStart: r.backend_start,
       })),
       truncated: totalMatching > rows.length,
     };

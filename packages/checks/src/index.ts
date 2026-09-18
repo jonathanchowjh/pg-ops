@@ -49,6 +49,11 @@ export type * from './checks/space.js';
 export type * from './checks/tables.js';
 export type * from './checks/wraparound.js';
 export type * from './actions/kill.js';
+// `export type *`, like kill.ts above: the action FUNCTIONS stay reachable
+// through `ACTIONS` alone, so there remains exactly one way to get one, and
+// guards.test.ts can hold which files are allowed to.
+export type * from './actions/stats.js';
+export type * from './actions/analyze.js';
 
 // slowQueries and SLOW_QUERY_DEFAULTS are VALUES, not types — `export type *`
 // above carries interfaces only, so without this apps/web cannot import them

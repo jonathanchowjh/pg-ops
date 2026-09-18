@@ -19,8 +19,8 @@ That superset claim is checked rather than asserted.
 [packages/checks/src/registry.ts](packages/checks/src/registry.ts) maps all 65
 capabilities of pgHero 4.0.1 onto a shipped check, a shipped action, a platform
 feature, or a numbered phase, and the test suite fails if a phase marked
-complete still owes one. **52 of the 65 are shipped, 1 is declined on purpose,
-and 12 remain** — see [Parity with pgHero](#parity-with-pghero).
+complete still owes one. **56 of the 65 are shipped, 3 are declined on purpose,
+and 6 remain** — see [Parity with pgHero](#parity-with-pghero).
 
 One URL, many databases. What is built so far is what you need in the first
 five minutes — who's connected and in what state, is
@@ -92,9 +92,9 @@ Five routes. That is the whole console today.
 |---|---|
 | `/` | **Overview** — every configured database, each with its worst verdict across every incident check. "Is anything wrong anywhere?", nothing more. A check that could not *run* is reported separately from a check that ran and was fine, and a database where *nothing* could be read reads `UNKNOWN` rather than `OK`: "we could not look" and "we looked and it's fine" must never render the same. |
 | `/db/<name>` | **Triage** — one screen per database, one band per gate (see [The model](#the-model)): **Sessions** (connections and headroom, sessions by state), **Locks** (what's blocked, the root blockers), **Queries** (what's running long, statement shapes), and **Replication & cleanup** (role, lag, slots, wraparound horizon). Each band carries the question it answers and links to the route that goes deeper into it. Bands never move; what changes is size. A check that needs attention takes a full panel and explains itself; a healthy one collapses to one line. |
-| `/db/<name>/sessions` | **Sessions** — live `pg_stat_activity`; connection sources grouped by database/user/app/IP with an SSL breakdown; and the one place an action can be taken (see Safety). pgops's own connections are folded away by default, counted rather than hidden. |
+| `/db/<name>/sessions` | **Sessions** — live `pg_stat_activity`; connection sources grouped by database/user/app/IP with an SSL breakdown; and two of the four places an action can be taken — terminating one session, or every query running past the floor (see Safety). pgops's own connections are folded away by default, counted rather than hidden. |
 | `/db/<name>/locks` | **Locks** — the wait graph: who is blocking whom, and the root blocker at the top of the chain. |
-| `/db/<name>/queries` | **Queries** — `pg_stat_statements`, sortable by total, mean or calls, plus a slow-queries panel scoped to what was actually fetched. With a store configured, each row also carries what it did **since the last capture**. |
+| `/db/<name>/queries` | **Queries** — `pg_stat_statements`, sortable by total, mean or calls, plus a slow-queries panel scoped to what was actually fetched. With a store configured, each row also carries what it did **since the last capture**. With actions enabled, the two statistics resets live here. |
 
 ### The front door
 
@@ -408,23 +408,23 @@ file and resolves to exactly one state, checked on every test run.
 
 | State | Count |
 |---|---:|
-| Shipped | 52 |
-| Declined on purpose | 1 |
-| Remaining | 12 |
+| Shipped | 56 |
+| Declined on purpose | 3 |
+| Remaining | 6 |
 
 The remaining work is phased, and `parityBacklog(phase)` reports each phase's
-size rather than leaving it to be counted by hand: **P5 owes 6 and
-P6 owes 6** — the `reset_stats` and `analyze` actions, `EXPLAIN`, and index
-suggestions. P0, P1, P2, P3 and P4 are done. Build order is data in `PHASE_ORDER`, which is why P3, the store and the
+size rather than leaving it to be counted by hand: **P6 owes 6** — `EXPLAIN`
+and index suggestions, one of which (`system_stats`) is itself a decline P6
+will make. P0, P1, P2, P3, P4 and P5 are done. Build order is data in `PHASE_ORDER`, which is why P3, the store and the
 capture scheduler, shipped ahead of P2.
 
 Every number above comes from `registry.ts`. If one of them is wrong, the test
 suite is wrong with it — `parityBacklog` is what the phase gate reads, and a
 phase marked complete that still owes an entry fails by name.
 
-Thirteen deliberate divergences, all of them documented at the code that
-implements them — six from v1, six that arrived with the hygiene routes, and
-one with the trends:
+Fifteen deliberate divergences, all of them documented at the code that
+implements them — six from v1, six that arrived with the hygiene routes, one
+with the trends, and two with the actions:
 
 - **`kill` is guarded.** pgHero's is a bare `pg_terminate_backend` behind a
   button. See [Safety](#safety).
@@ -480,6 +480,23 @@ one with the trends:
 - **`maintenance_info` is answered by `table_stats`.** The two read the same
   view and return the same eight fields, so #43 and #36 resolve to one check
   rather than two answers to one question. See `tables.ts`.
+- **`enable_query_stats` and `disable_query_stats` are declined**, permanently.
+  Both are a schema change against a *monitored* database, which this project
+  promises never to make — the promise directly above this list. pgHero offers
+  them as buttons; pgops diagnoses the absent extension and hands the operator
+  the exact statement to run through their own migration tooling, which is
+  where a schema change belongs. Removing the extension is worse than
+  installing it: it destroys every query statistic on the database, and
+  pgops's own capture reads that extension every five minutes. See the
+  registry entries for #19 and #61.
+- **`kill_long_running_queries` is N guarded kills, not a sweep.** pgHero's
+  loops a bare `pg_terminate_backend` over whatever matched. Here the matching
+  sessions are listed first, one reason covers the batch, and each session is
+  terminated through the same identity-pinned statement a single kill uses — so
+  a pid recycled between the page render and the confirmation is refused on its
+  own row while its neighbours proceed. The result is per-session outcomes,
+  never a boolean. That diagnosis is also what separates it from `kill_all`,
+  which stays declined. See `actions/kill.ts`.
 - **`space_growth` measures between two stored captures, not against a live
   size.** pgHero takes the oldest size in the window and subtracts it from the
   relation's size *right now*, re-measured against the monitored database. That
@@ -492,7 +509,25 @@ one with the trends:
 
 ## Safety
 
-pgops can terminate a backend. Everything below exists because of that.
+pgops can terminate a backend, reset statistics and write to a monitored
+database. Everything below exists because of that.
+
+Actions sit on a ladder, and a deployment opts in to the whole ladder or none
+of it. **`PGOPS_ALLOW_ACTIONS` is unset by default, and while it is unset the
+routes do not exist** — every method answers 404, byte-identical to a path with
+no route at all, which an integration test asserts against a real server rather
+than against the gate in isolation.
+
+| Tier | Actions | Gate |
+|---|---:|---|
+| 0 | every read | always available |
+| 1 | terminate one session, analyze tables | flag **and** an inline confirmation with a required reason |
+| 2 | terminate every long-running query, reset query statistics, reset database statistics | tier 1, **and** the database name typed back |
+| 3 | schema changes | **unreachable.** Not gated — absent. See the two declines above. |
+
+The typed confirmation at tier 2 is checked on the server, not only in the
+browser: a confirmation the client alone enforces is one `curl` away from
+bypassed.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/kill-confirm-dark.png">

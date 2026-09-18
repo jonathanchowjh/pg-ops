@@ -148,7 +148,9 @@
  * #11 `kill` is a ruling of its own — see the comment on `ACTIONS` below.
  */
 import type { Placement } from './gates.js';
-import { killBackend } from './actions/kill.js';
+import { killBackend, killLongRunning } from './actions/kill.js';
+import { resetQueryStats, resetStats } from './actions/stats.js';
+import { analyzeTables } from './actions/analyze.js';
 import { captureOnce } from './capture.js';
 import { blocked } from './checks/blocked.js';
 import { connectionDetail, connections } from './checks/connections.js';
@@ -234,7 +236,9 @@ export type CheckId = keyof typeof CHECKS;
  * same guarantee `CHECKS` gives `check:` — rather than a free-form string a
  * typo could defeat without any test noticing.
  */
-export const ACTIONS = { kill: killBackend } as const;
+export const ACTIONS = {
+  analyzeTables, kill: killBackend, killLongRunning, resetQueryStats, resetStats,
+} as const;
 
 /**
  * The over-time half. Keyed the same way CHECKS is, so `series:` in the
@@ -370,7 +374,7 @@ export const PGHERO: Record<number, ParityEntry> = {
   11: { name: 'kill', source: 'methods/kill.rb',
     gate: 'connect', action: 'kill' },
   12: { name: 'kill_long_running_queries', source: 'methods/kill.rb',
-    gate: 'work', planned: 'P5' },
+    gate: 'work', action: 'killLongRunning' },
   13: {
     name: 'kill_all',
     source: 'methods/kill.rb',
@@ -404,10 +408,23 @@ export const PGHERO: Record<number, ParityEntry> = {
   // require check ids to be unique across capabilities.
   18: { name: 'query_stats_available', source: 'methods/query_stats.rb',
     gate: 'work', check: 'queryStats' },
-  19: { name: 'enable_query_stats', source: 'methods/query_stats.rb',
-    gate: 'work', planned: 'P5' },
+  19: {
+    name: 'enable_query_stats',
+    source: 'methods/query_stats.rb',
+    gate: 'work',
+    declined: 'Installing the pg_stat_statements extension is a schema change '
+      + 'against a MONITORED database, which this project promises never to '
+      + 'make. Parity spec §3.3 confines every schema change to the store '
+      + 'named by PGOPS_STORE_URL "and nowhere else"; web design spec §7.1 '
+      + 'puts such changes at tier 3, "CLI only, never reachable from the '
+      + 'web"; and §8 cut the CLI, so tier 3 has no vehicle left. The remedy '
+      + 'path already exists and is better: run.ts\'s remedyFor turns the '
+      + 'absent extension into the exact statement for an operator to run '
+      + 'through their own migration tooling, which is where a schema change '
+      + 'belongs. Permanent.',
+  },
   20: { name: 'reset_query_stats', source: 'methods/query_stats.rb',
-    gate: 'work', planned: 'P5' },
+    gate: 'work', action: 'resetQueryStats' },
   21: { name: 'capture_query_stats', source: 'methods/query_stats.rb',
     gate: 'work', job: 'captureQueryStats' },
 
@@ -431,7 +448,7 @@ export const PGHERO: Record<number, ParityEntry> = {
   30: { name: 'indexes', source: 'methods/indexes.rb',
     gate: 'work', check: 'indexList' },
   31: { name: 'reset_stats', source: 'methods/indexes.rb',
-    gate: 'work', planned: 'P5' },
+    gate: 'work', action: 'resetStats' },
   32: { name: 'last_stats_reset_time', source: 'methods/indexes.rb',
     gate: 'work', check: 'lastStatsReset' },
 
@@ -478,7 +495,7 @@ export const PGHERO: Record<number, ParityEntry> = {
   46: { name: 'vacuum_progress', source: 'methods/maintenance.rb',
     gate: 'keep-up', check: 'vacuumProgress' },
   47: { name: 'analyze_tables', source: 'methods/maintenance.rb',
-    gate: 'keep-up', planned: 'P5' },
+    gate: 'keep-up', action: 'analyzeTables' },
 
   // replication — methods/replication.rb
   // `pg_is_in_recovery()`, folded into the identity round trip. slots.ts
@@ -550,8 +567,18 @@ export const PGHERO: Record<number, ParityEntry> = {
 
   // Found by the 2026-08-26 re-audit, absent from the old 60-capability
   // matrix entirely:
-  61: { name: 'disable_query_stats', source: 'methods/query_stats.rb',
-    gate: 'work', planned: 'P5' },
+  61: {
+    name: 'disable_query_stats',
+    source: 'methods/query_stats.rb',
+    gate: 'work',
+    declined: 'Removing the pg_stat_statements extension is a schema change '
+      + 'against a MONITORED database — see #19 — and it is worse than #19 in '
+      + 'one way that stands on its own. It irreversibly destroys every query '
+      + 'statistic on the database, and pgops\'s own capture scheduler reads '
+      + 'that extension every five minutes. A console whose control deletes '
+      + 'the data its own history feature collects is incoherent, not merely '
+      + 'sharp-edged. Permanent.',
+  },
   // #62 stays planned: (controller ruling); action must be gated behind
   // explicit confirmation when built — see the top-of-file note.
   62: { name: 'autoindex', source: 'methods/suggested_indexes.rb',
@@ -584,7 +611,7 @@ export const PGHERO: Record<number, ParityEntry> = {
  * since a capability is owed by P1 whether P1a or P1b was meant to deliver
  * it.
  */
-export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1', 'P3', 'P2', 'P4'];
+export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1', 'P3', 'P2', 'P4', 'P5'];
 
 /**
  * Build order, as data. `planned: 'P3'` means "P3 OWNS this", not "P3 happens

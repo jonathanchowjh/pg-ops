@@ -4,6 +4,8 @@ import { runCheckFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
 import { SubNav } from '@/components/sub-nav';
 import { CLEANUP_SECTIONS } from '@/components/cleanup-sections';
+import { ConfirmAction } from '@/components/confirm-action';
+import { actionsAllowed } from '@/lib/actions';
 import { formatCount } from '@/lib/format';
 
 export async function generateMetadata({
@@ -41,10 +43,15 @@ export default async function Maintenance({
     runCheckFor(name, CHECKS.autovacuumDanger, {}),
     runCheckFor(name, CHECKS.vacuumProgress),
   ]);
+  // Read after runCheckFor has awaited connection(), so the gate reflects the
+  // deployment rather than being frozen at build time.
+  const canAct = actionsAllowed(process.env);
 
   return (
     <div className="grid gap-4">
       <SubNav name={name} base="cleanup" items={CLEANUP_SECTIONS} />
+
+      {canAct ? <Analyze name={name} /> : null}
 
       <CheckPanel title="Running vacuums" result={running}>
         {(d) => {
@@ -145,6 +152,46 @@ export default async function Maintenance({
           );
         }}
       </CheckPanel>
+    </div>
+  );
+}
+
+/**
+ * #47's control, on the page that renders what it refreshes.
+ *
+ * Tier 1 (web spec §7.1): the gate plus an inline confirmation, and no typed
+ * confirmation — ANALYZE recomputes statistics rather than destroying them,
+ * and the worst realistic outcome is I/O on a busy database, which the
+ * per-table lock and statement timeouts bound.
+ *
+ * The cap is STATED. The action takes the largest N tables, and a control that
+ * said "analyze tables" while covering 50 of 4,000 would leave an operator
+ * believing their statistics are fresh everywhere. `TABLES` must match the
+ * route's own default; the route clamps independently, so this number is the
+ * page's claim about what it asked for, not the enforcement.
+ */
+const TABLES = 50;
+
+function Analyze({ name }: { name: string }) {
+  return (
+    <div className="flex flex-wrap items-start gap-3 rounded-md border p-3">
+      <div>
+        <p className="mb-1 text-xs text-muted-foreground">
+          Recomputes planner statistics for the largest {formatCount(TABLES)} tables,
+          one transaction each, with a 5s lock wait and a 120s ceiling per table.
+          A table that cannot be locked is skipped and reported, not retried.
+        </p>
+        <ConfirmAction
+          label="Analyze tables"
+          endpoint={`/api/db/${encodeURIComponent(name)}/analyze`}
+          body={{ limit: TABLES }}
+          describe={(r) => {
+            const results = (r as { results?: { ok: boolean }[] }).results ?? [];
+            const ok = results.filter((x) => x.ok).length;
+            return `${ok} of ${results.length} analyzed.`;
+          }}
+        />
+      </div>
     </div>
   );
 }

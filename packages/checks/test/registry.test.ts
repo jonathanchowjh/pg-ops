@@ -71,9 +71,33 @@ describe('the pgHero parity registry', () => {
     }
   });
 
-  it('declines exactly one capability — kill_all (#13)', () => {
-    const declined = Object.entries(PGHERO).filter(([, e]) => 'declined' in e).map(([id]) => Number(id));
-    expect(declined).toEqual([13]);
+  /**
+   * Exact list equality, not a count: a decline is a product decision, and
+   * one arriving without anyone editing this line is the thing worth
+   * catching. P6 is expected to add #59 system_stats (parity spec §7 rules
+   * it out and the registry still carries it as planned), which is a
+   * deliberate edit here rather than a threshold this test slides past.
+   */
+  it('declines exactly three capabilities, each one permanently', () => {
+    const declined = Object.entries(PGHERO)
+      .filter(([, e]) => 'declined' in e).map(([id]) => Number(id));
+    // #13 kill_all — an action with no diagnosis.
+    // #19 / #61 — a schema change against a monitored database, which §3.3
+    // promises never to make and §7.1 puts at a tier with no vehicle left.
+    expect(declined).toEqual([13, 19, 61]);
+  });
+
+  /**
+   * A decline that does not say why is indistinguishable from an omission
+   * six months later, and these three are the entries a reader auditing the
+   * project's safety claims goes to first.
+   */
+  it('gives every decline a reason that states it is permanent', () => {
+    for (const [id, e] of Object.entries(PGHERO)) {
+      if (!('declined' in e)) continue;
+      expect(e.declined.length, `capability ${id}`).toBeGreaterThan(80);
+      expect(e.declined, `capability ${id}`).toMatch(/Permanent/i);
+    }
   });
 
   it('only plans phases that exist', () => {

@@ -173,3 +173,32 @@ export interface Series<Point, Opts = void> {
 export type SeriesResult<P> =
   | { ok: true; points: P[]; readAt: number }
   | { ok: false; reason: FailureReason; message: string; remedy?: string };
+
+/**
+ * What every action records about who did it and why.
+ *
+ * Here rather than in actions/kill.ts because three action modules need it,
+ * and an action importing a type from a sibling action would be a dependency
+ * between two things whose only intended meeting point is `ACTIONS`.
+ */
+export interface ActionMeta {
+  /** Which view/command issued the action — audit-log field. */
+  subcommand: string;
+  /** Human-readable justification — audit-log field, and required. */
+  reason: string;
+  /**
+   * Who did it, when the caller knows better than this process does.
+   *
+   * `writeAudit` derives `user` from `currentActor()` — the OS user, plus
+   * `process.env.HOSTNAME || hostname()`. That is right for a CLI on a
+   * bastion host and wrong inside a container, where HOSTNAME is the
+   * container ID, and wronger still once a Next standalone server pins it to
+   * 0.0.0.0 so it binds on all interfaces (verified: next/dist/build/utils.js
+   * generates `process.env.HOSTNAME || '0.0.0.0'` into server.js). A web
+   * console authenticating an operator knows their name; nothing else in
+   * this process does. Omitted, the fallback is unchanged.
+   */
+  actor?: string;
+  /** Extra target metadata for the audit entry (user, app, held_mode, state…). */
+  extra?: Record<string, unknown>;
+}

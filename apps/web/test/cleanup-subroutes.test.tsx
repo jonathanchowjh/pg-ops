@@ -378,3 +378,36 @@ describe('every cleanup sub-route', () => {
     expect(buttons).not.toContain('Refresh');
   });
 });
+
+/**
+ * #47's surface. Analyze lives where the data it refreshes is rendered — this
+ * page already shows last vacuum and last analyze per table, so the effect of
+ * pressing it is visible on the page that offered it.
+ */
+describe('the analyze control', () => {
+  afterEach(() => { delete process.env.PGOPS_ALLOW_ACTIONS; });
+
+  it('offers to analyze when actions are enabled', async () => {
+    process.env.PGOPS_ALLOW_ACTIONS = 'true';
+    const r = await show(Maintenance);
+    expect([...r.container.querySelectorAll('button')].map((b) => b.textContent))
+      .toContain('Analyze tables');
+  });
+
+  it('offers nothing when actions are disabled', async () => {
+    const r = await show(Maintenance);
+    expect([...r.container.querySelectorAll('button')].map((b) => b.textContent))
+      .not.toContain('Analyze tables');
+  });
+
+  /**
+   * The cap is stated, not implied. The action analyzes the largest N tables;
+   * a page that said "analyze tables" while covering 50 of 4,000 would leave
+   * an operator believing their statistics are fresh everywhere.
+   */
+  it('says how many tables it will cover, rather than implying all of them', async () => {
+    process.env.PGOPS_ALLOW_ACTIONS = 'true';
+    const r = await show(Maintenance);
+    expect(r.text()).toMatch(/largest \d+/i);
+  });
+});

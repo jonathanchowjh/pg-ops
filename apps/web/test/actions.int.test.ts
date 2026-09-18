@@ -39,12 +39,23 @@ function readAuditRecords(): Record<string, unknown>[] {
 }
 
 async function kill(baseUrl: string, body: unknown, extraHeaders: Record<string, string> = {}) {
-  return fetch(`${baseUrl}/api/db/primary/kill`, {
+  return act(baseUrl, 'kill', body, extraHeaders);
+}
+
+/** Every action route, by its path segment. `kill` is the special case that
+ * predates the rest and keeps its own name above. */
+async function act(
+  baseUrl: string, path: string, body: unknown, extraHeaders: Record<string, string> = {},
+) {
+  return fetch(`${baseUrl}/api/db/primary/${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...extraHeaders },
     body: JSON.stringify(body),
   });
 }
+
+/** The four routes P5 added, beside the kill route they share a preamble with. */
+const P5_ROUTES = ['kill-long-running', 'reset-query-stats', 'reset-stats', 'analyze'] as const;
 
 describe('the kill route', () => {
   /**
@@ -372,5 +383,116 @@ describe('the kill route', () => {
       const user = records[0]!.user as string;
       expect(user).toBe('anonymous@ops.example.internal');
     }, { ...ALLOWED, PGOPS_PUBLIC_HOST: 'ops.example.internal' });
+  });
+});
+
+describe('the P5 action routes', () => {
+  /**
+   * The same claim the kill route makes, for every route that now shares its
+   * preamble: a flagless deployment is indistinguishable from a build without
+   * the file. Compared byte-for-byte against a path with no route at all,
+   * because "indistinguishable" is the claim — not merely "also 404".
+   *
+   * Every method, because route.ts exports only POST and Next's app-route
+   * dispatch answers the others 405 before userland runs. proxy.ts is what
+   * holds this, and this is the test that would notice if its matcher ever
+   * stopped covering one of these paths.
+   */
+  it('are indistinguishable from a build without the files, on every method', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      const control = await fetch(`${baseUrl}/api/db/primary/no-such-route`);
+      expect(control.status).toBe(404);
+
+      for (const path of P5_ROUTES) {
+        for (const method of ['GET', 'POST', 'HEAD', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+          const res = await fetch(`${baseUrl}/api/db/primary/${path}`, { method });
+          expect(res.status, `${method} ${path} leaked the route`).toBe(control.status);
+        }
+      }
+    });
+  });
+
+  /**
+   * Tier 2, enforced server-side. A confirmation the browser alone checks is
+   * one curl away from bypassed, which is the whole reason openAction compares
+   * it rather than trusting the control.
+   */
+  it('refuse a tier-2 action with no typed confirmation', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      for (const path of ['kill-long-running', 'reset-query-stats', 'reset-stats']) {
+        const res = await act(baseUrl, path, { reason: 'x', targets: [{ pid: 1, backendStart: null }] });
+        expect(res.status, path).toBe(400);
+        expect((await res.json()).error, path).toMatch(/confirm/);
+      }
+    }, ALLOWED);
+  });
+
+  it('refuse a tier-2 action whose confirmation names the wrong database', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      const res = await act(baseUrl, 'reset-stats', { reason: 'x', confirm: 'not-primary' });
+      expect(res.status).toBe(400);
+    }, ALLOWED);
+  });
+
+  it('perform a tier-2 action when the confirmation matches, and audit it', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      const before = readAuditRecords().length;
+      const res = await act(baseUrl, 'reset-stats', { reason: 'integration', confirm: 'primary' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true });
+
+      const written = readAuditRecords().slice(before);
+      expect(written.some((r) => r.action === 'reset-stats' && r.reason === 'integration')).toBe(true);
+    }, ALLOWED);
+  });
+
+  /**
+   * Tier 1: analyze refreshes statistics rather than destroying them, so the
+   * gate and an inline confirmation are the whole ladder for it. No `confirm`
+   * in this body, and it must still succeed.
+   */
+  it('run analyze without a typed confirmation, and report per-table results', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      const res = await act(baseUrl, 'analyze', { reason: 'integration', limit: 5 });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { results: { relation: string; ok: boolean }[] };
+      expect(Array.isArray(body.results)).toBe(true);
+    }, ALLOWED);
+  });
+
+  it('reject a bulk kill whose targets are not a bounded array', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      const bad = [
+        { reason: 'x', confirm: 'primary', targets: 'not an array' },
+        { reason: 'x', confirm: 'primary', targets: [] },
+        { reason: 'x', confirm: 'primary', targets: [{ pid: 'no', backendStart: null }] },
+        { reason: 'x', confirm: 'primary',
+          targets: Array.from({ length: 101 }, (_, i) => ({ pid: i + 1, backendStart: null })) },
+      ];
+      for (const body of bad) {
+        const res = await act(baseUrl, 'kill-long-running', body);
+        expect(res.status, JSON.stringify(body).slice(0, 60)).toBe(400);
+      }
+    }, ALLOWED);
+  });
+
+  /**
+   * The audit records the authenticated operator, never a header the caller
+   * supplied — proxy.ts deletes any client copy before setting its own. The
+   * kill route asserts this for itself; these hold it through openAction, so
+   * a regression there would break every action at once.
+   */
+  it('audit the authenticated user, not a forged x-pgops-user header', async () => {
+    await withConsole(async ({ baseUrl }) => {
+      const before = readAuditRecords().length;
+      const res = await act(baseUrl, 'reset-stats',
+        { reason: 'forged?', confirm: 'primary' }, { [ACTOR_HEADER]: 'mallory' });
+      expect(res.status).toBe(200);
+
+      const written = readAuditRecords().slice(before)
+        .filter((r) => r.action === 'reset-stats');
+      expect(written.length).toBeGreaterThan(0);
+      for (const r of written) expect(String(r.user)).not.toMatch(/^mallory@/);
+    }, ALLOWED);
   });
 });

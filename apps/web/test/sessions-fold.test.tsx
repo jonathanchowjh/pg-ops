@@ -22,6 +22,16 @@ const state = vi.hoisted(() => ({ anyApp: true }));
 
 vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async (_name: string, check: { id: string }) => {
+    // The sessions page gained a third check in P5 (#12's diagnosis). A mock
+    // that answered every call with the sessions shape handed `d.queries`
+    // back as undefined and crashed the panel.
+    if (check.id === 'longRunning') {
+      return {
+        ok: true,
+        data: { queries: [], truncated: false },
+        verdict: { level: 'ok' }, measuredAt: 0,
+      };
+    }
     if (check.id === 'connectionDetail') {
       return {
         ok: true,

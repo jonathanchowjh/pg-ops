@@ -7,6 +7,8 @@ import { CheckPanel } from '@/components/check-panel';
 import { Badge } from '@/components/ui/badge';
 import { Refresh } from '@/components/refresh';
 import { SubNav } from '@/components/sub-nav';
+import { ConfirmAction } from '@/components/confirm-action';
+import { actionsAllowed } from '@/lib/actions';
 import { Sql } from '@/components/sql';
 import { formatCount, formatMillis } from '@/lib/format';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -103,6 +105,11 @@ export default async function Queries({
   // Spec §5.1: P3's only visible deliverable. One indexed lookup per render,
   // and it must stay that way — this is an INCIDENT page and it polls at 5s.
   const since = await lastIntervalByQueryid(name, result.ok ? result.data.rows : []);
+  // Read after runCheckFor has already awaited connection(), so this page is
+  // dynamic before the gate is read and the gate reflects the deployment
+  // rather than being frozen at build time. Not hoisted to module scope; see
+  // lib/check.ts and test/guards.test.ts.
+  const canAct = actionsAllowed(process.env);
 
   return (
     <>
@@ -115,6 +122,7 @@ export default async function Queries({
         base="queries"
         items={[{ segment: 'indexes', label: 'Indexes' }, { segment: 'tables', label: 'Tables' }]}
       />
+      {canAct ? <StatisticsControls name={name} /> : null}
       {/*
        * pgHero #17 slow_queries: NOT a query, a FILTER over #14's rows
        * (query_stats.select { calls >= slow_query_calls && average_time >=
@@ -346,4 +354,52 @@ async function lastIntervalByQueryid(
     if (last) byQueryid.set(shape.queryid, { calls: last.calls, totalExecTime: last.totalExecTime });
   }
   return { kind: 'ok', byQueryid };
+}
+
+/**
+ * #20 and #31, side by side on purpose.
+ *
+ * They are easy to confuse and one is far broader. `pg_stat_statements_reset`
+ * clears the statement statistics this page is built on;
+ * `pg_stat_reset` clears the table, index and function statistics that
+ * /queries/indexes and /queries/tables are built on. Putting them in one place
+ * with distinct wording is what teaches the difference; two controls on two
+ * routes would let an operator meet either one without ever learning there
+ * were two.
+ *
+ * Both are tier 2 (web spec §7.1) and take the database name typed back.
+ * Neither is a catastrophe — statistics rebuild — but both throw away history
+ * that cannot be recovered, and #32 lastStatsReset is the only evidence
+ * afterwards that it happened.
+ */
+function StatisticsControls({ name }: { name: string }) {
+  const db = encodeURIComponent(name);
+  return (
+    <div className="mb-3 flex flex-wrap items-start gap-3 rounded-md border p-3">
+      <div>
+        <p className="mb-1 text-xs text-muted-foreground">
+          Clears pg_stat_statements for this database — the statement
+          statistics this page ranks.
+        </p>
+        <ConfirmAction
+          label="Reset query statistics"
+          endpoint={`/api/db/${db}/reset-query-stats`}
+          confirmWith={name}
+          danger="Every call count, total time and cache figure on this page starts again from zero. Other databases on this server are unaffected."
+        />
+      </div>
+      <div>
+        <p className="mb-1 text-xs text-muted-foreground">
+          Clears this database&apos;s table and index statistics — what the
+          Indexes and Tables pages read.
+        </p>
+        <ConfirmAction
+          label="Reset database statistics"
+          endpoint={`/api/db/${db}/reset-stats`}
+          confirmWith={name}
+          danger="Index usage, unused-index and table-hit-rate figures all start again from zero, and captured history spanning this point is dropped rather than charted."
+        />
+      </div>
+    </div>
+  );
 }

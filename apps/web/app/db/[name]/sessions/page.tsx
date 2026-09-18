@@ -6,6 +6,7 @@ import { APP_NAME } from '@/lib/config';
 import { actionsAllowed } from '@/lib/actions';
 import { CheckPanel } from '@/components/check-panel';
 import { KillButton } from '@/components/kill-button';
+import { ConfirmAction } from '@/components/confirm-action';
 import { Refresh } from '@/components/refresh';
 import { Sql } from '@/components/sql';
 import { formatCount, formatDuration } from '@/lib/format';
@@ -36,11 +37,15 @@ export default async function Sessions({
   // trips are two snapshots of pg_stat_activity taken at different instants
   // — on a page that already re-fetches every 5 seconds. Every other
   // multi-check page (app/page.tsx, app/db/[name]/page.tsx) does the same.
-  const [result, detail] = await Promise.all([
+  const [result, detail, running] = await Promise.all([
     runCheckFor(name, CHECKS.sessions, {
       limit: Number.isFinite(parsed) && parsed > 0 ? parsed : undefined,
     }),
     runCheckFor(name, CHECKS.connectionDetail, {}),
+    // #12's diagnosis. Fetched beside the others for the same reason they are
+    // fetched together: two serialized round trips are two snapshots of
+    // pg_stat_activity taken at different instants.
+    runCheckFor(name, CHECKS.longRunning, {}),
   ]);
   // Read here, after runCheckFor has already awaited connection() — so this
   // page is dynamic before the gate is read, and the gate reflects the
@@ -54,6 +59,10 @@ export default async function Sessions({
           hygiene routes share that layout and must not inherit a 5s
           catalog scan. test/guards.test.ts holds this. */}
       <div className="mb-2 flex justify-end"><Refresh intervalMs={5_000} /></div>
+      <CheckPanel title="Long-running queries" result={running}>
+        {(d) => <LongRunning name={name} queries={d.queries} canAct={canAct} />}
+      </CheckPanel>
+
       <CheckPanel title="Sessions" result={result}>
         {(d) => {
           // pgops's OWN connections, separated from the application's.
@@ -232,6 +241,78 @@ export default async function Sessions({
           </>
         )}
       </CheckPanel>
+    </>
+  );
+}
+
+/**
+ * #12's surface: the diagnosis, then the action over exactly what it names.
+ *
+ * The list comes FIRST and renders whether or not actions are enabled. That
+ * ordering is the capability: pgHero's kill_long_running_queries is a sweep,
+ * and #13 kill_all is declined here permanently as "an action with no
+ * diagnosis". What makes this one legitimate is that an operator sees the
+ * sessions before deciding, so a control without the list would be the
+ * declined capability shipped under the allowed one's name.
+ *
+ * Each target carries its OWN `backendStart`, captured in this render. That is
+ * the PID-reuse guard: killBackend compares it inside the same statement as
+ * the terminate, so a pid recycled between this render and the operator's
+ * confirmation is refused rather than killed. Re-deriving it server-side would
+ * compare the server's current idea of the session against itself.
+ *
+ * Nothing renders when actions are off — not a disabled button, which
+ * advertises a capability that is switched off, the same disclosure the
+ * route's 404 exists to prevent.
+ */
+function LongRunning({
+  name,
+  queries,
+  canAct,
+}: {
+  name: string;
+  queries: readonly { pid: number; runningSecs: number; query: string | null; backendStart: string | null }[];
+  canAct: boolean;
+}) {
+  if (queries.length === 0) {
+    return <p className="text-sm text-muted-foreground">Nothing running past the floor.</p>;
+  }
+  return (
+    <>
+      <ul className="text-sm">
+        {queries.map((q) => (
+          <li key={q.pid} className="flex justify-between gap-4 py-0.5">
+            <span className="font-medium">
+              {q.pid}
+              {/* Through <Sql>, like every other rendered statement in this
+                  console: it redacts, and guards.test.ts fails for any query
+                  field interpolated directly. It renders an em dash for null,
+                  which is what a statement this role may not read looks
+                  like. */}
+              <span className="ml-2 font-normal text-muted-foreground">
+                <Sql>{q.query}</Sql>
+              </span>
+            </span>
+            <span className="text-muted-foreground">{formatDuration(q.runningSecs)}</span>
+          </li>
+        ))}
+      </ul>
+      {canAct ? (
+        <div className="mt-3">
+          <ConfirmAction
+            label="Terminate all"
+            endpoint={`/api/db/${encodeURIComponent(name)}/kill-long-running`}
+            confirmWith={name}
+            danger={`Terminates ${queries.length} ${queries.length === 1 ? 'session' : 'sessions'}. Each is checked against the identity captured above, so one that has since been replaced is refused rather than killed.`}
+            body={{ targets: queries.map((q) => ({ pid: q.pid, backendStart: q.backendStart })) }}
+            describe={(r) => {
+              const results = (r as { results?: { outcome: string }[] }).results ?? [];
+              const killed = results.filter((x) => x.outcome === 'terminated').length;
+              return `${killed} of ${results.length} terminated.`;
+            }}
+          />
+        </div>
+      ) : null}
     </>
   );
 }
