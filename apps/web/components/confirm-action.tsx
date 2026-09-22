@@ -19,6 +19,32 @@ import { useRouter } from 'next/navigation';
  * `openAction` re-checks the same string server-side, because a confirmation
  * the client alone enforces is one curl away from bypassed.
  */
+
+/**
+ * The sentence shown after an action succeeds, keyed by action.
+ *
+ * Keys rather than a callback prop because this is a client component and its
+ * callers are server pages: React serialises every prop that crosses that
+ * boundary, and a function cannot be serialised. v2.2.0 took a `describe`
+ * function here and both call sites answered 500 whenever actions were on —
+ * /sessions during exactly the pile-up it exists for. With the prop typed as
+ * a key, a caller that tries to pass a closure fails typecheck instead.
+ */
+const OUTCOMES = {
+  'kill-batch': (r: unknown) => {
+    const results = (r as { results?: { outcome: string }[] }).results ?? [];
+    const killed = results.filter((x) => x.outcome === 'terminated').length;
+    return `${killed} of ${results.length} terminated.`;
+  },
+  analyze: (r: unknown) => {
+    const results = (r as { results?: { ok: boolean }[] }).results ?? [];
+    const ok = results.filter((x) => x.ok).length;
+    return `${ok} of ${results.length} analyzed.`;
+  },
+} satisfies Record<string, (result: unknown) => string>;
+
+export type ConfirmOutcome = keyof typeof OUTCOMES;
+
 export function ConfirmAction({
   label,
   endpoint,
@@ -36,8 +62,8 @@ export function ConfirmAction({
   confirmWith?: string;
   /** What is irreversible about this, shown before the operator commits. */
   danger?: string;
-  /** Turns the 200 body into the sentence shown afterwards. */
-  describe?: (result: unknown) => string;
+  /** Which sentence the 200 body becomes afterwards — see OUTCOMES. */
+  describe?: ConfirmOutcome;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -91,7 +117,7 @@ export function ConfirmAction({
         // The 502 path carries `error`, and it is the only place the real
         // reason reaches the operator — typically the console's role lacking
         // a privilege. Keep this chain intact rather than showing "HTTP 502".
-        setResult(parsed.error ?? describe?.(parsed) ?? (res.ok ? 'Done.' : `HTTP ${res.status}`));
+        setResult(parsed.error ?? (describe === undefined ? undefined : OUTCOMES[describe](parsed)) ?? (res.ok ? 'Done.' : `HTTP ${res.status}`));
       } catch (err) {
         // fetch itself can reject — offline, DNS, an aborted connection. Left
         // uncaught, the rejection escapes the transition, `pending` never

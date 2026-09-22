@@ -4,6 +4,28 @@ All notable changes to pgops are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] — 2026-09-22
+
+A patch for two pages that answered 500 whenever actions were enabled.
+
+### Fixed
+
+- **`/cleanup/maintenance` and `/sessions` no longer fail with
+  `PGOPS_ALLOW_ACTIONS=true`.** Maintenance failed on every load. Sessions
+  failed whenever a query had run past the long-running floor, which is the
+  moment an operator opens it. Both pages handed the confirmation control a
+  function to format its result, and a server page cannot pass a function to
+  a client component. The result sentences now live in the control, chosen by
+  key, so a caller that tries to pass a function fails typecheck. Broken since
+  2.2.0.
+
+### Tests
+
+- The integration suite now fetches the pages that mount a confirmation with
+  actions on. Every earlier page test ran with actions off, where the control
+  is never rendered, and every actions-on test posted to an API route without
+  rendering a page. That is how the break shipped twice.
+
 ## [2.3.0] — 2026-09-21
 
 Explain and index suggestions — and with them, parity with pgHero is complete.

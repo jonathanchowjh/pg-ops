@@ -305,11 +305,7 @@ function LongRunning({
             confirmWith={name}
             danger={`Terminates ${queries.length} ${queries.length === 1 ? 'session' : 'sessions'}. Each is checked against the identity captured above, so one that has since been replaced is refused rather than killed.`}
             body={{ targets: queries.map((q) => ({ pid: q.pid, backendStart: q.backendStart })) }}
-            describe={(r) => {
-              const results = (r as { results?: { outcome: string }[] }).results ?? [];
-              const killed = results.filter((x) => x.outcome === 'terminated').length;
-              return `${killed} of ${results.length} terminated.`;
-            }}
+            describe="kill-batch"
           />
         </div>
       ) : null}

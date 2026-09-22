@@ -496,3 +496,45 @@ describe('the P5 action routes', () => {
     }, ALLOWED);
   });
 });
+
+/**
+ * The pages that mount a confirmation control, fetched with actions ON.
+ *
+ * Every other test in this file posts to an API route. None of them renders a
+ * page, and every page test outside this file runs with actions off — where
+ * `ConfirmAction` is never mounted. So until this block existed, nothing in the
+ * suite ever serialised a `ConfirmAction` across the server–client boundary,
+ * and v2.2.0 shipped two pages that answer 500 the moment the flag is set:
+ * both handed the client component a `describe` FUNCTION, which React refuses
+ * to serialise. The component tests render pages directly and cannot see it;
+ * only a real `next start` can. The actions-off runs passing is exactly what
+ * hid this, which is why this block exists and why it must stay actions-on.
+ *
+ * `/sessions` mounts "Terminate all" only when something runs past the
+ * long-running floor (60 s, the check's warn threshold), so that half holds a
+ * `pg_sleep` open past it before fetching. That wait is the cost of testing
+ * the page an operator opens during a pile-up, which is when this broke.
+ */
+describe('pages that mount a confirmation, with actions on', () => {
+  it('renders /cleanup/maintenance with the analyze control, and /sessions with Terminate all', async () => {
+    await withConsole(async ({ baseUrl, url }) => {
+      const maintenance = await fetch(`${baseUrl}/db/primary/cleanup/maintenance`);
+      expect(maintenance.status).toBe(200);
+      expect(await maintenance.text()).toContain('Analyze tables');
+
+      const sleeper = new Client({ connectionString: url, application_name: 'p7a-sleeper' });
+      await sleeper.connect();
+      // Not awaited: it has to be RUNNING while the page renders.
+      const running = sleeper.query('SELECT pg_sleep(150)').catch(() => {});
+      try {
+        await new Promise((r) => setTimeout(r, 62_000));
+        const sessions = await fetch(`${baseUrl}/db/primary/sessions`);
+        expect(sessions.status).toBe(200);
+        expect(await sessions.text()).toContain('Terminate all');
+      } finally {
+        await sleeper.end().catch(() => {});
+        await running;
+      }
+    }, ALLOWED);
+  }, 300_000);
+});

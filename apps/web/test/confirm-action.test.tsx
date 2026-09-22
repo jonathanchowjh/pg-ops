@@ -123,6 +123,26 @@ describe('ConfirmAction', () => {
   });
 
   /**
+   * The outcome sentence is chosen by key, not passed as a function: the
+   * callers are server pages and a function cannot cross into a client
+   * component (see OUTCOMES). These pin what each key says, since the two
+   * closures they replaced were the only place those sentences were written.
+   */
+  it.each([
+    ['kill-batch', { results: [{ outcome: 'terminated' }, { outcome: 'terminated' }, { outcome: 'session-changed' }] }, '2 of 3 terminated.'],
+    ['analyze', { results: [{ ok: true }, { ok: true }, { ok: false }] }, '2 of 3 analyzed.'],
+  ] as const)('turns a %s result into its sentence', async (key, body, sentence) => {
+    fetchOk(body);
+    const r = await render(<ConfirmAction label="Go" endpoint="/api/db/prod/x" describe={key} />);
+    await open(r, 'Go');
+    await type(r.container.querySelector('input')!, 'because');
+    await act(async () => { confirmButton(r).click(); });
+
+    expect(r.text()).toContain(sentence);
+    r.unmount();
+  });
+
+  /**
    * fetch itself can reject — offline, DNS, an aborted connection. Left
    * uncaught the rejection escapes the transition, `pending` never clears,
    * and the operator sees nothing at all.

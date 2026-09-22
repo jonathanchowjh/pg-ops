@@ -181,11 +181,7 @@ function Analyze({ name }: { name: string }) {
           label="Analyze tables"
           endpoint={`/api/db/${encodeURIComponent(name)}/analyze`}
           body={{ limit: TABLES }}
-          describe={(r) => {
-            const results = (r as { results?: { ok: boolean }[] }).results ?? [];
-            const ok = results.filter((x) => x.ok).length;
-            return `${ok} of ${results.length} analyzed.`;
-          }}
+          describe="analyze"
         />
       </div>
     </div>
