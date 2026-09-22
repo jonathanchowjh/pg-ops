@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CHECKS } from '@pgops/checks';
-import { isMissingRequestStore, runCheckFor } from '@/lib/check';
+import { CHECKS, TOOLS } from '@pgops/checks';
+import { isMissingRequestStore, runCheckFor, runToolFor } from '@/lib/check';
 
 describe('isMissingRequestStore', () => {
   /**
@@ -79,5 +79,28 @@ describe('runCheckFor when the console itself is misconfigured', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.reason).toBe('unreachable');
+  });
+});
+
+/**
+ * The same two properties through the tool seam. Page tests mock
+ * `runToolFor`, so without this nothing exercises the lines between the page
+ * and `runTool` — the gap P4's `relationSpace` fell into.
+ */
+describe('runToolFor', () => {
+  const CONFIG_VARS = ['PGOPS_CONFIG_FILE', 'PGOPS_DATABASES', 'DATABASE_URL'];
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('reports a configuration fault as a console error, not the database being unreachable', async () => {
+    for (const v of CONFIG_VARS) vi.stubEnv(v, undefined);
+    const r = await runToolFor('primary', TOOLS.explain, { sql: 'SELECT 1' });
+    expect(r).toMatchObject({ ok: false, reason: 'error', message: expect.stringContaining('No database configured') });
+  });
+
+  it('still reports a real connection failure as unreachable', async () => {
+    for (const v of CONFIG_VARS) vi.stubEnv(v, undefined);
+    vi.stubEnv('DATABASE_URL', 'postgres://u:p@127.0.0.1:1/nope');
+    const r = await runToolFor('default', TOOLS.explain, { sql: 'SELECT 1' });
+    expect(r).toMatchObject({ ok: false, reason: 'unreachable' });
   });
 });

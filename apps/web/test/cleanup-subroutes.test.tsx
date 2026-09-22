@@ -358,15 +358,6 @@ describe('every cleanup sub-route', () => {
     ['sequences', Sequences as Page],
   ];
 
-  it.each(PAGES)('%s carries the sub-navigation back to the tab', async (_n, page) => {
-    const hrefs = [...(await show(page)).container.querySelectorAll('a')]
-      .map((a) => a.getAttribute('href') ?? '');
-    expect(hrefs).toContain('/db/prod/cleanup');
-    expect(hrefs).toContain('/db/prod/cleanup/space');
-    expect(hrefs).toContain('/db/prod/cleanup/maintenance');
-    expect(hrefs).toContain('/db/prod/cleanup/sequences');
-  });
-
   /**
    * None of these polls. They run catalog scans on visit, and guards.test.ts
    * holds the same fact from the source side — this is the rendered half: no

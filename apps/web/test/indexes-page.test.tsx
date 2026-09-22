@@ -170,6 +170,11 @@ describe('the indexes page', () => {
     expect(ids).not.toContain('indexBloat');
   });
 
+  it('links to suggested indexes rather than planning a hundred shapes inline', async () => {
+    const out = await html();
+    expect(out).toContain('/db/prod/queries/indexes/suggested');
+  });
+
   /**
    * A hygiene route must not inherit the incident pages' 5s catalog scan.
    * guards.test.ts holds the polling set; this is the page-level statement of
@@ -179,12 +184,6 @@ describe('the indexes page', () => {
     const out = await html();
     expect(out).not.toContain('data-refresh');
     expect(out.toLowerCase()).not.toContain('refreshing');
-  });
-
-  it('renders the sub-route strip so the tab is navigable from here', async () => {
-    const out = await html();
-    expect(out).toContain('/db/prod/queries/tables');
-    expect(out).toContain('/db/prod/queries');
   });
 
   /**

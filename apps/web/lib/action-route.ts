@@ -55,18 +55,8 @@ export async function openAction(
 
   warnIfActionsAreUnauthenticated(process.env);
 
-  const mediaType = (req.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
-  if (mediaType !== 'application/json') {
-    return bad('Content-Type must be application/json.', 415);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = await req.json();
-  } catch {
-    return bad('Body must be JSON.');
-  }
-  const body = (parsed ?? {}) as Record<string, unknown>;
+  const body = await readJson(req);
+  if (body instanceof Response) return body;
 
   // The only free-text field in the audit record, and the only thing that
   // distinguishes a deliberate action from an accident when someone reads the
@@ -112,6 +102,26 @@ export async function openAction(
     reason: reason.trim(),
     body,
   };
+}
+
+/**
+ * The CSRF defence and the body parse, shared by every JSON route: the action
+ * routes reach it through `openAction`, BELOW the tier gate; the tier-0
+ * explain route calls it directly. See `openAction`'s docblock for why the
+ * media type IS the defence. One copy, because the explain route would
+ * otherwise be the sixth hand-maintained version of exactly the lines this
+ * file was written to stop drifting.
+ */
+export async function readJson(req: Request): Promise<Record<string, unknown> | Response> {
+  const mediaType = (req.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
+  if (mediaType !== 'application/json') {
+    return bad('Content-Type must be application/json.', 415);
+  }
+  try {
+    return ((await req.json()) ?? {}) as Record<string, unknown>;
+  } catch {
+    return bad('Body must be JSON.');
+  }
 }
 
 /**

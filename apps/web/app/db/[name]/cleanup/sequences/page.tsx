@@ -2,8 +2,6 @@ import type { Metadata } from 'next';
 import { CHECKS } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
-import { SubNav } from '@/components/sub-nav';
-import { CLEANUP_SECTIONS } from '@/components/cleanup-sections';
 import { formatCount } from '@/lib/format';
 
 export async function generateMetadata({
@@ -35,8 +33,6 @@ export default async function Sequences({
 
   return (
     <div className="grid gap-4">
-      <SubNav name={name} base="cleanup" items={CLEANUP_SECTIONS} />
-
       <CheckPanel title="Sequences, against the column they feed" result={result}>
         {(d) => (
           <>

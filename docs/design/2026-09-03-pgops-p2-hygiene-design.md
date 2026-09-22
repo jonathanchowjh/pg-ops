@@ -1,7 +1,7 @@
 # pgops P2 — the hygiene class
 
 **Status:** design, approved 2026-09-03; **§0, §4.1 and §4.2 amended 2026-09-09; §4.2 corrected 2026-09-10** (see *Amendment*, below)
-**Parent spec:** `docs/superpowers/specs/2026-08-26-pgops-web-design.md` (§10 P2)
+**Parent spec:** `docs/design/2026-08-26-pgops-web-design.md` (§10 P2)
 **Benchmarked against:** pgHero 4.0.1 (`lib/pghero/version.rb`, CHANGELOG `## 4.0.1 (2026-08-15)`), re-cloned 2026-09-03
 **Closes:** the 31 registry entries this spec classified as P2 (§1). The
 P2a plan has since shipped the six incident-class members (§1.2);

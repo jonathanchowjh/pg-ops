@@ -4,8 +4,6 @@ import { CHECKS, SERIES } from '@pgops/checks';
 import type { GrowthPoint } from '@pgops/checks';
 import { runCheckFor, runSeriesFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
-import { SubNav } from '@/components/sub-nav';
-import { CLEANUP_SECTIONS } from '@/components/cleanup-sections';
 import { formatBytes, formatCount, formatDelta } from '@/lib/format';
 
 export async function generateMetadata({
@@ -54,8 +52,6 @@ export default async function Space({
 
   return (
     <div className="grid gap-4">
-      <SubNav name={name} base="cleanup" items={CLEANUP_SECTIONS} />
-
       <CheckPanel title="Database size" result={size}>
         {(d) => (
           <p className="text-sm">

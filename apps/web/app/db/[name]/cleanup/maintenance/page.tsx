@@ -2,8 +2,6 @@ import type { Metadata } from 'next';
 import { CHECKS } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
-import { SubNav } from '@/components/sub-nav';
-import { CLEANUP_SECTIONS } from '@/components/cleanup-sections';
 import { ConfirmAction } from '@/components/confirm-action';
 import { actionsAllowed } from '@/lib/actions';
 import { formatCount } from '@/lib/format';
@@ -49,8 +47,6 @@ export default async function Maintenance({
 
   return (
     <div className="grid gap-4">
-      <SubNav name={name} base="cleanup" items={CLEANUP_SECTIONS} />
-
       {canAct ? <Analyze name={name} /> : null}
 
       <CheckPanel title="Running vacuums" result={running}>

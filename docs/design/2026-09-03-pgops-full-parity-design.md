@@ -417,6 +417,33 @@ reaching zero is the claim, and CI reports it.
 > `run.ts`'s `remedyFor` hands the operator the exact statement to run through
 > their own migration tooling. See the registry entries for the full argument.
 
+> **Amended 2026-09-21 (P6).** Three of this section's statements did not
+> survive building it, and a fourth count moves.
+>
+> 1. **No parser was added.** The `suggested_indexes` family reads the
+>    *planner's* JSON plan instead of a `pg_query` parse tree. A `Seq Scan`
+>    carrying a `Filter` is the finding; pgHero's column heuristic, transcribed,
+>    picks the columns from `pg_stats`. That handles joins (pgHero answers
+>    "JOIN not supported yet"), needs no covering-index guesswork where the
+>    planner already uses an index, and keeps `packages/checks` at
+>    `dependencies: ["pg"]`. "The dependency is justified by what it buys" —
+>    it turned out to buy less than the planner gives for free.
+> 2. **The type this section declined to design is `Tool<Input, Data>`**: an
+>    operator-parameterised read of as many round trips as the question needs,
+>    run through `runTool`, never judging. #57 and #64 are one tool (`explain`);
+>    #58 and #63 are another (`suggestedIndexes`).
+> 3. **Normalized statements plan on every supported version.** `EXPLAIN
+>    (GENERIC_PLAN)` is PG 16+ and cannot be sent as the named statement the
+>    injection defence requires; `PREPARE` + `EXPLAIN EXECUTE` under
+>    `plan_cache_mode = force_generic_plan` can, on 12+. Both findings were
+>    measured on 14 and 17 before the plan was written.
+> 4. **#62 `autoindex` is declined**, for the four reasons #19 and #61 were —
+>    it builds an index on a monitored database. Every suggestion carries the
+>    statement instead.
+>
+> **Final: 60 shipped, 5 declined, 0 planned.** `parityBacklog()` is 0 and
+> every phase is in `COMPLETE_PHASES`.
+
 ---
 
 ## 8. Cut

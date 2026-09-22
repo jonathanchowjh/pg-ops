@@ -1,7 +1,7 @@
 import { connection } from 'next/server';
 import {
-  runCheck, runSeries,
-  type Check, type CheckResult, type Series, type SeriesResult, type TimeRange,
+  runCheck, runSeries, runTool,
+  type Check, type CheckResult, type Series, type SeriesResult, type TimeRange, type Tool,
 } from '@pgops/checks';
 // Extensionless, not './pools.js': this file's tsconfig sets moduleResolution
 // "bundler" (Next requires it), under which Next's own webpack/Turbopack
@@ -179,6 +179,35 @@ export async function runSeriesFor<P, Opts>(
   }
   try {
     return await runSeries(await contextFor(name), series, range, opts as Opts);
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      return { ok: false, reason: 'error', message: consoleFailure('config', err.message) };
+    }
+    return { ok: false, reason: 'unreachable', message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * The same seam, for a tool — `await connection()` first and never rejecting,
+ * for exactly the reasons `runCheckFor`'s docblock gives. A tool's result is a
+ * `CheckResult` with `verdict: null`, so it renders through `CheckPanel` like
+ * any check.
+ */
+export async function runToolFor<Input, Data>(
+  name: string,
+  tool: Tool<Input, Data>,
+  input: Input,
+): Promise<CheckResult<Data>> {
+  try {
+    await connection();
+  } catch (err) {
+    if (!isMissingRequestStore(err)) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return { ok: false, reason: 'error', message: consoleFailure('render', detail) };
+    }
+  }
+  try {
+    return await runTool(await contextFor(name), tool, input);
   } catch (err) {
     if (err instanceof ConfigError) {
       return { ok: false, reason: 'error', message: consoleFailure('config', err.message) };

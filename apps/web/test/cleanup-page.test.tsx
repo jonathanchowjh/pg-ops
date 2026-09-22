@@ -86,14 +86,6 @@ describe('the cleanup page', () => {
     expect(r.text()).toContain('nothing replayed yet');
   });
 
-  it('links every hygiene sub-route', async () => {
-    const hrefs = [...(await page()).container.querySelectorAll('a')]
-      .map((a) => a.getAttribute('href') ?? '');
-    expect(hrefs).toContain('/db/prod/cleanup/space');
-    expect(hrefs).toContain('/db/prod/cleanup/maintenance');
-    expect(hrefs).toContain('/db/prod/cleanup/sequences');
-  });
-
   /**
    * This is the one page in P2 that legitimately polls: it renders
    * `class: 'incident'` checks and must stay current during an incident,

@@ -70,23 +70,6 @@ afterEach(() => {
 
 describe('the Queries tab is extended, not replaced', () => {
   /**
-   * The WIRING, which neither sub-nav.test.tsx nor the rest of this file
-   * covers: that component test renders SubNav directly, so deleting
-   * `<SubNav>` from this page would leave it green. This is the assertion
-   * that goes red.
-   */
-  it('renders the sub-route strip on the tab itself', async () => {
-    const element = await Queries({
-      params: Promise.resolve({ name: 'primary' }),
-      searchParams: Promise.resolve({}),
-    });
-    rendered = await render(element);
-    const html = rendered.container.innerHTML;
-    expect(html).toContain('/db/primary/queries/indexes');
-    expect(html).toContain('/db/primary/queries/tables');
-  });
-
-  /**
    * /queries is an incident page and guards.test.ts asserts it polls. The
    * strip is additive: the tab keeps its content and its refresh.
    */
@@ -265,8 +248,7 @@ describe('each shape links to its own history', () => {
     expect(hrefs).toContain('/db/prod/queries/1234567890');
     expect(hrefs).not.toContain('/db/prod/queries/null');
     // Exactly one of the two rows is linked. Matched on a numeric last
-    // segment, not on the prefix: the SubNav above the table already renders
-    // /db/prod/queries/indexes and /db/prod/queries/tables, which share it.
+    // segment, not on the prefix, so a link to a sub-route never counts.
     expect(hrefs.filter((h) => /^\/db\/prod\/queries\/\d+$/.test(h)).length).toBe(1);
   });
 });

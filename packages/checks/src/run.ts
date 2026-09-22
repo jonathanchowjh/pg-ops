@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 import type {
-  Check, CheckContext, CheckResult, FailureReason, Requirement, Series, SeriesResult, SqlQuery, TimeRange,
+  Check, CheckContext, CheckResult, FailureReason, Requirement, Series, SeriesResult, SqlQuery, TimeRange, Tool,
 } from './types.js';
 
 /** Postgres SQLSTATEs we can turn into an actionable remedy. */
@@ -158,6 +158,20 @@ async function queryWithTimeout(
   }
 }
 
+/** The `unsupported-version` failure, when the server is older than a declared floor. */
+function belowFloor(
+  ctx: CheckContext,
+  { id, requires }: { id: string; requires?: Requirement[] },
+): { ok: false; reason: 'unsupported-version'; message: string } | undefined {
+  const version = requires?.find((r) => r.kind === 'version');
+  if (!version || ctx.serverVersion >= version.min) return undefined;
+  return {
+    ok: false,
+    reason: 'unsupported-version',
+    message: `${id} requires server_version_num >= ${version.min}, found ${ctx.serverVersion}`,
+  };
+}
+
 /**
  * Run one check. NEVER rejects.
  *
@@ -194,14 +208,8 @@ export async function runCheck<Row, Data, Opts>(
   check: Check<Row, Data, Opts>,
   opts?: Opts,
 ): Promise<CheckResult<Data>> {
-  const version = check.requires?.find((r) => r.kind === 'version');
-  if (version && ctx.serverVersion < version.min) {
-    return {
-      ok: false,
-      reason: 'unsupported-version',
-      message: `${check.id} requires server_version_num >= ${version.min}, found ${ctx.serverVersion}`,
-    };
-  }
+  const tooOld = belowFloor(ctx, check);
+  if (tooOld) return tooOld;
 
   // Stamp when the database MEASURED the numbers, not when the promise settled.
   // A poll that took 5s then reads "5s ago" the moment it lands, which is true.
@@ -277,18 +285,41 @@ export async function runSeries<P, Opts>(
       remedy: 'Set PGOPS_STORE_URL to a Postgres database pgops may create its own schema in.',
     };
   }
-  const version = series.requires?.find((r) => r.kind === 'version');
-  if (version && ctx.serverVersion < version.min) {
-    return {
-      ok: false,
-      reason: 'unsupported-version',
-      message: `${series.id} requires server_version_num >= ${version.min}, found ${ctx.serverVersion}`,
-    };
-  }
+  const tooOld = belowFloor(ctx, series);
+  if (tooOld) return tooOld;
   const readAt = Date.now();
   try {
     return { ok: true, points: await series.read(ctx, range, opts as Opts), readAt };
   } catch (err) {
     return { ok: false, reason: 'error', message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Run one tool. NEVER rejects — the same contract as runCheck, for the same
+ * reason: a page renders a failed tool; it must never render a stack trace.
+ *
+ * Returns a `CheckResult` with `verdict: null` rather than a result type of
+ * its own. A tool answers and never judges (§2.2), and that one field is the
+ * only difference — so every surface that renders a check renders a tool with
+ * no new component, and `CheckPanel`'s failure branch (reason, message,
+ * remedy) stays written once.
+ *
+ * No overloads, unlike runCheck: every tool takes an input, so the arity
+ * problem I1 describes cannot arise.
+ */
+export async function runTool<Input, Data>(
+  ctx: CheckContext,
+  tool: Tool<Input, Data>,
+  input: Input,
+): Promise<CheckResult<Data>> {
+  const tooOld = belowFloor(ctx, tool);
+  if (tooOld) return tooOld;
+  const measuredAt = Date.now();
+  try {
+    return { ok: true, data: await tool.run(ctx, input), verdict: null, measuredAt };
+  } catch (err) {
+    const reason = classify(err, tool.requires);
+    return { ok: false, reason, message: messageOf(err), remedy: remedyFor(reason, tool.requires) };
   }
 }

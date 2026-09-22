@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatDelta, formatDuration, formatMillis } from '@/lib/format';
+import { formatBytes, formatDelta, formatDuration, formatMillis, planLines } from '@/lib/format';
 
 describe('formatDuration', () => {
   it('renders null as an em dash rather than "0s" or "null"', () => {
@@ -89,5 +89,29 @@ describe('formatDelta', () => {
     expect(formatDelta(0)).toBe('0 B');
     // The clamp this exists to route around.
     expect(formatBytes(-2_147_483_648)).toBe('0 B');
+  });
+});
+
+describe('planLines', () => {
+  it('renders a plan the way EXPLAIN text does', () => {
+    expect(planLines({
+      'Node Type': 'Limit', 'Startup Cost': 1, 'Total Cost': 2.5, 'Plan Rows': 5, 'Plan Width': 33,
+      Plans: [{
+        'Node Type': 'Index Scan', 'Index Name': 'orders_pkey', 'Relation Name': 'orders', Schema: 'public',
+        Alias: 'o', 'Startup Cost': 0.29, 'Total Cost': 8.3, 'Plan Rows': 1, 'Plan Width': 33,
+        'Index Cond': '(o.id = $1)', Filter: '(o.status = $2)',
+        Plans: [{ 'Node Type': 'Result' }],
+      }],
+    })).toEqual([
+      'Limit  (cost=1.00..2.50 rows=5 width=33)',
+      '  ->  Index Scan using orders_pkey on public.orders o  (cost=0.29..8.30 rows=1 width=33)',
+      '        Index Cond: (o.id = $1)',
+      '        Filter: (o.status = $2)',
+      '        ->  Result',
+    ]);
+  });
+  it('joins array-valued details, and omits an alias equal to the relation', () => {
+    expect(planLines({ 'Node Type': 'Seq Scan', 'Relation Name': 't', Schema: 's', Alias: 't', 'Sort Key': ['a DESC', 'b'] }))
+      .toEqual(['Seq Scan on s.t', '  Sort Key: a DESC, b']);
   });
 });

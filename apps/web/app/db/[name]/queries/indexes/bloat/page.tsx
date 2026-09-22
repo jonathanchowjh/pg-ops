@@ -2,7 +2,6 @@ import type { Metadata } from 'next';
 import { CHECKS, type BloatedIndex } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
-import { SubNav } from '@/components/sub-nav';
 import { Sql } from '@/components/sql';
 import { formatBytes, formatCount } from '@/lib/format';
 
@@ -49,12 +48,6 @@ export default async function Bloat({ params }: { params: Promise<{ name: string
 
   return (
     <>
-      <SubNav
-        name={name}
-        base="queries"
-        items={[{ segment: 'indexes', label: 'Indexes' }, { segment: 'tables', label: 'Tables' }]}
-      />
-
       <CheckPanel title="Index bloat" result={result}>
         {(d) => (d.indexes.length === 0
           ? (

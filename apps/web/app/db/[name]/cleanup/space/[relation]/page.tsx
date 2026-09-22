@@ -2,8 +2,6 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { SERIES } from '@pgops/checks';
 import { runSeriesFor } from '@/lib/check';
-import { SubNav } from '@/components/sub-nav';
-import { CLEANUP_SECTIONS } from '@/components/cleanup-sections';
 import { Spark } from '@/components/spark';
 import { formatBytes, formatCount, formatDelta } from '@/lib/format';
 
@@ -47,8 +45,6 @@ export default async function RelationSpace({
 
   return (
     <div className="grid gap-4">
-      <SubNav name={name} base="cleanup" items={CLEANUP_SECTIONS} />
-
       <div>
         <Link href={`/db/${name}/cleanup/space`} className="text-sm underline underline-offset-2">
           ← All relations

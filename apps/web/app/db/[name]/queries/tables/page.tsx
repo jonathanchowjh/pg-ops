@@ -4,7 +4,6 @@ import Link from 'next/link';
 import { CHECKS, type TableCaching, type TableStat, type UnusedTable } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
-import { SubNav } from '@/components/sub-nav';
 import { formatCount } from '@/lib/format';
 
 export async function generateMetadata(
@@ -63,12 +62,6 @@ export default async function Tables({ params }: { params: Promise<{ name: strin
 
   return (
     <>
-      <SubNav
-        name={name}
-        base="queries"
-        items={[{ segment: 'indexes', label: 'Indexes' }, { segment: 'tables', label: 'Tables' }]}
-      />
-
       <div className="grid gap-4">
         <CheckPanel title="Table cache hit rate" result={hitRate}>
           {(d) => (d.rate === null

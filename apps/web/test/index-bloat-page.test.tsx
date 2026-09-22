@@ -138,12 +138,6 @@ describe('the index bloat page', () => {
     expect(out.toLowerCase()).not.toContain('refreshing');
   });
 
-  it('keeps the sub-route strip so the operator can get back', async () => {
-    const out = await html();
-    expect(out).toContain('/db/prod/queries/indexes');
-    expect(out).toContain('/db/prod/queries/tables');
-  });
-
   /**
    * The estimate is an estimate. pgHero's own query reconstructs what an
    * index OUGHT to occupy from column statistics; saying so on the page is

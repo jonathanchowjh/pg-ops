@@ -1,0 +1,1358 @@
+[
+ {
+  "statement": "SELECT * FROM orders WHERE status = 'paid'",
+  "json": {
+   "Node Type": "Seq Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Relation Name": "orders",
+   "Schema": "public",
+   "Alias": "orders",
+   "Startup Cost": 0,
+   "Total Cost": 7548,
+   "Plan Rows": 199653,
+   "Plan Width": 18,
+   "Output": [
+    "id",
+    "customer_id",
+    "status",
+    "total"
+   ],
+   "Filter": "(orders.status = 'paid'::text)"
+  },
+  "text": [
+   "Seq Scan on public.orders  (cost=0.00..7548.00 rows=199653 width=18)",
+   "  Output: id, customer_id, status, total",
+   "  Filter: (orders.status = 'paid'::text)"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM orders o LEFT JOIN customers c ON c.id = o.customer_id WHERE o.total > 5",
+  "json": {
+   "Node Type": "Hash Join",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Join Type": "Left",
+   "Startup Cost": 559,
+   "Total Cost": 9157.12,
+   "Plan Rows": 399960,
+   "Plan Width": 28,
+   "Output": [
+    "o.id",
+    "o.customer_id",
+    "o.status",
+    "o.total",
+    "c.id",
+    "c.name"
+   ],
+   "Inner Unique": true,
+   "Hash Cond": "(o.customer_id = c.id)",
+   "Plans": [
+    {
+     "Node Type": "Seq Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Relation Name": "orders",
+     "Schema": "public",
+     "Alias": "o",
+     "Startup Cost": 0,
+     "Total Cost": 7548,
+     "Plan Rows": 399960,
+     "Plan Width": 18,
+     "Output": [
+      "o.id",
+      "o.customer_id",
+      "o.status",
+      "o.total"
+     ],
+     "Filter": "(o.total > '5'::numeric)"
+    },
+    {
+     "Node Type": "Hash",
+     "Parent Relationship": "Inner",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 309,
+     "Total Cost": 309,
+     "Plan Rows": 20000,
+     "Plan Width": 10,
+     "Output": [
+      "c.id",
+      "c.name"
+     ],
+     "Plans": [
+      {
+       "Node Type": "Seq Scan",
+       "Parent Relationship": "Outer",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Relation Name": "customers",
+       "Schema": "public",
+       "Alias": "c",
+       "Startup Cost": 0,
+       "Total Cost": 309,
+       "Plan Rows": 20000,
+       "Plan Width": 10,
+       "Output": [
+        "c.id",
+        "c.name"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "text": [
+   "Hash Left Join  (cost=559.00..9157.12 rows=399960 width=28)",
+   "  Output: o.id, o.customer_id, o.status, o.total, c.id, c.name",
+   "  Inner Unique: true",
+   "  Hash Cond: (o.customer_id = c.id)",
+   "  ->  Seq Scan on public.orders o  (cost=0.00..7548.00 rows=399960 width=18)",
+   "        Output: o.id, o.customer_id, o.status, o.total",
+   "        Filter: (o.total > '5'::numeric)",
+   "  ->  Hash  (cost=309.00..309.00 rows=20000 width=10)",
+   "        Output: c.id, c.name",
+   "        ->  Seq Scan on public.customers c  (cost=0.00..309.00 rows=20000 width=10)",
+   "              Output: c.id, c.name"
+  ]
+ },
+ {
+  "statement": "SELECT status, count(*) FROM orders GROUP BY status",
+  "json": {
+   "Node Type": "Aggregate",
+   "Strategy": "Sorted",
+   "Partial Mode": "Finalize",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Startup Cost": 7077.45,
+   "Total Cost": 7077.71,
+   "Plan Rows": 2,
+   "Plan Width": 12,
+   "Output": [
+    "status",
+    "count(*)"
+   ],
+   "Group Key": [
+    "orders.status"
+   ],
+   "Plans": [
+    {
+     "Node Type": "Gather Merge",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 7077.45,
+     "Total Cost": 7077.68,
+     "Plan Rows": 2,
+     "Plan Width": 12,
+     "Output": [
+      "status",
+      "(PARTIAL count(*))"
+     ],
+     "Workers Planned": 1,
+     "Plans": [
+      {
+       "Node Type": "Sort",
+       "Parent Relationship": "Outer",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Startup Cost": 6077.44,
+       "Total Cost": 6077.45,
+       "Plan Rows": 2,
+       "Plan Width": 12,
+       "Output": [
+        "status",
+        "(PARTIAL count(*))"
+       ],
+       "Sort Key": [
+        "orders.status"
+       ],
+       "Plans": [
+        {
+         "Node Type": "Aggregate",
+         "Strategy": "Hashed",
+         "Partial Mode": "Partial",
+         "Parent Relationship": "Outer",
+         "Parallel Aware": false,
+         "Async Capable": false,
+         "Startup Cost": 6077.41,
+         "Total Cost": 6077.43,
+         "Plan Rows": 2,
+         "Plan Width": 12,
+         "Output": [
+          "status",
+          "PARTIAL count(*)"
+         ],
+         "Group Key": [
+          "orders.status"
+         ],
+         "Planned Partitions": 0,
+         "Plans": [
+          {
+           "Node Type": "Seq Scan",
+           "Parent Relationship": "Outer",
+           "Parallel Aware": true,
+           "Async Capable": false,
+           "Relation Name": "orders",
+           "Schema": "public",
+           "Alias": "orders",
+           "Startup Cost": 0,
+           "Total Cost": 4900.94,
+           "Plan Rows": 235294,
+           "Plan Width": 4,
+           "Output": [
+            "id",
+            "customer_id",
+            "status",
+            "total"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "text": [
+   "Finalize GroupAggregate  (cost=7077.45..7077.71 rows=2 width=12)",
+   "  Output: status, count(*)",
+   "  Group Key: orders.status",
+   "  ->  Gather Merge  (cost=7077.45..7077.68 rows=2 width=12)",
+   "        Output: status, (PARTIAL count(*))",
+   "        Workers Planned: 1",
+   "        ->  Sort  (cost=6077.44..6077.45 rows=2 width=12)",
+   "              Output: status, (PARTIAL count(*))",
+   "              Sort Key: orders.status",
+   "              ->  Partial HashAggregate  (cost=6077.41..6077.43 rows=2 width=12)",
+   "                    Output: status, PARTIAL count(*)",
+   "                    Group Key: orders.status",
+   "                    ->  Parallel Seq Scan on public.orders  (cost=0.00..4900.94 rows=235294 width=4)",
+   "                          Output: id, customer_id, status, total"
+  ]
+ },
+ {
+  "statement": "SELECT customer_id, count(*) FROM orders GROUP BY customer_id ORDER BY customer_id",
+  "json": {
+   "Node Type": "Sort",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Startup Cost": 10172.52,
+   "Total Cost": 10222.4,
+   "Plan Rows": 19952,
+   "Plan Width": 12,
+   "Output": [
+    "customer_id",
+    "(count(*))"
+   ],
+   "Sort Key": [
+    "orders.customer_id"
+   ],
+   "Plans": [
+    {
+     "Node Type": "Aggregate",
+     "Strategy": "Hashed",
+     "Partial Mode": "Simple",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 8548,
+     "Total Cost": 8747.52,
+     "Plan Rows": 19952,
+     "Plan Width": 12,
+     "Output": [
+      "customer_id",
+      "count(*)"
+     ],
+     "Group Key": [
+      "orders.customer_id"
+     ],
+     "Planned Partitions": 0,
+     "Plans": [
+      {
+       "Node Type": "Seq Scan",
+       "Parent Relationship": "Outer",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Relation Name": "orders",
+       "Schema": "public",
+       "Alias": "orders",
+       "Startup Cost": 0,
+       "Total Cost": 6548,
+       "Plan Rows": 400000,
+       "Plan Width": 4,
+       "Output": [
+        "id",
+        "customer_id",
+        "status",
+        "total"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "text": [
+   "Sort  (cost=10172.52..10222.40 rows=19952 width=12)",
+   "  Output: customer_id, (count(*))",
+   "  Sort Key: orders.customer_id",
+   "  ->  HashAggregate  (cost=8548.00..8747.52 rows=19952 width=12)",
+   "        Output: customer_id, count(*)",
+   "        Group Key: orders.customer_id",
+   "        ->  Seq Scan on public.orders  (cost=0.00..6548.00 rows=400000 width=4)",
+   "              Output: id, customer_id, status, total"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM orders ORDER BY id DESC LIMIT 5",
+  "json": {
+   "Node Type": "Limit",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Startup Cost": 0.42,
+   "Total Cost": 0.58,
+   "Plan Rows": 5,
+   "Plan Width": 18,
+   "Output": [
+    "id",
+    "customer_id",
+    "status",
+    "total"
+   ],
+   "Plans": [
+    {
+     "Node Type": "Index Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Scan Direction": "Backward",
+     "Index Name": "orders_pkey",
+     "Relation Name": "orders",
+     "Schema": "public",
+     "Alias": "orders",
+     "Startup Cost": 0.42,
+     "Total Cost": 12947.42,
+     "Plan Rows": 400000,
+     "Plan Width": 18,
+     "Output": [
+      "id",
+      "customer_id",
+      "status",
+      "total"
+     ]
+    }
+   ]
+  },
+  "text": [
+   "Limit  (cost=0.42..0.58 rows=5 width=18)",
+   "  Output: id, customer_id, status, total",
+   "  ->  Index Scan Backward using orders_pkey on public.orders  (cost=0.42..12947.42 rows=400000 width=18)",
+   "        Output: id, customer_id, status, total"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM orders WHERE customer_id IN (1,2,3)",
+  "json": {
+   "Node Type": "Bitmap Heap Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Relation Name": "orders",
+   "Schema": "public",
+   "Alias": "orders",
+   "Startup Cost": 13.73,
+   "Total Cost": 226.94,
+   "Plan Rows": 60,
+   "Plan Width": 18,
+   "Output": [
+    "id",
+    "customer_id",
+    "status",
+    "total"
+   ],
+   "Recheck Cond": "(orders.customer_id = ANY ('{1,2,3}'::integer[]))",
+   "Plans": [
+    {
+     "Node Type": "Bitmap Index Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Index Name": "orders_customer_id_idx",
+     "Startup Cost": 0,
+     "Total Cost": 13.72,
+     "Plan Rows": 60,
+     "Plan Width": 0,
+     "Index Cond": "(orders.customer_id = ANY ('{1,2,3}'::integer[]))"
+    }
+   ]
+  },
+  "text": [
+   "Bitmap Heap Scan on public.orders  (cost=13.73..226.94 rows=60 width=18)",
+   "  Output: id, customer_id, status, total",
+   "  Recheck Cond: (orders.customer_id = ANY ('{1,2,3}'::integer[]))",
+   "  ->  Bitmap Index Scan on orders_customer_id_idx  (cost=0.00..13.72 rows=60 width=0)",
+   "        Index Cond: (orders.customer_id = ANY ('{1,2,3}'::integer[]))"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)",
+  "json": {
+   "Node Type": "Nested Loop",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Join Type": "Anti",
+   "Startup Cost": 0.42,
+   "Total Cost": 10914.93,
+   "Plan Rows": 48,
+   "Plan Width": 10,
+   "Output": [
+    "c.id",
+    "c.name"
+   ],
+   "Inner Unique": false,
+   "Plans": [
+    {
+     "Node Type": "Seq Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Relation Name": "customers",
+     "Schema": "public",
+     "Alias": "c",
+     "Startup Cost": 0,
+     "Total Cost": 309,
+     "Plan Rows": 20000,
+     "Plan Width": 10,
+     "Output": [
+      "c.id",
+      "c.name"
+     ]
+    },
+    {
+     "Node Type": "Index Only Scan",
+     "Parent Relationship": "Inner",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Scan Direction": "Forward",
+     "Index Name": "orders_customer_id_idx",
+     "Relation Name": "orders",
+     "Schema": "public",
+     "Alias": "o",
+     "Startup Cost": 0.42,
+     "Total Cost": 1.36,
+     "Plan Rows": 20,
+     "Plan Width": 4,
+     "Output": [
+      "o.customer_id"
+     ],
+     "Index Cond": "(o.customer_id = c.id)"
+    }
+   ]
+  },
+  "text": [
+   "Nested Loop Anti Join  (cost=0.42..10914.93 rows=48 width=10)",
+   "  Output: c.id, c.name",
+   "  ->  Seq Scan on public.customers c  (cost=0.00..309.00 rows=20000 width=10)",
+   "        Output: c.id, c.name",
+   "  ->  Index Only Scan using orders_customer_id_idx on public.orders o  (cost=0.42..1.36 rows=20 width=4)",
+   "        Output: o.customer_id",
+   "        Index Cond: (o.customer_id = c.id)"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.total > 399990)",
+  "json": {
+   "Node Type": "Nested Loop",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Join Type": "Inner",
+   "Startup Cost": 6493.56,
+   "Total Cost": 6761.9,
+   "Plan Rows": 40,
+   "Plan Width": 10,
+   "Output": [
+    "c.id",
+    "c.name"
+   ],
+   "Inner Unique": true,
+   "Plans": [
+    {
+     "Node Type": "Aggregate",
+     "Strategy": "Hashed",
+     "Partial Mode": "Simple",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 6493.28,
+     "Total Cost": 6493.68,
+     "Plan Rows": 40,
+     "Plan Width": 4,
+     "Output": [
+      "o.customer_id"
+     ],
+     "Group Key": [
+      "o.customer_id"
+     ],
+     "Planned Partitions": 0,
+     "Plans": [
+      {
+       "Node Type": "Gather",
+       "Parent Relationship": "Outer",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Startup Cost": 1000,
+       "Total Cost": 6493.18,
+       "Plan Rows": 40,
+       "Plan Width": 4,
+       "Output": [
+        "o.customer_id"
+       ],
+       "Workers Planned": 1,
+       "Single Copy": false,
+       "Plans": [
+        {
+         "Node Type": "Seq Scan",
+         "Parent Relationship": "Outer",
+         "Parallel Aware": true,
+         "Async Capable": false,
+         "Relation Name": "orders",
+         "Schema": "public",
+         "Alias": "o",
+         "Startup Cost": 0,
+         "Total Cost": 5489.18,
+         "Plan Rows": 24,
+         "Plan Width": 4,
+         "Output": [
+          "o.customer_id"
+         ],
+         "Filter": "(o.total > '399990'::numeric)"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "Node Type": "Index Scan",
+     "Parent Relationship": "Inner",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Scan Direction": "Forward",
+     "Index Name": "customers_pkey",
+     "Relation Name": "customers",
+     "Schema": "public",
+     "Alias": "c",
+     "Startup Cost": 0.29,
+     "Total Cost": 6.7,
+     "Plan Rows": 1,
+     "Plan Width": 10,
+     "Output": [
+      "c.id",
+      "c.name"
+     ],
+     "Index Cond": "(c.id = o.customer_id)"
+    }
+   ]
+  },
+  "text": [
+   "Nested Loop  (cost=6493.56..6761.90 rows=40 width=10)",
+   "  Output: c.id, c.name",
+   "  Inner Unique: true",
+   "  ->  HashAggregate  (cost=6493.28..6493.68 rows=40 width=4)",
+   "        Output: o.customer_id",
+   "        Group Key: o.customer_id",
+   "        ->  Gather  (cost=1000.00..6493.18 rows=40 width=4)",
+   "              Output: o.customer_id",
+   "              Workers Planned: 1",
+   "              ->  Parallel Seq Scan on public.orders o  (cost=0.00..5489.18 rows=24 width=4)",
+   "                    Output: o.customer_id",
+   "                    Filter: (o.total > '399990'::numeric)",
+   "  ->  Index Scan using customers_pkey on public.customers c  (cost=0.29..6.70 rows=1 width=10)",
+   "        Output: c.id, c.name",
+   "        Index Cond: (c.id = o.customer_id)"
+  ]
+ },
+ {
+  "statement": "SELECT count(*) FROM orders",
+  "json": {
+   "Node Type": "Aggregate",
+   "Strategy": "Plain",
+   "Partial Mode": "Finalize",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Startup Cost": 6489.29,
+   "Total Cost": 6489.3,
+   "Plan Rows": 1,
+   "Plan Width": 8,
+   "Output": [
+    "count(*)"
+   ],
+   "Plans": [
+    {
+     "Node Type": "Gather",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 6489.18,
+     "Total Cost": 6489.29,
+     "Plan Rows": 1,
+     "Plan Width": 8,
+     "Output": [
+      "(PARTIAL count(*))"
+     ],
+     "Workers Planned": 1,
+     "Single Copy": false,
+     "Plans": [
+      {
+       "Node Type": "Aggregate",
+       "Strategy": "Plain",
+       "Partial Mode": "Partial",
+       "Parent Relationship": "Outer",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Startup Cost": 5489.18,
+       "Total Cost": 5489.19,
+       "Plan Rows": 1,
+       "Plan Width": 8,
+       "Output": [
+        "PARTIAL count(*)"
+       ],
+       "Plans": [
+        {
+         "Node Type": "Seq Scan",
+         "Parent Relationship": "Outer",
+         "Parallel Aware": true,
+         "Async Capable": false,
+         "Relation Name": "orders",
+         "Schema": "public",
+         "Alias": "orders",
+         "Startup Cost": 0,
+         "Total Cost": 4900.94,
+         "Plan Rows": 235294,
+         "Plan Width": 0,
+         "Output": [
+          "id",
+          "customer_id",
+          "status",
+          "total"
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "text": [
+   "Finalize Aggregate  (cost=6489.29..6489.30 rows=1 width=8)",
+   "  Output: count(*)",
+   "  ->  Gather  (cost=6489.18..6489.29 rows=1 width=8)",
+   "        Output: (PARTIAL count(*))",
+   "        Workers Planned: 1",
+   "        ->  Partial Aggregate  (cost=5489.18..5489.19 rows=1 width=8)",
+   "              Output: PARTIAL count(*)",
+   "              ->  Parallel Seq Scan on public.orders  (cost=0.00..4900.94 rows=235294 width=0)",
+   "                    Output: id, customer_id, status, total"
+  ]
+ },
+ {
+  "statement": "INSERT INTO customers VALUES (0, 'x')",
+  "json": {
+   "Node Type": "ModifyTable",
+   "Operation": "Insert",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Relation Name": "customers",
+   "Schema": "public",
+   "Alias": "customers",
+   "Startup Cost": 0,
+   "Total Cost": 0.01,
+   "Plan Rows": 0,
+   "Plan Width": 0,
+   "Plans": [
+    {
+     "Node Type": "Result",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 0,
+     "Total Cost": 0.01,
+     "Plan Rows": 1,
+     "Plan Width": 36,
+     "Output": [
+      "0",
+      "'x'::text"
+     ]
+    }
+   ]
+  },
+  "text": [
+   "Insert on public.customers  (cost=0.00..0.01 rows=0 width=0)",
+   "  ->  Result  (cost=0.00..0.01 rows=1 width=36)",
+   "        Output: 0, 'x'::text"
+  ]
+ },
+ {
+  "statement": "UPDATE orders SET total = 0 WHERE id = 1",
+  "json": {
+   "Node Type": "ModifyTable",
+   "Operation": "Update",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Relation Name": "orders",
+   "Schema": "public",
+   "Alias": "orders",
+   "Startup Cost": 0.42,
+   "Total Cost": 8.44,
+   "Plan Rows": 0,
+   "Plan Width": 0,
+   "Plans": [
+    {
+     "Node Type": "Index Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Scan Direction": "Forward",
+     "Index Name": "orders_pkey",
+     "Relation Name": "orders",
+     "Schema": "public",
+     "Alias": "orders",
+     "Startup Cost": 0.42,
+     "Total Cost": 8.44,
+     "Plan Rows": 1,
+     "Plan Width": 38,
+     "Output": [
+      "'0'::numeric",
+      "ctid"
+     ],
+     "Index Cond": "(orders.id = 1)"
+    }
+   ]
+  },
+  "text": [
+   "Update on public.orders  (cost=0.42..8.44 rows=0 width=0)",
+   "  ->  Index Scan using orders_pkey on public.orders  (cost=0.42..8.44 rows=1 width=38)",
+   "        Output: '0'::numeric, ctid",
+   "        Index Cond: (orders.id = 1)"
+  ]
+ },
+ {
+  "statement": "DELETE FROM orders WHERE status = 'x'",
+  "json": {
+   "Node Type": "ModifyTable",
+   "Operation": "Delete",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Relation Name": "orders",
+   "Schema": "public",
+   "Alias": "orders",
+   "Startup Cost": 0,
+   "Total Cost": 7548,
+   "Plan Rows": 0,
+   "Plan Width": 0,
+   "Plans": [
+    {
+     "Node Type": "Seq Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Relation Name": "orders",
+     "Schema": "public",
+     "Alias": "orders",
+     "Startup Cost": 0,
+     "Total Cost": 7548,
+     "Plan Rows": 1,
+     "Plan Width": 6,
+     "Output": [
+      "ctid"
+     ],
+     "Filter": "(orders.status = 'x'::text)"
+    }
+   ]
+  },
+  "text": [
+   "Delete on public.orders  (cost=0.00..7548.00 rows=0 width=0)",
+   "  ->  Seq Scan on public.orders  (cost=0.00..7548.00 rows=1 width=6)",
+   "        Output: ctid",
+   "        Filter: (orders.status = 'x'::text)"
+  ]
+ },
+ {
+  "statement": "SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id",
+  "json": {
+   "Node Type": "Hash Join",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Join Type": "Inner",
+   "Startup Cost": 559,
+   "Total Cost": 8157.22,
+   "Plan Rows": 400000,
+   "Plan Width": 4,
+   "Output": [
+    "o.id"
+   ],
+   "Inner Unique": true,
+   "Hash Cond": "(o.customer_id = c.id)",
+   "Plans": [
+    {
+     "Node Type": "Seq Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Relation Name": "orders",
+     "Schema": "public",
+     "Alias": "o",
+     "Startup Cost": 0,
+     "Total Cost": 6548,
+     "Plan Rows": 400000,
+     "Plan Width": 8,
+     "Output": [
+      "o.id",
+      "o.customer_id",
+      "o.status",
+      "o.total"
+     ]
+    },
+    {
+     "Node Type": "Hash",
+     "Parent Relationship": "Inner",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 309,
+     "Total Cost": 309,
+     "Plan Rows": 20000,
+     "Plan Width": 4,
+     "Output": [
+      "c.id"
+     ],
+     "Plans": [
+      {
+       "Node Type": "Seq Scan",
+       "Parent Relationship": "Outer",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Relation Name": "customers",
+       "Schema": "public",
+       "Alias": "c",
+       "Startup Cost": 0,
+       "Total Cost": 309,
+       "Plan Rows": 20000,
+       "Plan Width": 4,
+       "Output": [
+        "c.id"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "text": [
+   "Hash Join  (cost=559.00..8157.22 rows=400000 width=4)",
+   "  Output: o.id",
+   "  Inner Unique: true",
+   "  Hash Cond: (o.customer_id = c.id)",
+   "  ->  Seq Scan on public.orders o  (cost=0.00..6548.00 rows=400000 width=8)",
+   "        Output: o.id, o.customer_id, o.status, o.total",
+   "  ->  Hash  (cost=309.00..309.00 rows=20000 width=4)",
+   "        Output: c.id",
+   "        ->  Seq Scan on public.customers c  (cost=0.00..309.00 rows=20000 width=4)",
+   "              Output: c.id"
+  ]
+ },
+ {
+  "statement": "SELECT customer_id FROM orders WHERE customer_id < 10",
+  "json": {
+   "Node Type": "Bitmap Heap Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Relation Name": "orders",
+   "Schema": "public",
+   "Alias": "orders",
+   "Startup Cost": 5.85,
+   "Total Cost": 579.01,
+   "Plan Rows": 184,
+   "Plan Width": 4,
+   "Output": [
+    "customer_id"
+   ],
+   "Recheck Cond": "(orders.customer_id < 10)",
+   "Plans": [
+    {
+     "Node Type": "Bitmap Index Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Index Name": "orders_customer_id_idx",
+     "Startup Cost": 0,
+     "Total Cost": 5.8,
+     "Plan Rows": 184,
+     "Plan Width": 0,
+     "Index Cond": "(orders.customer_id < 10)"
+    }
+   ]
+  },
+  "text": [
+   "Bitmap Heap Scan on public.orders  (cost=5.85..579.01 rows=184 width=4)",
+   "  Output: customer_id",
+   "  Recheck Cond: (orders.customer_id < 10)",
+   "  ->  Bitmap Index Scan on orders_customer_id_idx  (cost=0.00..5.80 rows=184 width=0)",
+   "        Index Cond: (orders.customer_id < 10)"
+  ]
+ },
+ {
+  "statement": "WITH x AS MATERIALIZED (SELECT * FROM customers) SELECT * FROM x WHERE id = 1",
+  "json": {
+   "Node Type": "CTE Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "CTE Name": "x",
+   "Alias": "x",
+   "Startup Cost": 309,
+   "Total Cost": 759,
+   "Plan Rows": 1,
+   "Plan Width": 36,
+   "Output": [
+    "x.id",
+    "x.name"
+   ],
+   "Filter": "(x.id = 1)",
+   "Plans": [
+    {
+     "Node Type": "Seq Scan",
+     "Parent Relationship": "InitPlan",
+     "Subplan Name": "CTE x",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Relation Name": "customers",
+     "Schema": "public",
+     "Alias": "customers",
+     "Startup Cost": 0,
+     "Total Cost": 309,
+     "Plan Rows": 20000,
+     "Plan Width": 10,
+     "Output": [
+      "customers.id",
+      "customers.name"
+     ]
+    }
+   ]
+  },
+  "text": [
+   "CTE Scan on x  (cost=309.00..759.00 rows=1 width=36)",
+   "  Output: x.id, x.name",
+   "  Filter: (x.id = 1)",
+   "  CTE x",
+   "    ->  Seq Scan on public.customers  (cost=0.00..309.00 rows=20000 width=10)",
+   "          Output: customers.id, customers.name"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM generate_series(1, 10) g",
+  "json": {
+   "Node Type": "Function Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Function Name": "generate_series",
+   "Schema": "pg_catalog",
+   "Alias": "g",
+   "Startup Cost": 0,
+   "Total Cost": 0.1,
+   "Plan Rows": 10,
+   "Plan Width": 4,
+   "Output": [
+    "g"
+   ],
+   "Function Call": "generate_series(1, 10)"
+  },
+  "text": [
+   "Function Scan on pg_catalog.generate_series g  (cost=0.00..0.10 rows=10 width=4)",
+   "  Output: g",
+   "  Function Call: generate_series(1, 10)"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM (SELECT status, count(*) AS n FROM orders GROUP BY status OFFSET 0) s WHERE n > 1",
+  "json": {
+   "Node Type": "Subquery Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Alias": "s",
+   "Startup Cost": 7077.45,
+   "Total Cost": 7077.74,
+   "Plan Rows": 1,
+   "Plan Width": 12,
+   "Output": [
+    "s.status",
+    "s.n"
+   ],
+   "Filter": "(s.n > 1)",
+   "Plans": [
+    {
+     "Node Type": "Aggregate",
+     "Strategy": "Sorted",
+     "Partial Mode": "Finalize",
+     "Parent Relationship": "Subquery",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 7077.45,
+     "Total Cost": 7077.71,
+     "Plan Rows": 2,
+     "Plan Width": 12,
+     "Output": [
+      "orders.status",
+      "count(*)"
+     ],
+     "Group Key": [
+      "orders.status"
+     ],
+     "Plans": [
+      {
+       "Node Type": "Gather Merge",
+       "Parent Relationship": "Outer",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Startup Cost": 7077.45,
+       "Total Cost": 7077.68,
+       "Plan Rows": 2,
+       "Plan Width": 12,
+       "Output": [
+        "orders.status",
+        "(PARTIAL count(*))"
+       ],
+       "Workers Planned": 1,
+       "Plans": [
+        {
+         "Node Type": "Sort",
+         "Parent Relationship": "Outer",
+         "Parallel Aware": false,
+         "Async Capable": false,
+         "Startup Cost": 6077.44,
+         "Total Cost": 6077.45,
+         "Plan Rows": 2,
+         "Plan Width": 12,
+         "Output": [
+          "orders.status",
+          "(PARTIAL count(*))"
+         ],
+         "Sort Key": [
+          "orders.status"
+         ],
+         "Plans": [
+          {
+           "Node Type": "Aggregate",
+           "Strategy": "Hashed",
+           "Partial Mode": "Partial",
+           "Parent Relationship": "Outer",
+           "Parallel Aware": false,
+           "Async Capable": false,
+           "Startup Cost": 6077.41,
+           "Total Cost": 6077.43,
+           "Plan Rows": 2,
+           "Plan Width": 12,
+           "Output": [
+            "orders.status",
+            "PARTIAL count(*)"
+           ],
+           "Group Key": [
+            "orders.status"
+           ],
+           "Planned Partitions": 0,
+           "Plans": [
+            {
+             "Node Type": "Seq Scan",
+             "Parent Relationship": "Outer",
+             "Parallel Aware": true,
+             "Async Capable": false,
+             "Relation Name": "orders",
+             "Schema": "public",
+             "Alias": "orders",
+             "Startup Cost": 0,
+             "Total Cost": 4900.94,
+             "Plan Rows": 235294,
+             "Plan Width": 4,
+             "Output": [
+              "orders.id",
+              "orders.customer_id",
+              "orders.status",
+              "orders.total"
+             ]
+            }
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "text": [
+   "Subquery Scan on s  (cost=7077.45..7077.74 rows=1 width=12)",
+   "  Output: s.status, s.n",
+   "  Filter: (s.n > 1)",
+   "  ->  Finalize GroupAggregate  (cost=7077.45..7077.71 rows=2 width=12)",
+   "        Output: orders.status, count(*)",
+   "        Group Key: orders.status",
+   "        ->  Gather Merge  (cost=7077.45..7077.68 rows=2 width=12)",
+   "              Output: orders.status, (PARTIAL count(*))",
+   "              Workers Planned: 1",
+   "              ->  Sort  (cost=6077.44..6077.45 rows=2 width=12)",
+   "                    Output: orders.status, (PARTIAL count(*))",
+   "                    Sort Key: orders.status",
+   "                    ->  Partial HashAggregate  (cost=6077.41..6077.43 rows=2 width=12)",
+   "                          Output: orders.status, PARTIAL count(*)",
+   "                          Group Key: orders.status",
+   "                          ->  Parallel Seq Scan on public.orders  (cost=0.00..4900.94 rows=235294 width=4)",
+   "                                Output: orders.id, orders.customer_id, orders.status, orders.total"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM (VALUES (1), (2)) v(a)",
+  "json": {
+   "Node Type": "Values Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Alias": "*VALUES*",
+   "Startup Cost": 0,
+   "Total Cost": 0.03,
+   "Plan Rows": 2,
+   "Plan Width": 4,
+   "Output": [
+    "\"*VALUES*\".column1"
+   ]
+  },
+  "text": [
+   "Values Scan on \"*VALUES*\"  (cost=0.00..0.03 rows=2 width=4)",
+   "  Output: \"*VALUES*\".column1"
+  ]
+ },
+ {
+  "statement": "SELECT id FROM customers EXCEPT SELECT customer_id FROM orders",
+  "json": {
+   "Node Type": "SetOp",
+   "Strategy": "Hashed",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Command": "Except",
+   "Startup Cost": 0,
+   "Total Cost": 14207,
+   "Plan Rows": 20000,
+   "Plan Width": 8,
+   "Output": [
+    "\"*SELECT* 1\".id",
+    "(0)"
+   ],
+   "Plans": [
+    {
+     "Node Type": "Append",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 0,
+     "Total Cost": 13157,
+     "Plan Rows": 420000,
+     "Plan Width": 8,
+     "Subplans Removed": 0,
+     "Plans": [
+      {
+       "Node Type": "Subquery Scan",
+       "Parent Relationship": "Member",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Alias": "*SELECT* 1",
+       "Startup Cost": 0,
+       "Total Cost": 509,
+       "Plan Rows": 20000,
+       "Plan Width": 8,
+       "Output": [
+        "\"*SELECT* 1\".id",
+        "0"
+       ],
+       "Plans": [
+        {
+         "Node Type": "Seq Scan",
+         "Parent Relationship": "Subquery",
+         "Parallel Aware": false,
+         "Async Capable": false,
+         "Relation Name": "customers",
+         "Schema": "public",
+         "Alias": "customers",
+         "Startup Cost": 0,
+         "Total Cost": 309,
+         "Plan Rows": 20000,
+         "Plan Width": 4,
+         "Output": [
+          "customers.id"
+         ]
+        }
+       ]
+      },
+      {
+       "Node Type": "Subquery Scan",
+       "Parent Relationship": "Member",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Alias": "*SELECT* 2",
+       "Startup Cost": 0,
+       "Total Cost": 10548,
+       "Plan Rows": 400000,
+       "Plan Width": 8,
+       "Output": [
+        "\"*SELECT* 2\".customer_id",
+        "1"
+       ],
+       "Plans": [
+        {
+         "Node Type": "Seq Scan",
+         "Parent Relationship": "Subquery",
+         "Parallel Aware": false,
+         "Async Capable": false,
+         "Relation Name": "orders",
+         "Schema": "public",
+         "Alias": "orders",
+         "Startup Cost": 0,
+         "Total Cost": 6548,
+         "Plan Rows": 400000,
+         "Plan Width": 4,
+         "Output": [
+          "orders.customer_id"
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "text": [
+   "HashSetOp Except  (cost=0.00..14207.00 rows=20000 width=8)",
+   "  Output: \"*SELECT* 1\".id, (0)",
+   "  ->  Append  (cost=0.00..13157.00 rows=420000 width=8)",
+   "        ->  Subquery Scan on \"*SELECT* 1\"  (cost=0.00..509.00 rows=20000 width=8)",
+   "              Output: \"*SELECT* 1\".id, 0",
+   "              ->  Seq Scan on public.customers  (cost=0.00..309.00 rows=20000 width=4)",
+   "                    Output: customers.id",
+   "        ->  Subquery Scan on \"*SELECT* 2\"  (cost=0.00..10548.00 rows=400000 width=8)",
+   "              Output: \"*SELECT* 2\".customer_id, 1",
+   "              ->  Seq Scan on public.orders  (cost=0.00..6548.00 rows=400000 width=4)",
+   "                    Output: orders.customer_id"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM customers c FULL JOIN orders o ON o.customer_id = c.id",
+  "json": {
+   "Node Type": "Hash Join",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Join Type": "Full",
+   "Startup Cost": 559,
+   "Total Cost": 8157.22,
+   "Plan Rows": 400000,
+   "Plan Width": 28,
+   "Output": [
+    "c.id",
+    "c.name",
+    "o.id",
+    "o.customer_id",
+    "o.status",
+    "o.total"
+   ],
+   "Inner Unique": true,
+   "Hash Cond": "(o.customer_id = c.id)",
+   "Plans": [
+    {
+     "Node Type": "Seq Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Relation Name": "orders",
+     "Schema": "public",
+     "Alias": "o",
+     "Startup Cost": 0,
+     "Total Cost": 6548,
+     "Plan Rows": 400000,
+     "Plan Width": 18,
+     "Output": [
+      "o.id",
+      "o.customer_id",
+      "o.status",
+      "o.total"
+     ]
+    },
+    {
+     "Node Type": "Hash",
+     "Parent Relationship": "Inner",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 309,
+     "Total Cost": 309,
+     "Plan Rows": 20000,
+     "Plan Width": 10,
+     "Output": [
+      "c.id",
+      "c.name"
+     ],
+     "Plans": [
+      {
+       "Node Type": "Seq Scan",
+       "Parent Relationship": "Outer",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Relation Name": "customers",
+       "Schema": "public",
+       "Alias": "c",
+       "Startup Cost": 0,
+       "Total Cost": 309,
+       "Plan Rows": 20000,
+       "Plan Width": 10,
+       "Output": [
+        "c.id",
+        "c.name"
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "text": [
+   "Hash Full Join  (cost=559.00..8157.22 rows=400000 width=28)",
+   "  Output: c.id, c.name, o.id, o.customer_id, o.status, o.total",
+   "  Inner Unique: true",
+   "  Hash Cond: (o.customer_id = c.id)",
+   "  ->  Seq Scan on public.orders o  (cost=0.00..6548.00 rows=400000 width=18)",
+   "        Output: o.id, o.customer_id, o.status, o.total",
+   "  ->  Hash  (cost=309.00..309.00 rows=20000 width=10)",
+   "        Output: c.id, c.name",
+   "        ->  Seq Scan on public.customers c  (cost=0.00..309.00 rows=20000 width=10)",
+   "              Output: c.id, c.name"
+  ]
+ },
+ {
+  "statement": "SELECT * FROM customers WHERE id = $1",
+  "json": {
+   "Node Type": "Index Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Scan Direction": "Forward",
+   "Index Name": "customers_pkey",
+   "Relation Name": "customers",
+   "Schema": "public",
+   "Alias": "customers",
+   "Startup Cost": 0.29,
+   "Total Cost": 8.3,
+   "Plan Rows": 1,
+   "Plan Width": 10,
+   "Output": [
+    "id",
+    "name"
+   ],
+   "Index Cond": "(customers.id = $1)"
+  },
+  "text": [
+   "Index Scan using customers_pkey on public.customers  (cost=0.29..8.30 rows=1 width=10)",
+   "  Output: id, name",
+   "  Index Cond: (customers.id = $1)"
+  ]
+ }
+]

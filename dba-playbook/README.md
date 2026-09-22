@@ -102,9 +102,9 @@ unless the deployment sets `PGOPS_ALLOW_ACTIONS=true`, requires a typed
 free-text reason and a second click on the row itself, and is audited whether
 it succeeds or fails.
 
-## Where this maps in the plan
+## Further reading
 
-This folder is the hands-on companion to **Part 3 §4** of `docs/pgops_plan.pdf`
-("The DBA workflows pgops accelerates"). The plan describes the rituals; this runs
-them. The catalog views each query reads are catalogued in **Part 3 §2** of the
-plan.
+[docs/postgres-for-pgops-deep-dive.pdf](../docs/postgres-for-pgops-deep-dive.pdf)
+is the companion to this folder: the planner, WAL, MVCC/vacuum and lock layers
+these queries read from, explained with a `psql` lab for each. The deep dive
+describes the mechanisms; this folder runs the rituals against them.

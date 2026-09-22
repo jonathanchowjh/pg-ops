@@ -514,7 +514,7 @@ that were scheduled here rather than classified here: `replication`,
 per-connection detail, and `slow_queries`. Its size is
 `parityBacklog('P2')` — the registry is the authority, and a count written
 into prose is a second copy that nothing compares to the first. See
-`docs/superpowers/specs/2026-09-03-pgops-p2-hygiene-design.md`.
+`docs/design/2026-09-03-pgops-p2-hygiene-design.md`.
 
 The CLI surface this phase used to carry — `pgops check --format json` with
 exit codes — was cut on 2026-09-03. P2 is web only. The consequence is

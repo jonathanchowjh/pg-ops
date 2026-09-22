@@ -19,8 +19,8 @@ That superset claim is checked rather than asserted.
 [packages/checks/src/registry.ts](packages/checks/src/registry.ts) maps all 65
 capabilities of pgHero 4.0.1 onto a shipped check, a shipped action, a platform
 feature, or a numbered phase, and the test suite fails if a phase marked
-complete still owes one. **56 of the 65 are shipped, 3 are declined on purpose,
-and 6 remain** — see [Parity with pgHero](#parity-with-pghero).
+complete still owes one. **60 of the 65 are shipped, 5 are declined on purpose,
+and 0 remain** — see [Parity with pgHero](#parity-with-pghero).
 
 One URL, many databases. What is built so far is what you need in the first
 five minutes — who's connected and in what state, is
@@ -384,6 +384,8 @@ destination. It has one now:
 | `/db/<name>/cleanup/sequences` | Every sequence against the ceiling of the column it feeds |
 | `/db/<name>/queries/indexes` | Index usage, missing and unused indexes, duplicates, invalid indexes |
 | `/db/<name>/queries/indexes/bloat` | Index bloat, estimated — on its own route, run on request |
+| `/db/<name>/queries/indexes/suggested` | Suggested indexes for the busiest query shapes, each with the statement to run — run on request |
+| `/db/<name>/queries/explain` | A statement's plan, and the index that would serve it |
 | `/db/<name>/queries/tables` | Table hit rate, caching, unused tables, table statistics |
 | `/db/<name>/queries/<queryid>` | One statement shape's calls and total time over twenty-four hours |
 
@@ -408,23 +410,25 @@ file and resolves to exactly one state, checked on every test run.
 
 | State | Count |
 |---|---:|
-| Shipped | 56 |
-| Declined on purpose | 3 |
-| Remaining | 6 |
+| Shipped | 60 |
+| Declined on purpose | 5 |
+| Remaining | 0 |
 
-The remaining work is phased, and `parityBacklog(phase)` reports each phase's
-size rather than leaving it to be counted by hand: **P6 owes 6** — `EXPLAIN`
-and index suggestions, one of which (`system_stats`) is itself a decline P6
-will make. P0, P1, P2, P3, P4 and P5 are done. Build order is data in `PHASE_ORDER`, which is why P3, the store and the
-capture scheduler, shipped ahead of P2.
+**Parity is complete.** Every phase, P0 through P6, is done and
+`parityBacklog()` is 0. With every phase marked complete, the phase gate fails
+any entry added as `planned` — so a capability pgHero adds later has to arrive
+shipped or declined, with its reason, never as a quiet backlog item. Build order
+was data in `PHASE_ORDER`, which is why P3, the store and the capture
+scheduler, shipped ahead of P2.
 
 Every number above comes from `registry.ts`. If one of them is wrong, the test
 suite is wrong with it — `parityBacklog` is what the phase gate reads, and a
 phase marked complete that still owes an entry fails by name.
 
-Fifteen deliberate divergences, all of them documented at the code that
+Twenty-one deliberate divergences, all of them documented at the code that
 implements them — six from v1, six that arrived with the hygiene routes, one
-with the trends, and two with the actions:
+with the trends, two with the actions, and six with explain and index
+suggestions:
 
 - **`kill` is guarded.** pgHero's is a bare `pg_terminate_backend` behind a
   button. See [Safety](#safety).
@@ -505,6 +509,37 @@ with the trends, and two with the actions:
   re-rendered, so two operators looking at the same "7-day growth" see different
   figures. Both endpoints come from the store, and the last capture time is
   rendered beside them. See `store/read.ts`.
+- **Index suggestions read the planner's plan, not a parse tree.** pgHero
+  parses each statement with `pg_query`, a native libpg_query binding, and
+  answers any join with the literal string `"JOIN not supported yet"`. pgops
+  asks Postgres to plan the statement and reads the plan: every `Seq Scan`
+  names its relation and its own filter, so each side of a join is advised on,
+  and an index the planner already uses leaves no sequential scan to advise on.
+  The column choice is still pgHero's heuristic, transcribed, over `pg_stats`.
+  No dependency is added. `IN` lists count as equality, where pgHero's parser
+  gives up, and an invalid or partial index never counts as covering. See
+  `tools/advice.ts`.
+- **Explain has no `ANALYZE`.** `ANALYZE` executes the statement, and inside a
+  read-only transaction `pg_terminate_backend(…)` and `pg_sleep(…)` still run
+  as pgops's role. pgHero keeps it off by default; pgops's only route to an
+  effect the operator chooses is the audited action ladder. "Visualize", a link
+  to an external plan viewer, is not carried over. See `tools/explain.ts`.
+- **Explain's error messages are allowlisted by SQLSTATE.** pgHero replaces
+  every message it does not recognise, because an error can carry data out —
+  `SELECT '42x'::int` answers with the value it choked on. pgops passes through
+  the structural errors an operator needs (syntax, an undefined table or
+  column, a permission) and reports anything else by its SQLSTATE alone.
+- **Suggestions read live statistics, not three captured hours.** History is
+  optional in pgops and `pg_stat_statements` is not, so suggestions work with
+  no store; the page names the window it read.
+- **`autoindex` is declined**, permanently, for the reasons
+  `enable_query_stats` is: building an index is a schema change against a
+  monitored database. pgHero's builds every suggestion unreviewed. Every pgops
+  suggestion carries the exact statement instead, for the operator to run
+  through their own migration tooling. See the registry entry for #62.
+- **`system_stats` is declined**, permanently. CPU, IOPS and free space come
+  from CloudWatch, Azure Monitor or GCP monitoring — per-cloud credentials and
+  a cloud SDK, for one panel that is blank for everyone self-hosting.
 
 
 ## Safety
@@ -520,7 +555,7 @@ than against the gate in isolation.
 
 | Tier | Actions | Gate |
 |---|---:|---|
-| 0 | every read | always available |
+| 0 | every read, and explaining a statement | always available |
 | 1 | terminate one session, analyze tables | flag **and** an inline confirmation with a required reason |
 | 2 | terminate every long-running query, reset query statistics, reset database statistics | tier 1, **and** the database name typed back |
 | 3 | schema changes | **unreachable.** Not gated — absent. See the two declines above. |
@@ -574,6 +609,14 @@ table, so the button never lands off the edge of the screen.
   a required free-text reason, and the outcome. A failed write goes to stderr;
   it never silently disappears and never turns a successful kill into a
   reported failure.
+- **Explain plans a statement; it never runs one.** The text an operator
+  pastes is the one input pgops sends to a database that it did not write, and
+  it takes one path, `planStatements`. It is prepared as a *named* statement,
+  so Postgres itself refuses a second command smuggled in after a `;` — an
+  empty parameter list does not do this, and a test holds the difference. It
+  runs inside `BEGIN READ ONLY` and is always rolled back. The connection it
+  used is destroyed afterwards rather than returned to the pool, because
+  prepared statements survive a rollback. There is no `ANALYZE`.
 - **Every rendered query is redacted.** `redactSecrets` runs on every query this
   console displays, and on every audit record before it is written. This matters
   more on the web than in a terminal: a screenshot needs a human to take it, a
@@ -591,7 +634,10 @@ a source guard confines every DDL statement in the repo to
 `packages/checks/src/store/migrations/`. It does not install extensions or
 manage roles. Give its role the least privilege that works:
 `pg_read_all_stats` to see other sessions' queries, and `pg_signal_backend`
-only if you intend to use `kill`. Without `pg_signal_backend` the console
+only if you intend to use `kill`. Explain and suggested indexes also need
+`SELECT` on the tables they plan: Postgres checks it even for a plan that reads
+no rows. Grant it per table or schema, or `pg_read_all_data` for all of them;
+without it, each plan says which table it was refused. Without `pg_signal_backend` the console
 still reads everything; a kill returns the permission error Postgres gave, in
 the page, rather than a blank.
 
@@ -626,7 +672,10 @@ every SQL check, the history store and the one code path that issues
 The checks package knows nothing about React.
 [dba-playbook/](dba-playbook/) is neither: it is the hand-written SQL the
 checks were derived from, kept runnable so a finding can be reproduced in
-`psql` without trusting this tool.
+`psql` without trusting this tool. [docs/design/](docs/design/) holds the
+design documents each phase was built from, and
+[docs/postgres-for-pgops-deep-dive.pdf](docs/postgres-for-pgops-deep-dive.pdf)
+the Postgres internals the checks read.
 
 ```sh
 npm test                                    # unit — checks, pure logic, source guards
@@ -640,9 +689,10 @@ npm run --workspace @pgops/web typecheck
 ## What happened to the terminal UI
 
 pgops began as an Ink terminal program: a tab strip, keystrokes, an ASCII
-cockpit. **That UI was removed in this release.** The reasoning is in the design
-spec — an incident tool that can only be reached by ssh-ing to a box with the
-right `DATABASE_URL` in its environment is reachable by one person at a time,
+cockpit. **That UI was removed in v1.0.** The reasoning is in
+[the web console design](docs/design/2026-08-26-pgops-web-design.md) — an
+incident tool that can only be reached by ssh-ing to a box with the right
+`DATABASE_URL` in its environment is reachable by one person at a time,
 and the checks it ran deserved a surface the whole on-call rotation can open. The
 SQL, the thresholds, the redaction and the kill guard were not rewritten; they
 were lifted into `packages/checks` and are what the console runs today.

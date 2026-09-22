@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ACTOR_HEADER } from '@/lib/auth';
-import { openAction, type ActionRequest } from '@/lib/action-route';
+import { openAction, readJson, type ActionRequest } from '@/lib/action-route';
 
 // The preamble resolves a context; these are unit tests over the preamble,
 // not over the pools, so the seam is mocked at the module boundary.
@@ -146,5 +146,26 @@ describe('openAction', () => {
   it('trims the reason it hands on, so the audit record has no stray padding', async () => {
     const r = await openAction(post({ reason: '  spaced  ' }), 'prod');
     expect((r as ActionRequest).reason).toBe('spaced');
+  });
+});
+
+/**
+ * The CSRF defence and the body parse, shared with the tier-0 explain route.
+ * No tier gate here: that stays in openAction, above this call.
+ */
+describe('readJson', () => {
+  const req = (body: string, type: string) =>
+    new Request('http://console.example/api/db/prod/explain', { method: 'POST', headers: { 'content-type': type }, body });
+
+  it('answers 415 for a body not declared JSON', async () => {
+    expect(((await readJson(req('{}', 'text/plain'))) as Response).status).toBe(415);
+  });
+  it('answers 400 for a body that does not parse', async () => {
+    const r = (await readJson(req('{', 'application/json'))) as Response;
+    expect(r.status).toBe(400);
+    expect(await r.json()).toEqual({ error: 'Body must be JSON.' });
+  });
+  it('returns the object, whatever the parameters on the media type', async () => {
+    expect(await readJson(req('{"sql":"SELECT 1"}', 'Application/JSON; charset=utf-8'))).toEqual({ sql: 'SELECT 1' });
   });
 });

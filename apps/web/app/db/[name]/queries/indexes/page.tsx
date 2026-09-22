@@ -8,7 +8,6 @@ import {
 } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
-import { SubNav } from '@/components/sub-nav';
 import { Sql } from '@/components/sql';
 import { formatBytes, formatCount } from '@/lib/format';
 
@@ -98,12 +97,6 @@ export default async function Indexes({ params }: { params: Promise<{ name: stri
 
   return (
     <>
-      <SubNav
-        name={name}
-        base="queries"
-        items={[{ segment: 'indexes', label: 'Indexes' }, { segment: 'tables', label: 'Tables' }]}
-      />
-
       <div className="grid gap-4">
         <CheckPanel title="Index cache hit rate" result={hitRate}>
           {(d) => (d.rate === null
@@ -265,6 +258,26 @@ export default async function Indexes({ params }: { params: Promise<{ name: stri
             className="mt-2 inline-block text-sm underline underline-offset-4"
           >
             Estimate index bloat
+          </Link>
+        </section>
+
+        {/*
+          * #58/#63 plan up to a hundred query shapes, so they get the same
+          * treatment as bloat: a link with its cost named, not a panel run on
+          * every visit to a page that otherwise reads cached results.
+          */}
+        <section className="rounded-lg border p-4">
+          <h2 className="font-semibold">Suggested indexes</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Plans the busiest query shapes from pg_stat_statements and suggests an index for each
+            sequential scan worth one. It plans rather than runs them, but a hundred plans is not
+            free, so it is not run with the checks above.
+          </p>
+          <Link
+            href={`/db/${name}/queries/indexes/suggested`}
+            className="mt-2 inline-block text-sm underline underline-offset-4"
+          >
+            Suggest indexes
           </Link>
         </section>
       </div>

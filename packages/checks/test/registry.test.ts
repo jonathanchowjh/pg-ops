@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  ACTIONS, CHECKS, COMPLETE_PHASES, JOBS, PGHERO, PHASE_ORDER, SERIES, parityBacklog,
+  ACTIONS, CHECKS, COMPLETE_PHASES, JOBS, PGHERO, PHASE_ORDER, SERIES, TOOLS, parityBacklog,
 } from '../src/registry.js';
 import type { Phase } from '../src/registry.js';
 import { GATES, GATE_ORDER } from '../src/gates.js';
@@ -21,18 +21,19 @@ describe('the pgHero parity registry', () => {
     expect(missing).toEqual([]);
   });
 
-  it('puts every entry in exactly one of check / action / series / job / platform / planned / declined', () => {
+  it('puts every entry in exactly one of check / action / series / job / tool / platform / planned / declined', () => {
     for (const [id, e] of Object.entries(PGHERO)) {
-      const states = ['check', 'action', 'series', 'job', 'platform', 'planned', 'declined']
+      const states = ['check', 'action', 'series', 'job', 'tool', 'platform', 'planned', 'declined']
         .filter((k) => k in e);
       expect(states, `capability ${id}`).toHaveLength(1);
     }
   });
 
-  it('never names a series or a job that does not exist', () => {
+  it('never names a series, a job or a tool that does not exist', () => {
     for (const [id, e] of Object.entries(PGHERO)) {
       if ('series' in e) expect(SERIES, `capability ${id}`).toHaveProperty(e.series);
       if ('job' in e) expect(JOBS, `capability ${id}`).toHaveProperty(e.job);
+      if ('tool' in e) expect(TOOLS, `capability ${id}`).toHaveProperty(e.tool);
     }
   });
 
@@ -74,17 +75,16 @@ describe('the pgHero parity registry', () => {
   /**
    * Exact list equality, not a count: a decline is a product decision, and
    * one arriving without anyone editing this line is the thing worth
-   * catching. P6 is expected to add #59 system_stats (parity spec §7 rules
-   * it out and the registry still carries it as planned), which is a
-   * deliberate edit here rather than a threshold this test slides past.
+   * catching. P6 added #59 and #62 as exactly that kind of deliberate edit.
    */
-  it('declines exactly three capabilities, each one permanently', () => {
+  it('declines exactly five capabilities, each one permanently', () => {
     const declined = Object.entries(PGHERO)
       .filter(([, e]) => 'declined' in e).map(([id]) => Number(id));
     // #13 kill_all — an action with no diagnosis.
-    // #19 / #61 — a schema change against a monitored database, which §3.3
-    // promises never to make and §7.1 puts at a tier with no vehicle left.
-    expect(declined).toEqual([13, 19, 61]);
+    // #19 / #61 / #62 — a schema change against a monitored database, which
+    // §3.3 promises never to make and §7.1 puts at a tier with no vehicle left.
+    // #59 system_stats — a cloud SDK and credentials for one panel.
+    expect(declined).toEqual([13, 19, 59, 61, 62]);
   });
 
   /**
@@ -130,6 +130,22 @@ describe('the pgHero parity registry', () => {
    * `Phase` type without adding it to `PHASES` and the per-phase counts
    * stop summing to the whole.
    */
+  it('declines system_stats and autoindex, permanently', () => {
+    expect(PGHERO[59]).toHaveProperty('declined');
+    expect(PGHERO[62]).toHaveProperty('declined');
+  });
+
+  /**
+   * The claim the whole registry exists to make, now made. With every phase
+   * complete, the gate above fails any entry added as `planned` — so from
+   * here a new pgHero capability must arrive shipped or declined, with a
+   * reason, never as a quiet backlog item.
+   */
+  it('owes nothing — parity is complete', () => {
+    expect(parityBacklog()).toBe(0);
+    expect([...COMPLETE_PHASES].sort()).toEqual([...PHASES].sort());
+  });
+
   it('partitions the backlog across the phases without loss', () => {
     const summed = PHASES.reduce((n, p) => n + parityBacklog(p), 0);
     expect(summed).toBe(parityBacklog());

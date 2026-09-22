@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { runCheck } from '../src/run.js';
+import { runCheck, runTool } from '../src/run.js';
 import type { Check, CheckContext } from '../src/types.js';
 import { sessions } from '../src/checks/sessions.js';
 import { blocked } from '../src/checks/blocked.js';
@@ -302,5 +302,44 @@ describe('every shipped threshold carries advice', () => {
       }
     }
     expect(missing).toEqual([]);
+  });
+});
+
+describe('runTool', () => {
+  const ctx: CheckContext = { target: {} as never, serverVersion: 170000 };
+
+  it('returns the data with verdict null — a tool answers, it never judges', async () => {
+    const tool = { id: 't', title: 'T', run: async (_c: CheckContext, n: number) => n * 2 };
+    const r = await runTool(ctx, tool, 21);
+    expect(r).toMatchObject({ ok: true, data: 42, verdict: null });
+  });
+
+  it('refuses below its version floor without running', async () => {
+    let ran = false;
+    const tool = {
+      id: 't', title: 'T', requires: [{ kind: 'version' as const, min: 180000 }],
+      run: async () => { ran = true; },
+    };
+    const r = await runTool(ctx, tool, undefined);
+    expect(r).toMatchObject({ ok: false, reason: 'unsupported-version' });
+    expect(ran).toBe(false);
+  });
+
+  it('classifies a missing extension and hands back the remedy', async () => {
+    const tool = {
+      id: 't', title: 'T', requires: [{ kind: 'extension' as const, name: 'pg_stat_statements' }],
+      run: async () => { throw Object.assign(new Error('relation does not exist'), { code: '42P01' }); },
+    };
+    const r = await runTool(ctx, tool, undefined);
+    expect(r).toEqual({
+      ok: false, reason: 'missing-extension', message: 'relation does not exist',
+      remedy: 'CREATE EXTENSION pg_stat_statements;',
+    });
+  });
+
+  it('never rejects, even on a thrown non-Error', async () => {
+    const tool = { id: 't', title: 'T', run: async () => { throw 'boom'; } };
+    await expect(runTool(ctx, tool, undefined))
+      .resolves.toMatchObject({ ok: false, reason: 'error', message: 'boom' });
   });
 });

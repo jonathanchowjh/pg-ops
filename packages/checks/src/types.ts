@@ -170,6 +170,28 @@ export interface Series<Point, Opts = void> {
   requires?: Requirement[];
 }
 
+/**
+ * A tool answers a question the OPERATOR asks — "how would this statement
+ * run?", "which index would my slow queries use?" — where a check answers one
+ * pgops asks of every database on every render.
+ *
+ * Neither existing shape fits, and spec 2026-09-03 §7 said so without
+ * designing the answer. `Check.sql` is parameterised by options and makes ONE
+ * round trip into a pure `map`; `explain` is parameterised by operator-supplied
+ * SQL and makes several dependent round trips (prepare, count parameters,
+ * explain, then read the catalog for the relations the plan names). `Series`
+ * reads the store. An action mutates. A tool does none of those: it reads, on
+ * request, in as many steps as the question needs.
+ *
+ * Like a series, a tool never judges — `runTool` yields `verdict: null`.
+ */
+export interface Tool<Input, Data> {
+  id: string;
+  title: string;
+  run: (ctx: CheckContext, input: Input) => Promise<Data>;
+  requires?: Requirement[];
+}
+
 export type SeriesResult<P> =
   | { ok: true; points: P[]; readAt: number }
   | { ok: false; reason: FailureReason; message: string; remedy?: string };

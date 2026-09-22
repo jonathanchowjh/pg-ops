@@ -513,7 +513,13 @@ describe('the DDL boundary', () => {
     // still fails. Stated because a security guard that asserts a source file
     // contains DDL, with no explanation, reads as the guard having been
     // silenced.
-    expect(matched).toEqual(['packages/checks/src/run.ts']);
+    //
+    // tools/advice.ts is the SECOND expected match, for the same reason:
+    // `IndexSuggestion.statement` is the index statement handed to the
+    // OPERATOR to run through their own migration tooling. #62 `autoindex` —
+    // the thing that would run it — is declined. A third file, or a real
+    // statement growing in advice.ts beside the string, still fails.
+    expect(matched).toEqual(['packages/checks/src/run.ts', 'packages/checks/src/tools/advice.ts']);
   });
 });
 
@@ -562,6 +568,41 @@ describe('capture', () => {
       join('series', 'query-stats.ts'),
     ]) {
       expect(RESET.test(strip(readFileSync(join(CHECKS_SRC, f), 'utf8'))), f).toBe(false);
+    }
+  });
+});
+
+describe('operator SQL', () => {
+  /**
+   * `planStatements` is the one path by which text pgops did not write reaches
+   * a monitored database — a named statement, read-only, rolled back, its
+   * connection destroyed. A second file preparing statements would be a
+   * second path with none of that. The behaviour is held by
+   * explain.int.test.ts; this is the tripwire that fires without a database.
+   */
+  it('is prepared in exactly one file', () => {
+    const offenders = sources(CHECKS_SRC)
+      .filter((p) => /\bPREPARE\s/.test(strip(readFileSync(p, 'utf8'))))
+      .map((p) => p.slice(CHECKS_SRC.length + 1));
+    expect(offenders).toEqual([join('tools', 'explain.ts')]);
+  });
+});
+
+describe('the tab sub-navs', () => {
+  /**
+   * The strip belongs to the tab's LAYOUT. `useSelectedLayoutSegment()`
+   * answers relative to the nearest layout, and a page has no segment below
+   * it — so for as long as seven Queries pages and five Cleanup pages each
+   * rendered their own, the strip highlighted nothing anywhere, and every
+   * test that mocked the hook passed anyway. A page rendering one now would
+   * also show it twice.
+   */
+  it('is rendered by a layout, never by a page', () => {
+    const offenders = walk(join(APP, 'db'))
+      .filter((f) => f.endsWith('page.tsx') && /<SubNav\b/.test(readFileSync(f, 'utf8')));
+    expect(offenders).toEqual([]);
+    for (const tab of ['queries', 'cleanup']) {
+      expect(readFileSync(join(APP, 'db', '[name]', tab, 'layout.tsx'), 'utf8')).toMatch(/<SubNav\b/);
     }
   });
 });

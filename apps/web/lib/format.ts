@@ -1,3 +1,5 @@
+import type { PlanNode } from '@pgops/checks';
+
 /**
  * Ported in spirit from the TUI's formatDuration. Hours drop seconds because a
  * 27-hour transaction's second count is noise, and the column it sits in is
@@ -83,4 +85,95 @@ export function formatBytes(bytes: number | null): string {
 export function formatDelta(bytes: number): string {
   if (bytes === 0) return '0 B';
   return `${bytes < 0 ? '−' : '+'}${formatBytes(Math.abs(bytes))}`;
+}
+
+const PLAN_DETAILS = [
+  'Index Cond', 'Recheck Cond', 'Hash Cond', 'Merge Cond', 'Join Filter',
+  'Filter', 'One-Time Filter', 'Sort Key', 'Group Key',
+] as const;
+
+const AGGREGATE: Record<string, string> = { Sorted: 'GroupAggregate', Hashed: 'HashAggregate', Mixed: 'MixedAggregate' };
+
+/** Postgres's `quote_identifier`, minus its keyword list: bare when plainly an identifier. */
+const ident = (id: string) => (/^[a-z_][a-z0-9_$]*$/.test(id) ? id : `"${id.replace(/"/g, '""')}"`);
+
+/**
+ * A node's name as text EXPLAIN prints it. JSON splits it across fields —
+ * `"Node Type": "Hash Join"` with `"Join Type": "Left"` is a Hash LEFT Join —
+ * and printing the node type alone turns a left join into an inner one and an
+ * anti join into a plain nested loop: a different query. Transcribed from
+ * explain.c's ExplainNode and held to real output by plan-lines.test.ts.
+ */
+function nodeName(node: PlanNode, str: (k: string) => string | undefined): string {
+  const type = node['Node Type'];
+  let name = type;
+  if (type === 'ModifyTable') name = str('Operation') ?? type;
+  else if (type === 'Aggregate') name = AGGREGATE[str('Strategy') ?? ''] ?? type;
+  else if (type === 'SetOp') {
+    name = `${str('Strategy') === 'Hashed' ? 'HashSetOp' : 'SetOp'}${str('Command') ? ` ${str('Command')}` : ''}`;
+  }
+  const partial = str('Partial Mode');
+  if (partial === 'Partial' || partial === 'Finalize') name = `${partial} ${name}`;
+  if (node['Parallel Aware'] === true) name = `Parallel ${name}`;
+  const join = str('Join Type');
+  if (join !== undefined && join !== 'Inner') {
+    name = type === 'Nested Loop' ? `${name} ${join} Join` : `${name.replace(/ Join$/, '')} ${join} Join`;
+  }
+  if (str('Scan Direction') === 'Backward') name += ' Backward';
+  return name;
+}
+
+/**
+ * What a node reads: `using <index>` and `on [schema.]object [alias]`, the
+ * alias only where it differs — explain.c's ExplainScanTarget. A Bitmap Index
+ * Scan reads the index itself, so it is `on` the index.
+ */
+function target(node: PlanNode, str: (k: string) => string | undefined): string {
+  const index = str('Index Name');
+  if (index !== undefined && node['Node Type'] === 'Bitmap Index Scan') return ` on ${ident(index)}`;
+  const object = str('Relation Name') ?? str('Function Name') ?? str('CTE Name') ?? str('Tuplestore Name');
+  const alias = str('Alias');
+  const schema = str('Schema');
+  let out = index === undefined ? '' : ` using ${ident(index)}`;
+  if (object === undefined && alias === undefined) return out;
+  out += ' on';
+  if (object !== undefined) out += ` ${schema === undefined ? '' : `${ident(schema)}.`}${ident(object)}`;
+  if (alias !== undefined && alias !== object) out += ` ${ident(alias)}`;
+  return out;
+}
+
+/**
+ * A JSON plan as the indented text an operator already reads.
+ *
+ * pgops plans as JSON because index advice needs the structure — which node
+ * scans which relation with which filter. The person reading the plan needs
+ * the shape `EXPLAIN` has printed for decades, so this reproduces it: six
+ * columns of indent per level, `->` before every child, details two past the
+ * node they belong to, and an InitPlan or SubPlan under its own name, its
+ * subtree two further in. Node lines match real output exactly
+ * (plan-lines.test.ts); the details are a subset, with no `Output:`.
+ */
+export function planLines(node: PlanNode, depth = 0, pad = 0): string[] {
+  const indent = depth === 0 ? '' : `${' '.repeat(6 * (depth - 1) + 2 + pad)}->  `;
+  const detailIndent = ' '.repeat(6 * depth + 2 + pad);
+  const str = (k: string) => (typeof node[k] === 'string' ? (node[k] as string) : undefined);
+  const num = (k: string) => (typeof node[k] === 'number' ? (node[k] as number) : undefined);
+
+  const total = num('Total Cost');
+  const cost = total === undefined ? ''
+    : `  (cost=${(num('Startup Cost') ?? 0).toFixed(2)}..${total.toFixed(2)}`
+      + ` rows=${num('Plan Rows') ?? 0} width=${num('Plan Width') ?? 0})`;
+
+  const lines = [`${indent}${nodeName(node, str)}${target(node, str)}${cost}`];
+  for (const key of PLAN_DETAILS) {
+    const value = node[key];
+    if (typeof value === 'string') lines.push(`${detailIndent}${key}: ${value}`);
+    else if (Array.isArray(value)) lines.push(`${detailIndent}${key}: ${value.join(', ')}`);
+  }
+  for (const child of node.Plans ?? []) {
+    const subplan = typeof child['Subplan Name'] === 'string' ? child['Subplan Name'] : undefined;
+    if (subplan === undefined) lines.push(...planLines(child, depth + 1, pad));
+    else lines.push(`${detailIndent}${subplan}`, ...planLines(child, depth + 1, pad + 2));
+  }
+  return lines;
 }

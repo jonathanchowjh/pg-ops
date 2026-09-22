@@ -4,6 +4,100 @@ All notable changes to pgops are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — 2026-09-21
+
+Explain and index suggestions — and with them, parity with pgHero is complete.
+
+**Minor, not major.** Two routes are added under the Queries tab, one tier-0
+API route, and nothing changes meaning or goes away.
+
+Parity, read from `registry.ts`: **60 of the 65 capabilities ship, 5 are
+declined on purpose, and 0 remain.** Every phase is complete, so the phase gate
+now fails any capability added as `planned`.
+
+### Added
+
+- **Explain** at `/db/<name>/queries/explain` — paste a statement, read its plan
+  as familiar `EXPLAIN` text and which index, if any, would serve it. A
+  `$1`-style shape copied from the Queries tab plans generically, on every
+  supported version. Closes #57 and #64.
+- **Suggested indexes** at `/db/<name>/queries/indexes/suggested`, linked from
+  the Indexes page beside index bloat — the busiest shapes over 20 ms and 50
+  calls, each planned and advised, grouped by the index they want, with every
+  shape examined listed beneath. Closes #58 and #63.
+- `POST /api/db/<name>/explain`, tier 0: available with actions off, because
+  planning changes nothing. It still requires `application/json`.
+- `Tool<Input, Data>` and `runTool` in `packages/checks` — the shape the parity
+  spec declined to design for questions the operator asks.
+
+### Declined
+
+- **#62 `autoindex`**, permanently: it builds an index on a monitored database,
+  the same schema-change boundary as #19 and #61. Every suggestion carries the
+  exact statement for the operator to run instead.
+- **#59 `system_stats`**, permanently, as the parity spec had already ruled:
+  per-cloud credentials and a cloud SDK for one panel.
+
+### Security
+
+- **Operator SQL takes exactly one path, `planStatements`**, and a source guard
+  holds `PREPARE` to that file. The statement is prepared as a *named*
+  statement, so Postgres refuses a second command after a `;`. Measured before
+  it was written: over node-postgres's simple protocol the injected statement
+  runs, **including when an empty parameter array is passed**, and only a
+  named statement stops it. It runs in `BEGIN READ ONLY`, is always rolled
+  back, and its connection is destroyed, because prepared statements survive a
+  rollback. A one-second lock timeout means a table locked by a migration
+  fails its shape at once instead of holding the page for ten seconds a shape.
+- **Error messages from a failed plan are allowlisted by SQLSTATE.** Messages
+  that can echo a value, such as `22P02`, are replaced with their code.
+
+### Changed
+
+- `readJson`, extracted from `openAction`, is the one copy of the CSRF
+  media-type check, shared by the action routes and the explain route.
+- The Queries and Cleanup section strips are rendered by each tab's layout
+  instead of by every page, and a guard holds that.
+- The DDL guard pins `tools/advice.ts` beside `run.ts`, and says why: it
+  *builds* the index statement handed to the operator and never runs it.
+- `shadcn` is no longer a dependency. It is a code generator, and the two
+  components it ever produced are checked in; it stayed declared only so
+  `globals.css` could import a stylesheet of variants nothing used, and that
+  one import carried the MCP SDK, express and a `qs` advisory into the
+  production tree. The scaffold guard now keeps it out.
+- The design documents moved from `docs/superpowers/specs/` to
+  [`docs/design/`](docs/design/). The per-phase execution plans and review
+  transcripts that sat beside them, and the pre-console plan PDF that
+  described the terminal program, are removed; the deep-dive PDF stays and is
+  what `dba-playbook/` now points to.
+
+### Fixed
+
+- **The plan text now matches what `EXPLAIN` prints.** It printed only each
+  node's type, which turned a `Hash Left Join` into a `Hash Join` and a
+  `Nested Loop Anti Join` into a `Nested Loop` — a different query — and lost
+  aggregate strategies, partial and parallel modes, scan direction, the modify
+  operation and CTE/subplan headers. Every node line is now held to real
+  Postgres 17 output for 21 statements.
+- **A shape pgops is not allowed to plan says what to grant, and is not counted
+  as cleared.** `EXPLAIN` checks `SELECT` on every table it names even though
+  it reads nothing, so the least-privilege role the README recommends is
+  refused on every application table. The message now says which privilege is
+  needed. The suggestions page says how many shapes could not be planned
+  instead of reporting "no index suggested" for all of them, and the README
+  documents the requirement.
+- **The section strips under Queries and Cleanup now mark the page you are
+  on.** They never did: rendered inside each page, `useSelectedLayoutSegment()`
+  had no segment below it to report. Every test mocked the hook with the value
+  it would have returned from a layout, so all of them passed.
+
+### Notes
+
+- **No dependency was added.** The parity spec said the suggestions would ship
+  with a SQL parser. They read the planner's plan instead, which handles joins
+  and needs no parser; the spec's §7 is amended to say so.
+- **Nothing new polls.** Neither new page carries a `<Refresh>`.
+
 ## [2.2.0] — 2026-09-18
 
 The remaining actions. pgops could terminate one session; it can now terminate
@@ -238,7 +332,7 @@ safety off, it can terminate the backend holding everything up.
 
 The hygiene half — indexes, bloat, table and database size, sequence
 exhaustion, maintenance and settings — is **not** in v1 and is not partially
-in v1. It is designed (`docs/superpowers/specs/2026-09-03-pgops-p2-hygiene-design.md`)
+in v1. It is designed (`docs/design/2026-09-03-pgops-p2-hygiene-design.md`)
 and scheduled for v2. Shipping half of it would have meant a console that
 answers "are your indexes healthy?" with a screen that is silently incomplete,
 which is the one failure mode this project is built to avoid.

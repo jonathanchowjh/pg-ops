@@ -4,7 +4,7 @@ export * from './types.js';
 export * from './gates.js';
 // By name, not `export *`: run.ts owns both runners and `messageOf`, which
 // capture.ts imports and which is not part of this package's surface.
-export { runCheck, runSeries } from './run.js';
+export { runCheck, runSeries, runTool } from './run.js';
 export * from './registry.js';
 export { redactSecrets } from './redact.js';
 export { captureOnce } from './capture.js';
@@ -54,6 +54,11 @@ export type * from './actions/kill.js';
 // guards.test.ts can hold which files are allowed to.
 export type * from './actions/stats.js';
 export type * from './actions/analyze.js';
+// Tools: the types by `export type *`, so the tools themselves stay reachable
+// through TOOLS alone — one way to get one, as with checks and series.
+export type * from './tools/explain.js';
+export type * from './tools/advice.js';
+export type * from './tools/suggested-indexes.js';
 
 // slowQueries and SLOW_QUERY_DEFAULTS are VALUES, not types — `export type *`
 // above carries interfaces only, so without this apps/web cannot import them
@@ -63,3 +68,8 @@ export { slowQueries, SLOW_QUERY_DEFAULTS } from './checks/query-stats.js';
 // integration test and any caller that needs the asked-for list uses, and
 // `export type *` above cannot carry it.
 export { settingNames } from './checks/settings.js';
+// A value: the explain route refuses bad input by the tool's own rule, before
+// it opens a connection, rather than restating the rule.
+export { checkStatement } from './tools/explain.js';
+// A value: the suggestions page names the thresholds it applied.
+export { SUGGESTION_DEFAULTS } from './tools/suggested-indexes.js';

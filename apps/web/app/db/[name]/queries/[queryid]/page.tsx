@@ -3,7 +3,6 @@ import Link from 'next/link';
 import { SERIES } from '@pgops/checks';
 import type { Interval } from '@pgops/checks';
 import { runSeriesFor } from '@/lib/check';
-import { SubNav } from '@/components/sub-nav';
 import { Spark } from '@/components/spark';
 import { formatCount, formatMillis } from '@/lib/format';
 
@@ -39,12 +38,6 @@ export default async function QueryDetail({
 
   return (
     <div className="grid gap-4">
-      <SubNav
-        name={name}
-        base="queries"
-        items={[{ segment: 'indexes', label: 'Indexes' }, { segment: 'tables', label: 'Tables' }]}
-      />
-
       <div>
         <Link href={`/db/${name}/queries`} className="text-sm underline underline-offset-2">
           ← All queries

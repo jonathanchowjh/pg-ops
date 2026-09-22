@@ -66,13 +66,20 @@ describe('apps/web manifest', () => {
    * imported by nothing, and an unused dependency that ships React
    * components is the kind that survives three refactors. Uninstalling is
    * what removed them; this is what keeps them out, the way badge.test.tsx
-   * keeps @base-ui/react out. `shadcn` is deliberately NOT on this list —
-   * globals.css imports `shadcn/tailwind.css`, and shadcn copies component
-   * source into the repo rather than shipping a react package.
+   * keeps @base-ui/react out.
+   *
+   * `shadcn` joined the list at the pre-release audit. It is a code generator
+   * that copies component source into the repo — the two files under
+   * components/ui are the whole of what it ever produced — and it was kept
+   * as a runtime dependency only so globals.css could import its
+   * `tailwind.css`, a sheet of accordion keyframes and `data-open:`-style
+   * variants nothing here used. That one import pulled the MCP SDK, express
+   * and a `qs` advisory into the production tree. Run it with `npx shadcn`
+   * when a third component is wanted; components.json is what it reads.
    */
-  it('declares neither of the two react testing packages nor the unused icon package', () => {
+  it('declares none of the react testing packages, the unused icon package, or the shadcn CLI', () => {
     const declared = { ...pkg.dependencies, ...pkg.devDependencies };
-    for (const trap of ['@testing-library/react', '@testing-library/dom', 'lucide-react']) {
+    for (const trap of ['@testing-library/react', '@testing-library/dom', 'lucide-react', 'shadcn']) {
       expect(Object.keys(declared)).not.toContain(trap);
     }
   });

@@ -93,6 +93,17 @@
  * heuristic's suggestion is DDL with no diagnosis step of its own; the
  * confirmation gate is what keeps it out of `kill_all`'s category.
  *
+ * SUPERSEDED in P6 (2026-09-21): #62 is declined. The ruling above was made
+ * before three later commitments existed, and a confirmation gate answers
+ * none of them. Index creation is a schema change against a MONITORED
+ * database, which the full-parity spec §3.3 promises never to run, which the
+ * DDL guard forbids mechanically, which the web spec's §7.1 puts at tier 3
+ * ("CLI only"), and for which §8 removed the only tier-3 vehicle by cutting
+ * the CLI — the same four reasons #19 and #61 were declined in P5. The
+ * ruling's intent survives in a better form: every #58 suggestion carries
+ * the exact statement, for the operator to run through their own migration
+ * tooling (tools/advice.ts, `IndexSuggestion.statement`).
+ *
  * Ruling 1 (SDD ledger, conflict C1): Tasks 6–12 built the nine checks this
  * registry now owns. Task 14 wired the imports below and flipped eight
  * PGHERO capabilities to `check:` — see the per-entry comments in the
@@ -175,6 +186,8 @@ import { tableCaching, tableHitRate, tableStats, unusedTables } from './checks/t
 import { wraparound } from './checks/wraparound.js';
 import { historicalQueryStats, queryShapeHistory } from './series/query-stats.js';
 import { relationSpace, spaceGrowth } from './series/space.js';
+import { explain } from './tools/explain.js';
+import { suggestedIndexes } from './tools/suggested-indexes.js';
 
 export const CHECKS = {
   autovacuumDanger,
@@ -250,6 +263,14 @@ export const SERIES = {
 export type SeriesId = keyof typeof SERIES;
 
 /**
+ * Questions the operator asks — see `Tool` in types.ts. Keyed like CHECKS and
+ * SERIES, so `tool:` in the parity map names a real thing and the test proves
+ * it exists.
+ */
+export const TOOLS = { explain, suggestedIndexes } as const;
+export type ToolId = keyof typeof TOOLS;
+
+/**
  * Scheduled work that is neither a check nor an action.
  *
  * `platform: string` would have accepted these, and that is exactly why it
@@ -322,6 +343,7 @@ export type ParityEntry = {
   | { check: CheckId }
   | { action: ActionId }
   | { series: SeriesId }
+  | { tool: ToolId }
   | { job: JobId }
   | { platform: string }
   | { planned: Phase }
@@ -538,16 +560,32 @@ export const PGHERO: Record<number, ParityEntry> = {
     gate: 'server', check: 'settings' },
 
   // explain — methods/explain.rb
+  // Shipped in P6 as a Tool, the shape spec §7 declined to design. Planned
+  // through `planStatements`, the one path operator SQL takes: a named
+  // statement, read-only, rolled back, its connection destroyed. No ANALYZE
+  // (divergence D2 — it executes the statement); no Visualize (chrome, an
+  // external site). See tools/explain.ts.
   57: { name: 'explain', source: 'methods/explain.rb',
-    gate: 'work', planned: 'P6' },
+    gate: 'work', tool: 'explain' },
 
   // suggested_indexes — methods/suggested_indexes.rb
+  // #58 and #63 are one tool: pgHero computes suggested_indexes FROM
+  // suggested_indexes_by_query, and so does this. The busiest live shapes
+  // (divergence D3 — not three captured hours), planned and advised through
+  // #57's machinery. See tools/suggested-indexes.ts.
   58: { name: 'suggested_indexes', source: 'methods/suggested_indexes.rb',
-    gate: 'work', planned: 'P6' },
+    gate: 'work', tool: 'suggestedIndexes' },
 
   // system — methods/system.rb
-  59: { name: 'system_stats', source: 'methods/system.rb',
-    gate: 'server', planned: 'P6' },
+  59: {
+    name: 'system_stats',
+    source: 'methods/system.rb',
+    gate: 'server',
+    declined: 'CPU, IOPS and free space come from CloudWatch, Azure Monitor or GCP '
+      + 'monitoring: per-cloud credentials and a cloud SDK, for one panel that is '
+      + 'blank for everyone self-hosting. The parent spec cut `events` for exactly '
+      + 'this reason, and this has the same shape (full-parity spec §7). Permanent.',
+  },
 
   // platform — multi-database is Rails-engine configuration
   // (lib/pghero/database.rb), not a lib/pghero/methods/ query
@@ -579,16 +617,31 @@ export const PGHERO: Record<number, ParityEntry> = {
       + 'the data its own history feature collects is incoherent, not merely '
       + 'sharp-edged. Permanent.',
   },
-  // #62 stays planned: (controller ruling); action must be gated behind
-  // explicit confirmation when built — see the top-of-file note.
-  62: { name: 'autoindex', source: 'methods/suggested_indexes.rb',
-    gate: 'work', planned: 'P6' },
+  // Declined in P6, superseding the controller ruling that kept it planned —
+  // see the top-of-file note for why a confirmation gate was not enough.
+  62: {
+    name: 'autoindex',
+    source: 'methods/suggested_indexes.rb',
+    gate: 'work',
+    declined: 'Its body builds an index concurrently on a MONITORED database — a schema '
+      + 'change, forbidden for the same four reasons as #19 and #61: the §3.3 promise, '
+      + 'the DDL guard, the web spec\'s tier 3, and §8\'s removal of the CLI that tier '
+      + 'needed. pgHero\'s autoindex builds every suggestion with no review; a concurrent '
+      + 'build still takes a SHARE UPDATE EXCLUSIVE lock, can fail and leave an INVALID '
+      + 'index behind, and adds write cost to the table for as long as the index exists. '
+      + 'Every #58 suggestion carries the exact statement instead, for the operator to '
+      + 'run through their own migration tooling. Permanent.',
+  },
   // Found by the systematic (fix-round) re-audit — see the file-by-file
   // enumeration in the task report:
   63: { name: 'suggested_indexes_by_query', source: 'methods/suggested_indexes.rb',
-    gate: 'work', planned: 'P6' },
+    gate: 'work', tool: 'suggestedIndexes' },
+  // The same tool as #57: the plan is best_index's input, so one pass answers
+  // both — the JOBS precedent. Reads the planner's plan rather than a
+  // pg_query parse tree (divergence D1), which is why it handles joins where
+  // pgHero returns "JOIN not supported yet". See tools/advice.ts.
   64: { name: 'best_index', source: 'methods/suggested_indexes.rb',
-    gate: 'work', planned: 'P6' },
+    gate: 'work', tool: 'explain' },
   // Dashboard-only — no lib/pghero/methods/ file backs this; it is Ruby
   // post-processing over the connections list in home_controller.rb's
   // params[:security] branch. Derived here in `map` from the same round
@@ -611,7 +664,7 @@ export const PGHERO: Record<number, ParityEntry> = {
  * since a capability is owed by P1 whether P1a or P1b was meant to deliver
  * it.
  */
-export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1', 'P3', 'P2', 'P4', 'P5'];
+export const COMPLETE_PHASES: readonly Phase[] = ['P0', 'P1', 'P3', 'P2', 'P4', 'P5', 'P6'];
 
 /**
  * Build order, as data. `planned: 'P3'` means "P3 OWNS this", not "P3 happens

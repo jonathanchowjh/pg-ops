@@ -172,10 +172,4 @@ describe('the tables page', () => {
     expect(out).not.toContain('data-refresh');
     expect(out.toLowerCase()).not.toContain('refreshing');
   });
-
-  it('renders the sub-route strip', async () => {
-    const out = await html();
-    expect(out).toContain('/db/prod/queries/indexes');
-    expect(out).toContain('/db/prod/queries/tables');
-  });
 });

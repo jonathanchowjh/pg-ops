@@ -4,7 +4,6 @@ import { runCheckFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
 import { Refresh } from '@/components/refresh';
 import { SettingsDisclosure } from '@/components/status-bar';
-import { SubNav } from '@/components/sub-nav';
 import { formatBytes, formatCount, formatDuration } from '@/lib/format';
 
 export async function generateMetadata({
@@ -55,15 +54,6 @@ export default async function Cleanup({
   return (
     <div className="grid gap-4">
       <div className="flex justify-end"><Refresh intervalMs={5_000} /></div>
-      <SubNav
-        name={name}
-        base="cleanup"
-        items={[
-          { segment: 'space', label: 'Space' },
-          { segment: 'maintenance', label: 'Maintenance' },
-          { segment: 'sequences', label: 'Sequences' },
-        ]}
-      />
       <SettingsDisclosure result={settings} />
 
       <CheckPanel title="Wraparound" result={wraparound}>
