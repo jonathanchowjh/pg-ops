@@ -6,12 +6,15 @@ import {
   type CheckResult, type Gate, type Placement, type RootBlocker, type Verdict, type Waiter,
 } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
+import { hygieneFor } from '@/lib/hygiene';
+import type { HygieneArea } from '@pgops/checks';
+import { HygieneLine } from '@/components/hygiene-line';
 import { CheckPanel, needsAttention } from '@/components/check-panel';
 import { Badge } from '@/components/ui/badge';
 import { Bullet } from '@/components/bullet';
 import { Refresh } from '@/components/refresh';
 import { Sql } from '@/components/sql';
-import { formatBytes, formatCount, formatDuration, formatMillis } from '@/lib/format';
+import { formatBytes, formatCount, formatDuration, formatMillis, plural } from '@/lib/format';
 
 export async function generateMetadata({
   params,
@@ -139,14 +142,23 @@ function panel<T>(
  */
 function Band({
   gate,
+  ordinal,
   href,
   linkLabel,
   panels,
+  hygiene,
 }: {
   gate: Gate;
+  /** Its place in the sequence, 1-based. See the spine, below. */
+  ordinal: number;
   href?: string;
   linkLabel?: string;
   panels: PanelSpec[];
+  /**
+   * The cached hygiene lines belonging to this band, already rolled up. A
+   * band with none renders exactly as it did before they existed.
+   */
+  hygiene?: ReactNode;
 }) {
   // Heading and subtitle come from gates.ts, not from this file. The bands
   // ARE the tree; there is no second place where their names are decided and
@@ -185,19 +197,50 @@ function Band({
   const quiet = panels.filter((p) => !isLoud(p));
 
   return (
-    <section>
-      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <div className="flex flex-wrap items-baseline gap-x-3">
-          <h2 className="text-sm font-semibold tracking-wide text-muted-foreground uppercase">{title}</h2>
-          <p className="text-sm text-muted-foreground">{question}</p>
+    // THE SPINE. A fixed column carrying the gate, and the panels beside it.
+    //
+    // The four bands are a SEQUENCE — the gates a request clears, in the
+    // order it clears them — and the page has always known that and never
+    // shown it. Four headings down a single column say "here are four
+    // groups"; a numbered rail down the left says "here is a path, and this
+    // is where it broke". That is the model this console is built on, and it
+    // is the one thing here no other tool can draw, because no other tool has
+    // it.
+    //
+    // Numbered, which this project otherwise avoids: 01/02/03 on a page is
+    // decoration unless the content really is ordered, and here it is. Causes
+    // run DOWN the numbers and symptoms run UP them — vacuum falling behind
+    // (4) bloats tables, which slows queries (3), which piles up connections
+    // (1) — so the number is the direction to read in, not a label.
+    //
+    // Below `lg` it collapses to exactly what it was: heading, question,
+    // panels. The rail is worth a 14rem column on a monitor and is worth
+    // nothing on a phone, and this console is opened on both.
+    <section className="grid gap-x-8 gap-y-3 border-t pt-5 first:border-t-0 first:pt-0 lg:grid-cols-[14rem_1fr]">
+      {/* The grid stretches this cell to the band's full height, which is
+          what makes the rule a rail rather than a stub beside the heading. */}
+      <div className="lg:border-r lg:pr-8">
+        <div className="flex items-baseline gap-2.5">
+          <span aria-hidden="true" className="text-sm tabular-nums text-muted-foreground">{ordinal}</span>
+          <h2 className="text-xl font-medium">{title}</h2>
         </div>
+        <p className="mt-1 text-sm text-muted-foreground">{question}</p>
         {href ? (
-          <Link href={href} className="text-sm underline-offset-4 hover:underline">
-            {linkLabel} →
+          // The word, not an arrow. A link that says "Sessions" is already a
+          // direction; `→` only repeats what underlined blue text says.
+          <Link
+            href={href}
+            className="mt-2 inline-block text-sm underline-offset-4 hover:underline"
+          >
+            {linkLabel}
           </Link>
         ) : null}
       </div>
-      <div className="grid gap-2">
+      {/* `content-start`: the grid row is as tall as the taller of the gate
+          cell and the panels, and without this the panels stretch to fill it
+          — which put each healthy row's hairline forty pixels below the words
+          it belongs to, reading as a box with nothing in it. */}
+      <div className="grid content-start gap-2">
         {loud.map((p) => (
           <CheckPanel key={p.title} headingLevel={3} title={p.title} result={p.result}>
             {(d, v) => p.render(d, v)}
@@ -212,6 +255,9 @@ function Band({
             ))}
           </div>
         ) : null}
+        {/* Last in the band, below the live panels: these are findings from
+            the last capture, not from this render. */}
+        {hygiene}
       </div>
     </section>
   );
@@ -270,8 +316,10 @@ const CONNECTION_BANDS = (CHECKS.connections.thresholds ?? [])
 export default async function Triage({ params }: { params: Promise<{ name: string }> }) {
   const { name } = await params;
 
-  const [connections, sessionStates, blocked, longRunning, locks, wraparound, slots, queryStats, replication] =
-    await Promise.all([
+  const [
+    connections, sessionStates, blocked, longRunning, locks, wraparound, slots, queryStats,
+    replication, hygiene,
+  ] = await Promise.all([
       runCheckFor(name, CHECKS.connections),
       runCheckFor(name, CHECKS.sessionStates),
       runCheckFor(name, CHECKS.blocked),
@@ -281,6 +329,9 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
       runCheckFor(name, CHECKS.slots),
       runCheckFor(name, CHECKS.queryStats, { sort: 'total' }),
       runCheckFor(name, CHECKS.replicationLag),
+      // Beside the checks, not after them: it is one indexed read of the
+      // store, and serialising it would add its latency to every poll.
+      hygieneFor(name),
     ]);
 
   // When the database itself is gone, all nine checks fail with the SAME
@@ -358,6 +409,9 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
     connect: { href: `/db/${name}/sessions`, label: 'Sessions' },
     wait: { href: `/db/${name}/locks`, label: 'Wait graph' },
     work: { href: `/db/${name}/queries`, label: 'All queries' },
+    // The fourth gate had no link, which was invisible while the bands were
+    // headings and obvious the moment each one got a cell with a slot for it.
+    'keep-up': { href: `/db/${name}/cleanup`, label: 'Cleanup' },
   };
 
   // Every panel on this page, flat. Which BAND each one lands in is not
@@ -375,7 +429,7 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
             arithmetic that produced the verdict. */}
         <Bullet value={d.max - d.headroom} max={d.max} bands={CONNECTION_BANDS} />
         <p className="text-sm">
-          <span className="text-lg font-medium">{formatCount(d.used)}</span>
+          <span className="font-medium text-foreground">{formatCount(d.used)}</span>
           <span className="text-muted-foreground">
             {' '}used · {formatCount(d.reserved)} reserved · {formatCount(d.headroom)} free
             {' '}of {formatCount(d.max)}
@@ -536,13 +590,13 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
           <div className="mt-1"><Sql>{root.query}</Sql></div>
           {d.roots.length > 1 ? (
             <p className="mt-1 text-muted-foreground">
-              and {formatCount(d.roots.length - 1)} more root blocker(s).
+              and {plural(d.roots.length - 1, 'more root blocker')}.
             </p>
           ) : null}
         </div>
       );
     }, (d) => (
-      <span>{d.roots.length === 0 ? 'No blocking.' : `${formatCount(d.roots.length)} root blocker(s)`}</span>
+      <span>{d.roots.length === 0 ? 'No blocking.' : plural(d.roots.length, 'root blocker')}</span>
     )),
 
     panel(CHECKS.longRunning, 'Long-running', longRunningResult, (d) =>
@@ -679,22 +733,56 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
     }),
   ];
 
+  // One line per hygiene area, in the band its page belongs to. `band` comes
+  // from AREAS rather than from each check's gate, because the two are
+  // allowed to disagree: `invalidConstraints` answers a keep-up question and
+  // renders on the Indexes page, which is a work page.
+  const byBand = new Map<Gate, HygieneArea[]>();
+  if (hygiene.ok) {
+    for (const area of hygiene.areas) {
+      if (area.band === null) continue;
+      byBand.set(area.band, [...(byBand.get(area.band) ?? []), area]);
+    }
+  }
+
   return (
-    <div className="grid gap-6">
+    <div className="grid gap-5">
       {/* Task 1: the poll lives on the incident pages, not the layout —
           hygiene routes share that layout and must not inherit a 5s
           catalog scan. test/guards.test.ts holds this. */}
       <div className="flex justify-end"><Refresh intervalMs={5_000} /></div>
 
-      {GATE_ORDER.map((gate) => (
+      {GATE_ORDER.map((gate, i) => (
         <Band
           key={gate}
           gate={gate}
+          ordinal={i + 1}
           href={LINKS[gate]?.href}
           linkLabel={LINKS[gate]?.label}
           panels={panels.filter((p) => p.gate === gate)}
+          hygiene={<HygieneBand name={name} areas={byBand.get(gate) ?? []} />}
         />
       ))}
+
+      {/* Said ONCE, at the foot of the page, not four times in four bands:
+          it is one fact about the deployment, not a finding about a band. */}
+      {hygiene.ok ? null : (
+        <p className="text-sm text-muted-foreground">
+          Index, table and sequence checks are not shown. {hygiene.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** The cached lines for one band, or nothing at all when it has none. */
+function HygieneBand({ name, areas }: { name: string; areas: HygieneArea[] }) {
+  if (areas.length === 0) return null;
+  return (
+    // The same columns as the quiet panels above them, so the two groups
+    // share a grid rather than each having their own.
+    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+      {areas.map((a) => <HygieneLine key={a.id} area={a} name={name} />)}
     </div>
   );
 }

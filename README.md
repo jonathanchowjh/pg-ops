@@ -3,46 +3,51 @@
 > **On-call console for Postgres** — watches lock chains, slow queries and
 > replication, live.
 
-A small web console you deploy next to your databases, built to be opened while
-the pager is going off. It can act, not only watch. In scope it is a pgHero
-superset: everything pgHero answers, plus the half pgHero does not.
-
-TypeScript and Next.js, one container, no agent to install and nothing to
-schedule.
+A small web console you deploy next to your databases, built to be opened
+while the pager is going off. One container, one URL, many databases, no agent
+to install and nothing to schedule. It can act as well as watch: behind a flag
+it terminates the backend holding everything up, and every action is audited.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/triage-dark.png">
-  <img alt="The triage page for a database called prod, in four bands — Sessions, Locks, Queries, Replication & cleanup, each with the question it answers written beside it. Checks that need attention take a full-width panel with a red or amber accent bar, a badge, and, beside the reading, two sentences: why the threshold matters and what to do about it. Under Locks one panel names the root blocker 18389 and a second, Blocked, is collapsed to a one-line strip because it measures the same incident. Under Slow queries the two long-running queries are each marked blocked by 18389, with a note reading Not slow — waiting. Healthy checks collapse to a single compact line carrying their value and an OK badge." src="docs/screenshots/triage-light.png">
+  <img alt="The triage page for a database called shop. Down the left is a numbered rail: 1 Sessions, is there room for the next request; 2 Locks, is anything waiting instead of working; 3 Queries, is the work itself taking too long; 4 Replication and cleanup, can the server keep up with what already committed. Each carries a link to its own page, and a hairline rule runs from it across the band beside it. Two panels are boxed, tinted red and marked CRITICAL: Lock wait graph, naming root blocker 489 with the statement it is holding and two sentences on why it matters and what to do; and Long-running, listing four backends, two of them marked blocked by 489. Beneath Queries a cached hygiene line reads Indexes, 1 unused index, 10s ago, WARN on an amber ground. Every healthy check is an unboxed row on the page background carrying its value and a green OK badge." src="docs/screenshots/triage-light.png">
 </picture>
 
-That superset claim is checked rather than asserted.
-[packages/checks/src/registry.ts](packages/checks/src/registry.ts) maps all 65
-capabilities of pgHero 4.0.1 onto a shipped check, a shipped action, a platform
-feature, or a numbered phase, and the test suite fails if a phase marked
-complete still owes one. **60 of the 65 are shipped, 5 are declined on purpose,
-and 0 remain** — see [Parity with pgHero](#parity-with-pghero).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/queries-dark.png">
+  <img alt="The Queries page. Above the statistics table, two line charts sit side by side over the same twenty-four hours: Execution time per capture interval, ruled 1.4ms to 4.5s across four labelled gridlines, and Calls per capture interval, ruled 11 to 681. Both are labelled minus 23h 57m, minus 11h 58m and now along the time axis, and both carry a clean break where captures are missing, drawn as a gap rather than a straight line through it. A tall spike partway across the execution-time chart is absent from the calls chart beside it: the database got slower, it did not get busier. Below, a table of statement shapes with calls, total, mean, a since-last-capture column and the normalised SQL." src="docs/screenshots/queries-light.png">
+</picture>
 
-One URL, many databases. What is built so far is what you need in the first
-five minutes — who's connected and in what state, is
-anything blocked, what's running long, how much connection headroom is left,
-which server you are actually pointed at — and then, if you switch the safety
-off, it can terminate the backend that is holding everything up. Point it at a
-store and it also records history — query statistics and relation sizes,
-captured every five minutes, without ever resetting a counter another tool is
-reading. The hygiene half is here too — indexes, bloat, table and database
-size, sequence exhaustion, vacuum and analyze, and the server's own settings —
-on its own tab, behind its own pages, and never polling a catalog scan.
+In scope it is a [pgHero](https://github.com/ankane/pghero) superset, and that
+claim is checked rather than asserted:
+[registry.ts](packages/checks/src/registry.ts) maps all 65 capabilities of
+pgHero 4.0.1 onto a shipped check, action, series or tool, and the test suite
+fails if the numbers below drift from what the registry computes.
+**60 of the 65 are shipped, 5 are declined on purpose, and 0 remain** — see
+[Parity with pgHero](#parity-with-pghero).
 
 ```sh
 docker build -t pgops .
 docker run -e DATABASE_URL=postgres://… -p 8080:8080 pgops
+# open http://localhost:8080
 ```
+
+**Where to go next**
+
+| You want to… | Read |
+|---|---|
+| Run it against your databases | [Running it](#running-it), [Safety](#safety) |
+| Understand the screen | [The model](#the-model), [The pages](#the-pages) |
+| Work on the code, including as a first project | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Do the same work by hand in `psql` | [dba-playbook/](dba-playbook/) |
+| Read why it was built this way | [docs/](docs/README.md) |
+| Report a vulnerability | [SECURITY.md](SECURITY.md) |
+| See what changed in each release | [CHANGELOG.md](CHANGELOG.md) |
 
 ## The model
 
-Everything on the triage screen comes from one idea, and it is worth two
-minutes because the rest of the console is derived from it. A query arriving
-at Postgres has to clear four gates, **in this order**:
+Everything on the triage screen comes from one idea. A query arriving at
+Postgres has to clear four gates, **in this order**:
 
 ```
 A query arrives
@@ -60,7 +65,7 @@ A query arrives
                failing → not an outage today; it is tomorrow's outage
 ```
 
-Two things follow, and they are the reason the order is worth fixing in place.
+Two things follow, and they are why the order is fixed in place.
 
 **Causes run down it; symptoms run up it.** Vacuum falls behind (4), tables
 bloat, queries get slow (3), connections pile up behind them (1). What pages
@@ -69,63 +74,68 @@ you is near the top. What you have to fix is usually further down.
 **A failure at one gate disguises itself as the next.** A session blocked at
 gate 2 is `state = 'active'` in `pg_stat_activity`, so it also appears at gate
 3 as a long-running query — and the console used to offer to terminate it,
-directly below a panel saying, correctly, never to terminate a waiter. Naming
-the gates is what lets the page say which one a session is actually stuck at.
+directly under a panel saying never to terminate a waiter. Naming the gates is
+what lets the page say which one a session is actually stuck at.
 
-The tree is **data, not prose**:
-[packages/checks/src/gates.ts](packages/checks/src/gates.ts). Every check
-declares its gate, the triage page's bands are `GATE_ORDER` rendered in
-order with their headings read out of `GATES`, and **all 65 pgHero
-capabilities carry one — including the 40 not built yet**, so nothing can
-arrive later with nowhere to live. A capability whose gate disagrees with its
-check fails the build, and so does one added without a gate at all.
+The tree is data, not prose: [gates.ts](packages/checks/src/gates.ts). Every
+check declares its gate, the triage page's bands are the gates rendered in
+order, and every one of the 65 pgHero capabilities carries one, so nothing can
+arrive with nowhere to live. The one placement that is not a gate is
+`server` — version, role and settings describe the machine rather than a
+request's progress through it, and they render in the status line under the
+page heading.
 
-`server` is the one placement that is not a gate: the server's version, role
-and settings describe the machine rather than a request's progress through
-it, and they render in the status line under the page heading.
+## The pages
 
-## What's here
+One tab per gate, plus an overview. The incident pages poll; the hygiene
+pages run their catalog scans when you open them and never poll, and a test
+holds that boundary from both directions.
 
-Five routes. That is the whole console today.
-
-| Route | What it answers |
-|---|---|
-| `/` | **Overview** — every configured database, each with its worst verdict across every incident check. "Is anything wrong anywhere?", nothing more. A check that could not *run* is reported separately from a check that ran and was fine, and a database where *nothing* could be read reads `UNKNOWN` rather than `OK`: "we could not look" and "we looked and it's fine" must never render the same. |
-| `/db/<name>` | **Triage** — one screen per database, one band per gate (see [The model](#the-model)): **Sessions** (connections and headroom, sessions by state), **Locks** (what's blocked, the root blockers), **Queries** (what's running long, statement shapes), and **Replication & cleanup** (role, lag, slots, wraparound horizon). Each band carries the question it answers and links to the route that goes deeper into it. Bands never move; what changes is size. A check that needs attention takes a full panel and explains itself; a healthy one collapses to one line. |
-| `/db/<name>/sessions` | **Sessions** — live `pg_stat_activity`; connection sources grouped by database/user/app/IP with an SSL breakdown; and two of the four places an action can be taken — terminating one session, or every query running past the floor (see Safety). pgops's own connections are folded away by default, counted rather than hidden. |
-| `/db/<name>/locks` | **Locks** — the wait graph: who is blocking whom, and the root blocker at the top of the chain. |
-| `/db/<name>/queries` | **Queries** — `pg_stat_statements`, sortable by total, mean or calls, plus a slow-queries panel scoped to what was actually fetched. With a store configured, each row also carries what it did **since the last capture**. With actions enabled, the two statistics resets live here. |
-
-### The front door
+With a store configured, those same hygiene checks also run on the capture
+tick — every five minutes, each bounded at ten seconds — and the triage page
+reports what they found as one line per area, with the age of the reading.
+That is the one thing pgHero's dashboard did that this console did not: a
+duplicate index or a sequence near its ceiling used to be invisible until
+somebody opened the page that looks for it. Without a store nothing is
+scheduled, the lines say so once, and the pages behave exactly as before.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
-  <img alt="The pgops overview listing three databases: prod and analytics each with a red CRITICAL badge and a red accent bar, and staging showing 12 checks unavailable with a grey UNKNOWN badge. Above them, a summary line reading 2 of 3 databases need attention, 1 could not be assessed at all, and to the right of the title a freshness readout with a Refresh button." src="docs/screenshots/overview-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/indexes-dark.png">
+  <img alt="The Indexes page, one of the hygiene pages. Index cache hit rate, Invalid indexes and Unvalidated constraints are plain headings with a green OK badge and a one-line reading beneath each. Only Unused indexes is boxed, tinted amber and given a left bar: it is marked WARN, one unused index, and holds a table naming public.order_items_sku_idx on public.order_items at 36 MB, beside two sentences on why the 10 MB floor was adopted and what to confirm before dropping it. Below, Duplicate indexes, Tables that may need an index and Index usage by table each carry a plain count chip and a table of relations." src="docs/screenshots/indexes-light.png">
 </picture>
 
-Three states, and the third is the point. `staging` is not healthy and not
-unhealthy — it could not be read at all, so it says `UNKNOWN` in grey rather
-than borrowing the colour of either answer. Colour is reserved for verdicts;
-its absence means there is no verdict to report. Every badge also spells its
-level out in words, so none of this depends on seeing colour.
+| Route | Answers | Polls |
+|---|---|---|
+| `/` | **Overview.** Every configured database with its worst verdict across every incident check. A database that could not be read at all says `UNKNOWN`, never `OK`. | 30 s |
+| `/db/<name>` | **Triage.** One band per gate. A check that needs attention takes a full panel and explains itself; a healthy one collapses to one line. With a store, each band also carries its cached hygiene areas, with the age of the reading. | 5 s |
+| `/db/<name>/sessions` | **Sessions.** Live `pg_stat_activity`, connection sources with an SSL breakdown, and the terminate controls. pgops's own connections are folded away, counted rather than hidden. | 5 s |
+| `/db/<name>/locks` | **Locks.** The wait graph as a tree: root blocker at the top, waiters indented under what they wait on, cycles marked. | 5 s |
+| `/db/<name>/queries` | **Queries.** `pg_stat_statements` sortable by total, mean or calls; a slow-queries panel; with a store, two charts over twenty-four hours — the database's total execution time and its calls, side by side, because time alone cannot say whether the database got slower or busier — and what each shape did since the last capture. The statistics resets live here. | 5 s |
+| `/db/<name>/queries/<queryid>` | One shape, named by its statement: calls, total time and rows over twenty-four hours. | — |
+| `/db/<name>/queries/explain` | Paste a statement, read its plan and the index that would serve it. | — |
+| `/db/<name>/queries/indexes` | Index hit rate and caching, missing, unused, duplicate and invalid indexes. pgops's own indexes are folded away, counted rather than hidden. | — |
+| `/db/<name>/queries/indexes/bloat` | Index bloat, estimated. On its own route because the estimate is expensive. | — |
+| `/db/<name>/queries/indexes/suggested` | Suggested indexes for the busiest shapes, each with the exact statement to run. | — |
+| `/db/<name>/queries/tables` | Table hit rate and caching, unused tables, per-table statistics. pgops's own tables are folded away, counted rather than hidden. | — |
+| `/db/<name>/cleanup` | **Cleanup.** Wraparound horizon, replication role and lag, replication slots, and the server's settings in a disclosure. | 5 s |
+| `/db/<name>/cleanup/space` | Database size, largest relations and tables, seven-day growth. Sizes are never filtered; the lists fold pgops's own relations away, counted rather than hidden. | — |
+| `/db/<name>/cleanup/space/<relation>` | One relation's captured size over thirty days. | — |
+| `/db/<name>/cleanup/maintenance` | Running vacuums with progress, last vacuum and analyze per table, transaction-ID age by relation. The analyze action lives here. | — |
+| `/db/<name>/cleanup/sequences` | Every sequence against the ceiling of the column it feeds. pgops's own sequences are folded away, counted rather than hidden. | — |
 
-Open that database and the same rule applies one level down. When every check
-on the page fails **the same way**, the page says it once — the database is
-unreachable, and here is what Postgres said — instead of repeating one
-connection error across nine panels laid out as though there were something to
-triage. When the failures differ from one another, each panel keeps its own,
-because then they are nine different things you need to read.
+### What the pages have in common
 
-A URL naming a database this console is not configured for is a **404**, not a
-500: you mistyped, pgops is not broken. The 404 lists the names that would have
-worked, since pgops is the only thing that knows them.
+**"We could not look" never renders as "we looked and it's fine."** A check
+that cannot run says why — a missing extension, a role without the privilege,
+a server below the version it needs — instead of rendering as zero. On the
+overview an unreadable database is grey `UNKNOWN`, not green. Colour is
+reserved for verdicts, and every badge spells its level out in words.
 
-### Every verdict says why, and what to do
-
-A red badge is not a diagnosis. Each threshold in
-[packages/checks](packages/checks/src/checks) carries two sentences alongside
-its number — the reason that number is the number, and the action it calls
-for — and a check that escalates renders both:
+**Every verdict says why, and what to do.** Each threshold in
+[packages/checks/src/checks](packages/checks/src/checks) carries two sentences
+beside its number: why that number matters, and the action it calls for. A
+check that escalates renders both. A threshold with no single safe action
+carries no advice rather than a guess.
 
 > **Why this matters** — five minutes of idle-in-transaction blocks autovacuum
 > from reclaiming anything newer, so bloat starts accumulating on top of the
@@ -135,278 +145,198 @@ for — and a check that escalates renders both:
 > `idle_in_transaction_session_timeout` on that role so Postgres does this
 > without you.
 
-The sentence follows the level, so the same check reads differently at `WARN`
-and at `CRITICAL` — it is the crossed threshold talking, not the check. A
-threshold with no single safe action carries no advice rather than a guess, and
-a healthy check says nothing at all: nothing was crossed, so there is nothing to
-explain.
+**One incident, one card.** When two checks describe the same session — a
+stuck transaction escalates both `blocked` and `locks` — the corroborating
+panel collapses to a one-line strip. Each long-running query that is really a
+lock waiter is marked with the root blocker it is queued behind, and the
+"terminate it" advice is withheld, because killing a waiter frees nothing.
 
-### One incident, one card — and a waiter is not a slow query
+**Live, and honest about how live.** The header says how old what you are
+reading is, counted from when the request started. The clock keeps ticking
+between polls, so a stalled poll shows as a number climbing past the interval
+rather than a reading frozen at zero. A tick that lands while one is in flight
+is skipped, not queued: the console must never be the reason a database runs
+out of connections. There is a Refresh button for the moment after a
+terminate.
 
-Nine checks run against different catalogs and none of them knows the others
-exist. The triage page is the only thing holding every result, so it is the
-only thing that can notice when two of them are describing the same session.
-It does that in two places, and both were screens that contradicted
-themselves before it did.
+**The server gets one line to answer.** Every `/db/<name>` page carries a
+status line with the database and role the server itself reports, its
+version, whether the connection is encrypted, and a `replica` flag. Everywhere
+else the database is called by the name you gave it. An SSL status pgops
+could not read says `SSL unknown`, never `no SSL`.
 
-A stuck transaction escalates `blocked` (which counts its waiters) and `locks`
-(which walks the chain that produced them), so the Locks band drew two
-full cards, two red accent bars and two four-line explanations of one problem.
-The accent bars are the part that misleads: they exist to be counted in
-peripheral vision before a word is read, so two bars for one incident
-overstates the page's own headline. The corroborating panel now collapses to a
-one-line strip — the count and the longest wait are kept, the duplicate
-paragraph is not — but only when both checks actually ran. A check that
-*failed* is never demoted: "we could not look" is not a supporting detail of
-anything.
+**A wrong URL is a 404, not a 500.** Naming a database this console is not
+configured for lists the names that would have worked.
 
-The second is sharper. `long-running` selects `state = 'active'`, and a
-session blocked on a lock **is** active in `pg_stat_activity` — so every
-waiter in a chain is also a long-running query, always, by construction. The
-console said "Terminate the ROOT blocker, not a waiter. Killing a waiter frees
-nothing" in one band and, one band below, offered those exact waiters with
-"terminating this backend usually frees work nobody is waiting for". Neither
-check was wrong; the page was. Each long-running query that appears in the
-wait graph is now marked with the **root** it is queued behind — not its
-immediate blocker, which in any chain longer than two is itself a waiter — and
-when every one of them is a waiter, the threshold's remedy is withheld and the
-panel says what is actually happening instead.
-
-Where a ratio decides a verdict, the ratio is drawn. The connection panel is a
-[bullet graph](https://www.perceptualedge.com/articles/misc/Bullet_Graph_Design_Spec.pdf) —
-occupancy against a linear scale, shaded with the check's own warn and critical
-bands, derived from the thresholds themselves so the picture cannot disagree
-with the badge.
-
-### Sessions
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/sessions-dark.png">
-  <img alt="The sessions page: a table of three live backends with pid, state, age, user, application and query columns and a Terminate link per row, followed by a line reading 9 of pgops's own connections hidden, with a show them link. Beneath it a Connection sources panel groups connections by database, user, source and IP, listing pgops among the sources, with an SSL breakdown at the foot." src="docs/screenshots/sessions-light.png">
-</picture>
-
-Live `pg_stat_activity`, one row per backend, with `user` and `application` as
-separate columns because "which app is doing this?" is the question actually
-being asked. Underneath, connections grouped by database, user, source and IP,
-and an SSL breakdown that counts `Unknown` separately from `No SSL` — a
-connection whose encryption pgops could not read is never reported as one it
-confirmed was plaintext.
-
-pgops names its own backends `pgops` and folds them out of this table by
-default. Before it did, a console watching a quiet database showed three
-application sessions among nineteen of its own idle connections — each with its
-own `Terminate` link, offering to kill the console. They are counted and one
-click away, never silently dropped: polling every five seconds is real load on
-this database, and the page that exists to show load must not exempt itself
-from it. If your connection string sets its own `application_name`, that wins —
-pgops then has no way to recognise itself, and every row stays visible.
-
-### The wait graph
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/locks-dark.png">
-  <img alt="The locks page showing a lock chain: pid 9401, a batch-worker session idle in transaction, blocking pid 9403 (cron-cleanup), which in turn has pid 9402 (web-api) waiting behind it. Each row is indented under the session it waits on and shows the SQL it is running." src="docs/screenshots/locks-light.png">
-</picture>
-
-Nested, not flat. `long read <- ACCESS EXCLUSIVE <- readers` renders as three
-unrelated rows in a flat table, which is exactly how a migration pile-up hides
-its amplifier — the root blocker sits at the top of the chain and the sessions
-queued behind it are indented under the thing they are waiting on.
-
-### Queries
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/queries-dark.png">
-  <img alt="The queries page, with sortable calls, total and mean column headers, the active total column marked with a downward caret, a since-last-capture column, and rows showing means in milliseconds. One row is tinted and tagged with an amber SLOW badge, matching the count in the Slow queries panel above the table." src="docs/screenshots/queries-light.png">
-</picture>
-
-The three column headers are the sort control; the active one carries a caret
-and an `aria-sort`. Sort order lives in the URL, so a ranking is shareable and
-survives the back button. With a store configured, each row also carries what
-it did since the last capture.
-
-The slow-queries panel counts the shapes past both bounds — 20ms mean over 100+
-calls — and the rows it counted are tagged `SLOW` in the table beneath it, so
-the sentence and the row are joined rather than left three inches apart for you
-to re-derive by eye.
-
-One honest limit: `pg_stat_statements` records no `application_name`, so pgops
-**cannot** fold its own statements out of this page the way it can on Sessions.
-Its checks and, if you point `PGOPS_STORE_URL` at a database it also monitors,
-its captures appear here as ordinary shapes. Giving pgops its own role, and a
-store on a separate database, keeps this page about your application.
-
-Every `/db/<name>` page carries a status line under the heading: the database
-and role the server itself reports, its version, whether the connection is
-encrypted, and a `replica` flag. Everywhere else in the console a database is
-called by the name **you** gave it in `PGOPS_DATABASES`; that line is the only
-place the server gets to answer, and it sits directly above a button that can
-terminate backends. An SSL status pgops could not read says `SSL unknown`, never
-`no SSL`.
-
-The console follows your operating system's light or dark setting. There is no
-theme toggle and no preference to set — at 3am the right answer is whichever
-one everything else on the machine is already using. Fonts are the system UI
-stack, so nothing is fetched from a font CDN a locked-down network cannot
-reach, and there is no reflow on a page you are trying to read quickly.
-
-### Live, and honest about how live
-
-The four incident routes re-fetch every five seconds, and the overview every
-thirty — it runs twelve checks per database, so its tick costs twelve times a
-triage tick multiplied by however many databases are configured, and it
-answers a question that changes on a slower clock than a lock chain does. The
-header says how old what you are reading is — counted from when the request **started**, not
-when it landed, so a five-second fetch reads "updated 5s ago" the moment it
-arrives, which is true. The clock keeps ticking between polls, so a poll that
-has stalled shows up as a number climbing past the interval rather than a
-reading frozen at zero. There is a Refresh button for the moment you do not
-want to wait out the interval — after a terminate, usually.
-
-A tick that lands while one is still in flight is **skipped, not queued**. The
-console must never be the reason a database runs out of connections, and that
-rule holds for the button as much as the timer: pressing Refresh during a fetch
-re-arms exactly one follow-up rather than adding a second concurrent render.
-
-Hygiene routes will not poll when they land — their queries are catalog scans,
-and a test fails the build if one ever inherits the timer.
-
-A check that cannot run says so and says why — a missing `pg_stat_statements`
-extension, a server below the version it needs — instead of rendering as zero.
-"We could not look" and "we looked and it's fine" never render the same. Where
-Postgres itself withholds a row from your role rather than failing the query,
-the check still runs and that row reads `insufficient privilege`.
+**No theme toggle, no font CDN.** The console follows the operating system's
+light or dark setting, and the fonts are the system stack, so nothing is
+fetched from a network a locked-down deployment cannot reach.
 
 ## Running it
 
-**There is no published image yet.** Nothing is pushed to a registry, so build
-it from a clone first — every `docker run` below assumes you have:
+There is no published image yet. Build it from a clone:
 
 ```sh
 docker build -t pgops .
-```
 
-```sh
 # one database
 docker run -e DATABASE_URL=postgres://… -p 8080:8080 pgops
 
-# many
-docker run -e PGOPS_DATABASES='[{"name":"prod","url":"postgres://…"},…]' \
-           -e PGOPS_USERNAME=… -e PGOPS_PASSWORD=…                      \
+# many databases, behind basic auth
+docker run -e PGOPS_DATABASES='[{"name":"prod","url":"postgres://…"},{"name":"analytics","url":"postgres://…"}]' \
+           -e PGOPS_USERNAME=… -e PGOPS_PASSWORD=… \
            -p 8080:8080 pgops
 
 # with history
-docker run -e DATABASE_URL=postgres://…      \
-           -e PGOPS_STORE_URL=postgres://…   \
-           -p 8080:8080 pgops
+docker run -e DATABASE_URL=postgres://… -e PGOPS_STORE_URL=postgres://… -p 8080:8080 pgops
 ```
 
-Configuration is read **at request time, not build time**. The same image works
-against any database you point it at, and CI proves it: it builds an image with
-one `DATABASE_URL` baked in, runs it with a different one, and asserts the
-running container uses the second.
+Configuration is read **at request time, not build time**. The same image
+works against any database you point it at, and `scripts/image-smoke.sh`
+proves it by building an image with one `DATABASE_URL` baked in, running it
+with another, and asserting the running container uses the second. The
+pre-push hook runs it.
 
 ### Configuration
 
 | Variable | Meaning |
 |---|---|
 | `DATABASE_URL` | One database, named `default`. The simplest form. |
-| `PGOPS_DATABASES` | A JSON array of `{name, url}` for several databases. Each `name` becomes a URL path segment, so it must match `[A-Za-z0-9_-]+` and be unique. |
-| `PGOPS_CONFIG_FILE` | Path to a file holding that same JSON array. Takes precedence over both of the above — it is the most deliberate of the three, and the only one that keeps connection strings out of the process environment, where `docker inspect` and `/proc/<pid>/environ` can read them. |
-| `PGOPS_STORE_URL` | A Postgres database pgops may create its own `pgops` schema in. Setting it enables history: the schema is migrated at boot, a capture runs immediately, and another every five minutes after that. Leaving it unset means no DDL anywhere, no scheduler, and history reporting as unavailable — there is **no** fallback to a monitored database. |
-| `PGOPS_USERNAME` | Username for HTTP basic auth. |
-| `PGOPS_PASSWORD` | Password for HTTP basic auth. Set both to require auth, or neither to run without it; setting exactly one is a hard 503, not an open door. |
-| `PGOPS_ALLOW_ACTIONS` | Set to `true` to enable actions — surrounding whitespace and case are ignored, so `TRUE` works too. Anything else, including the string `false`, leaves them off; the value is compared against `true`, never tested for truthiness. |
-| `PGOPS_PUBLIC_HOST` | The host recorded in audit records. Falls back to the request's `Host` header, which is the caller's own claim about this console's address rather than an operator-configured, resolvable one. Set it if you read your audit log. |
+| `PGOPS_DATABASES` | A JSON array of `{name, url}`. Each `name` becomes a URL path segment, so it must match `[A-Za-z0-9_-]+` and be unique. |
+| `PGOPS_CONFIG_FILE` | Path to a file holding that same JSON array. Takes precedence over both of the above, and is the only form that keeps connection strings out of the process environment, where `docker inspect` can read them. |
+| `PGOPS_STORE_URL` | A Postgres database pgops may create its own `pgops` schema in. Enables history. See [History](#history). |
+| `PGOPS_USERNAME`, `PGOPS_PASSWORD` | HTTP basic auth over every route. Set both or neither; setting exactly one is a hard 503, not an open door. |
+| `PGOPS_ALLOW_ACTIONS` | `true` enables the actions. Case and surrounding whitespace are ignored. Anything else, including `false`, leaves them off. See [Safety](#safety). |
+| `PGOPS_PUBLIC_HOST` | The host recorded in audit records. Falls back to the request's `Host` header. Set it if you read your audit log. |
 | `PGOPS_AUDIT_LOG` | Path for the local audit-log copy. Defaults to `~/.pgops/audit.log`. |
-| `PORT` | Port the server listens on. Defaults to `8080` in the image. |
+| `PORT` | Port the server listens on. `8080` in the image. |
 
 Precedence for databases is `PGOPS_CONFIG_FILE`, then `PGOPS_DATABASES`, then
-`DATABASE_URL`. If none is set — or if what you set cannot be read or parsed —
-the server still comes up (configuration is read per request, not at boot) and
-every page renders **"pgops is not configured"** with the reason: which of the
-three inputs pgops looked at, the file path it tried, or the exact JSON error.
-The message names the input you actually set, so you do not have to go digging
-in the container log to find out which one is wrong.
+`DATABASE_URL`. If none is set, or what you set cannot be parsed, the server
+still comes up and every page renders **"pgops is not configured"** with the
+reason: which input pgops looked at, the file path it tried, or the exact JSON
+error.
+
+### The database role
+
+pgops runs no DDL against a monitored database, installs no extensions and
+manages no roles. Give it the least privilege that works:
+
+| Grant | Needed for |
+|---|---|
+| `pg_read_all_stats` | Seeing other sessions' queries. Without it, those rows read `insufficient privilege` and everything else still works. |
+| `pg_signal_backend` | Terminating sessions. Without it, a kill returns the permission error Postgres gave, in the page. |
+| `SELECT` on the tables you want planned, or `pg_read_all_data` | Explain and suggested indexes. Postgres checks `SELECT` even for a plan that reads no rows, and each refused plan says which table it was refused on. |
 
 ### History
 
 `PGOPS_STORE_URL` turns on the half of pgHero that needs somewhere to write.
-On boot pgops creates a `pgops` schema in that database — five tables, one
-forward-only migration, taken under an advisory lock so several replicas
-starting together migrate once — then captures every statement shape and
-every relation size, once immediately and every five minutes after that. The
-capture at boot is not a nicety: a deployment restarting pods faster than the
-interval would otherwise record nothing at all, ever, and nothing would say so.
+On boot pgops creates a `pgops` schema in that database (six tables,
+forward-only migrations, under an advisory lock so several replicas starting
+together migrate once), then captures every statement shape and every
+relation size, once immediately and every five minutes after that. Each pass
+also runs the hygiene checks and caches what they found, in its own
+transactions after the capture has committed — a ten-second catalog scan has
+no business holding the store's write path open. That cache keeps one row per
+check, not a history: the question it answers is what the last pass found.
+Without the variable there is no scheduler, no schema and no DDL anywhere;
+history reports itself as unavailable and never guesses at a database to
+write to.
 
-Four properties are worth stating because they are the ones easy to get
-wrong, and each is held by a test:
+Four properties are each held by a test:
 
 - **It never resets a counter.** pgHero calls `pg_stat_statements_reset()`
-  after each capture, which silently zeroes the view for every other tool
-  watching that database. pgops stores the cumulative numbers and subtracts
-  at read time.
-- **A gap is drawn as a gap.** When a counter goes backwards — someone reset
-  the view, or `pg_stat_statements` evicted the shape and it restarted from
-  zero — the interval spanning it is dropped rather than clamped. A spike
-  that never happened reads as an incident, and this is a tool you open
-  during one.
-- **A tick that lands while one is still running is skipped, not queued.**
-  The console must never be the reason a database runs out of connections.
-- **Snapshots are timestamped by the store, not by the process.** Several
-  replicas can run this; with a clock skew wider than the capture interval,
-  process-side timestamps would sort out of order and every interval would be
-  discarded as a discontinuity.
+  after each capture, which zeroes the view for every other tool watching that
+  database. pgops stores cumulative numbers and subtracts at read time.
+- **A gap is drawn as a gap.** When a counter goes backwards, the interval
+  spanning it is dropped rather than clamped. A spike that never happened
+  reads as an incident, and this is a tool you open during one.
+- **A tick that lands while one is running is skipped, not queued.**
+- **Snapshots are timestamped by the store, not the process**, so replicas
+  with skewed clocks cannot make every interval look like a discontinuity.
 
-Without the variable there is no scheduler, no schema, and no DDL anywhere;
-history reports itself as unavailable and the queries page simply does not
-draw the column. It never guesses at a database to write to.
+### Requirements
 
-## What v2 adds
+- **Postgres 14 or newer.** The integration suite runs against 14, 16, 17 and 18.
+- `pg_stat_statements` for the Queries tab. Everything else works without it,
+  and the tab says what is missing rather than rendering empty.
+- Docker, to build and run the image.
 
-**v1 was the incident half of pgHero, and only that half.** v2 is the other
-half: indexes, bloat, table and database size, sequence exhaustion, vacuum and
-analyze, and the server's own settings. It ships as a whole class rather than
-as panels appearing one release at a time, for the reason the v1 boundary
-existed in the first place — a console that answers "are your indexes healthy?"
-with a half-built screen is worse than one that does not answer it at all.
+### Fixed in 2.3.1
 
-The shape of the console changed, which is why this is a major version. The nav
-had four gates and three tabs; `keep-up` — *Replication & cleanup* — had no
-destination. It has one now:
+With `PGOPS_ALLOW_ACTIONS=true`, 2.2.0 and 2.3.0 answered 500 on
+`/db/<name>/cleanup/maintenance` on every load, and on `/db/<name>/sessions`
+whenever a query had run past the long-running floor. Both pages passed a
+function from a server component into a client component, which React refuses
+to serialise. Fixed in 2.3.1, and the integration suite now renders those
+pages with actions on — the gap that let it ship twice. Deployments with
+actions off were unaffected.
 
-| Route | What it answers |
-|---|---|
-| `/db/<name>/cleanup` | Wraparound horizon, replication role and lag, replication slots |
-| `/db/<name>/cleanup/space` | Database size, largest relations, largest tables, seven-day growth |
-| `/db/<name>/cleanup/space/<relation>` | One relation's captured size over thirty days |
-| `/db/<name>/cleanup/maintenance` | Running vacuums, last vacuum and analyze, transaction-ID age by relation |
-| `/db/<name>/cleanup/sequences` | Every sequence against the ceiling of the column it feeds |
-| `/db/<name>/queries/indexes` | Index usage, missing and unused indexes, duplicates, invalid indexes |
-| `/db/<name>/queries/indexes/bloat` | Index bloat, estimated — on its own route, run on request |
-| `/db/<name>/queries/indexes/suggested` | Suggested indexes for the busiest query shapes, each with the statement to run — run on request |
-| `/db/<name>/queries/explain` | A statement's plan, and the index that would serve it |
-| `/db/<name>/queries/tables` | Table hit rate, caching, unused tables, table statistics |
-| `/db/<name>/queries/<queryid>` | One statement shape's calls and total time over twenty-four hours |
+## Safety
 
-**The poll boundary is the load-bearing distinction.** `/cleanup` renders
-incident checks and refreshes every five seconds, because a wraparound horizon
-and a stalled replication slot both get worse while you watch. Everything under
-it runs catalog scans and refreshes only when you ask. A guard in the test
-suite holds that from both directions: a hygiene route that starts polling
-fails, and so does an incident page that stops.
+pgops can terminate backends, reset statistics and write to a monitored
+database. Everything in this section exists because of that.
 
-The divergences from pgHero that arrived with these routes are catalogued with
-the rest of them under [Parity with pgHero](#parity-with-pghero), beside the
-code that implements each one.
+Actions sit on a ladder, and a deployment opts in to the whole ladder or none
+of it. **`PGOPS_ALLOW_ACTIONS` is unset by default, and while it is unset the
+action routes do not exist** — every method answers 404, byte-identical to a
+path with no route at all, which an integration test asserts against a real
+server.
+
+| Tier | Actions | Gate |
+|---|---|---|
+| 0 | Every read, and explaining a statement | Always available |
+| 1 | Terminate one session; analyze tables | The flag, **and** an inline confirmation with a required reason |
+| 2 | Terminate every long-running query; reset query statistics; reset database statistics | Tier 1, **and** the database name typed back, checked on the server |
+| 3 | Schema changes | **Unreachable.** Not gated, absent. See the declines under [Parity](#parity-with-pghero). |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/kill-confirm-dark.png">
+  <img alt="A row in the sessions table with the terminate control open: a reason field, a red-outlined Confirm button shown greyed out and disabled, a Cancel button, and the note reason required, it is audited." src="docs/screenshots/kill-confirm-light.png">
+</picture>
+
+- **The route does not exist without the flag.** A 403 would advertise a kill
+  endpoint that is merely switched off. The gate sits in `proxy.ts`, above
+  method dispatch, so `GET` answers 404 rather than the 405 Next would
+  otherwise give a `POST`-only route. Every action route also requires
+  `Content-Type: application/json` and answers 415 otherwise, because a
+  cross-origin HTML form cannot set that header and basic-auth credentials
+  ride cross-site automatically.
+- **Actions on with auth off is an unauthenticated kill endpoint.** pgops
+  warns on stderr the first time such a request arrives but keeps serving,
+  because some deployments put an authenticating proxy in front. If yours does
+  not, set `PGOPS_USERNAME` and `PGOPS_PASSWORD` whenever you set
+  `PGOPS_ALLOW_ACTIONS`.
+- **Kills are pinned to the session identity, not the pid.** The target's
+  `backend_start` is captured when you select the row and compared, inside the
+  same statement as the terminate, against `pg_stat_activity`. A recycled pid
+  comes back `session-changed` and is left alone. Killing a blocker never
+  cascades to its waiters, and the bulk kill is N guarded kills with
+  per-session outcomes, never a sweep.
+- **Every action is audited**, success or failure, as one JSON line to stdout
+  and, best-effort, to `PGOPS_AUDIT_LOG`. The record names the operator, the
+  target, the free-text reason and the outcome.
+- **Explain plans a statement; it never runs one.** The pasted text takes one
+  path, is prepared as a named statement so Postgres itself refuses a second
+  command after a `;`, runs inside `BEGIN READ ONLY`, is always rolled back,
+  and its connection is destroyed rather than returned to the pool. There is
+  no `ANALYZE`. Error messages are allowlisted by SQLSTATE so a failed plan
+  cannot echo a value back.
+- **Every rendered query is redacted.** `redactSecrets` runs on every query
+  the console displays and on every audit record before it is written.
+- **No DDL against a monitored database.** A source guard confines every DDL
+  statement in the repo to `packages/checks/src/store/migrations/`, which runs
+  only against `PGOPS_STORE_URL`.
+- **Basic auth is the floor, not the answer.** For anything real, put a
+  reverse proxy in front (OAuth2 Proxy, ALB auth, IAP) and run it behind TLS.
 
 ## Parity with pgHero
 
 pgHero is the benchmark, and the audit is in the repo rather than in a claim.
-`registry.ts` was compiled against a fresh clone of pgHero 4.0.1 by enumerating
-every public method under `lib/pghero/methods/`, plus the dashboard-only
-capabilities that back no method at all. Each of the 65 entries names its source
-file and resolves to exactly one state, checked on every test run.
+`registry.ts` was compiled against a fresh clone of pgHero 4.0.1 by
+enumerating every public method under `lib/pghero/methods/`, plus the
+dashboard-only capabilities that back no method. Each of the 65 entries names
+its source file and resolves to exactly one state, checked on every test run.
 
 | State | Count |
 |---|---:|
@@ -414,299 +344,93 @@ file and resolves to exactly one state, checked on every test run.
 | Declined on purpose | 5 |
 | Remaining | 0 |
 
-**Parity is complete.** Every phase, P0 through P6, is done and
-`parityBacklog()` is 0. With every phase marked complete, the phase gate fails
-any entry added as `planned` — so a capability pgHero adds later has to arrive
-shipped or declined, with its reason, never as a quiet backlog item. Build order
-was data in `PHASE_ORDER`, which is why P3, the store and the capture
-scheduler, shipped ahead of P2.
+Every phase, P0 through P6, is complete. With every phase complete, the phase
+gate fails any entry added as `planned`, so a capability pgHero adds later has
+to arrive shipped or declined, with its reason.
 
-Every number above comes from `registry.ts`. If one of them is wrong, the test
-suite is wrong with it — `parityBacklog` is what the phase gate reads, and a
-phase marked complete that still owes an entry fails by name.
+### The five declines
 
-Twenty-one deliberate divergences, all of them documented at the code that
-implements them — six from v1, six that arrived with the hygiene routes, one
-with the trends, two with the actions, and six with explain and index
-suggestions:
+| pgHero capability | Why |
+|---|---|
+| `kill_all` | An action with no diagnosis. There is no incident in which "terminate every session, unreviewed" is the correct first move. |
+| `enable_query_stats`, `disable_query_stats` | Both are DDL against a monitored database. pgops diagnoses the absent extension and hands you the statement to run through your own migration tooling. Removing the extension is worse than installing it: it destroys every query statistic, including what pgops's own capture reads. |
+| `autoindex` | Builds an index on a monitored database, unreviewed. Every pgops suggestion carries the exact statement instead. |
+| `system_stats` | CPU, IOPS and free space from CloudWatch, Azure Monitor or GCP monitoring: per-cloud credentials and an SDK for one panel that is blank for everyone self-hosting. |
 
-- **`kill` is guarded.** pgHero's is a bare `pg_terminate_backend` behind a
-  button. See [Safety](#safety).
-- **`ssl_in_use` needs no extension.** pgHero calls `ssl_is_used()` from
-  `sslinfo`, so it reports SSL only where somebody installed that extension.
-  pgops reads `pg_stat_ssl`, a core catalog since 9.5, for its own backend —
-  which is readable without `pg_read_all_stats`.
-- **`kill_all` is declined**, permanently. There is no incident in which
-  "terminate every session, unreviewed" is the correct first move; it is an
-  action with no diagnosis.
-- **`replication_lag` is `null` on a primary, not `0`.** pgHero answers 0 —
-  on a dashboard that reads as "perfectly caught up", a claim about
-  replication health made about a server that is not replicating. pgops's
-  `null` means "not a meaningful question." See `replication.ts`.
-- **`connection_security_breakdown` keeps pgHero's four-value scheme and
-  adds a fifth.** pgHero classifies each connection as SSL / No SSL / Socket
-  / Internal Process; pgops keeps all four and adds `Unknown` for a
-  connection `pg_stat_ssl` had no row for, so a read failure can never
-  render as a confirmed "No SSL" finding. See `sslStatus`.
-- **Capture does not reset shared statistics.** pgHero's `capture_query_stats`
-  calls `pg_stat_statements_reset()`, which silently breaks every other
-  consumer on that database. pgops stores the cumulative counters and
-  differences them at read time instead. Two tests hold it: an integration
-  test captures twice and asserts the counters only ever climb, and a source
-  guard fails the moment any file in `packages/checks` so much as names a
-  reset function.
-- **Sizes are bytes, not `pretty_size` strings.** pgHero returns `"8192 MB"`,
-  which cannot be thresholded, summed or charted. pgops returns the number and
-  formats it at the page that renders it. See `space.ts`.
+### Where pgops deliberately differs
+
+Each is documented at the code that implements it.
+
+- **Capture never resets shared statistics.** See [History](#history).
+- **`kill` is guarded**, and `kill_long_running_queries` is N guarded kills
+  with per-session outcomes. See [Safety](#safety).
+- **`replication_lag` is `null` on a primary, not `0`.** `0` reads as
+  "perfectly caught up", a claim about replication made about a server that is
+  not replicating. `replication.ts`
+- **`ssl_in_use` reads `pg_stat_ssl`**, a core catalog, rather than the
+  `sslinfo` extension. `connection_security_breakdown` keeps pgHero's four
+  values and adds `Unknown`, so a read failure can never render as a confirmed
+  "No SSL". `connections.ts`
+- **Sizes are bytes, not `pretty_size` strings.** `"8192 MB"` cannot be
+  thresholded, summed or charted; formatting happens at the page. `space.ts`
 - **A reading we could not take is `null`, never a sentinel.** pgHero renders
-  an index with no I/O yet as `"Insufficient data"` in a column of percentages,
-  and a table nothing has read as `0%` cached. Both sort to the top of a page
-  ranked by how bad the reading is. See `indexes.ts` and `tables.ts`.
-- **Settings are one round trip, not fifteen.** pgHero issues `SHOW <name>` per
-  setting; pgops reads `pg_settings` once. The value is the `SHOW`-equivalent,
-  so `shared_buffers` reads `128MB` rather than `16384` with a separate `8kB`
-  unit hanging off it. pgHero's version branch is also dropped rather than
-  copied: it exists because `SHOW` errors on a setting the server does not
-  have, and `pg_settings` returns no row instead. See `settings.ts`.
-- **`sequence_danger` measures against the COLUMN's type, not the sequence's
+  an index with no I/O yet as `"Insufficient data"` in a column of
+  percentages, which sorts to the top of a page ranked by how bad the reading
+  is. `indexes.ts`, `tables.ts`
+- **Settings are one round trip, not fifteen**, and the value is the
+  `SHOW`-equivalent: `shared_buffers` reads `128MB`, not `16384` with a
+  separate unit. `settings.ts`
+- **`sequence_danger` measures against the column's type, not the sequence's
   own maximum.** A bigint sequence feeding an `integer` column overflows at
-  2,147,483,647 — the column's ceiling is the one that breaks writes. Measured
-  against the sequence's own `max_value` it reads as 0.00000002% used on the
-  day it starts failing. See `sequences.ts`.
-- **`autovacuum_danger` ships as a list, not an alarm.** `transaction_id_danger`
-  already reads the database-wide `datfrozenxid`, which is the minimum over
-  every relation, so it cannot miss what the per-relation list would find. Two
-  badges on one fact would disagree the moment either was tuned. The list is
-  what you open after the alarm fires, to decide what to vacuum first. It also
-  reads the TOAST relation's frozen xid, which freezes independently of the
-  heap — read the heap alone and a table whose TOAST holds the oldest xid in
-  the database reports an age of zero. See `maintenance.ts`.
-- **`maintenance_info` is answered by `table_stats`.** The two read the same
-  view and return the same eight fields, so #43 and #36 resolve to one check
-  rather than two answers to one question. See `tables.ts`.
-- **`enable_query_stats` and `disable_query_stats` are declined**, permanently.
-  Both are a schema change against a *monitored* database, which this project
-  promises never to make — the promise directly above this list. pgHero offers
-  them as buttons; pgops diagnoses the absent extension and hands the operator
-  the exact statement to run through their own migration tooling, which is
-  where a schema change belongs. Removing the extension is worse than
-  installing it: it destroys every query statistic on the database, and
-  pgops's own capture reads that extension every five minutes. See the
-  registry entries for #19 and #61.
-- **`kill_long_running_queries` is N guarded kills, not a sweep.** pgHero's
-  loops a bare `pg_terminate_backend` over whatever matched. Here the matching
-  sessions are listed first, one reason covers the batch, and each session is
-  terminated through the same identity-pinned statement a single kill uses — so
-  a pid recycled between the page render and the confirmation is refused on its
-  own row while its neighbours proceed. The result is per-session outcomes,
-  never a boolean. That diagnosis is also what separates it from `kill_all`,
-  which stays declined. See `actions/kill.ts`.
-- **`space_growth` measures between two stored captures, not against a live
-  size.** pgHero takes the oldest size in the window and subtracts it from the
-  relation's size *right now*, re-measured against the monitored database. That
-  mixes a stored reading with a live one — up to one capture interval of change
-  is attributed to the whole window, and the number moves every time the page is
-  re-rendered, so two operators looking at the same "7-day growth" see different
-  figures. Both endpoints come from the store, and the last capture time is
-  rendered beside them. See `store/read.ts`.
+  2,147,483,647; measured against its own maximum it reads as 0.00000002% used
+  on the day it starts failing. `sequences.ts`
+- **`autovacuum_danger` is a list, not a second alarm.** The database-wide
+  wraparound check already reads the minimum over every relation; the
+  per-relation list is what you open after it fires, to decide what to vacuum
+  first. It also reads the TOAST relation's frozen xid, which freezes
+  independently of the heap. `maintenance.ts`
+- **`maintenance_info` is answered by `table_stats`.** Same view, same eight
+  fields, one check. `tables.ts`
+- **`space_growth` measures between two stored captures**, not between a
+  stored capture and a live size. pgHero's number moves every time the page is
+  rendered; here both endpoints come from the store and the last capture time
+  is shown beside them. A window too thin to measure says so once, above the
+  list, with the number of captures that explains it — not once per row.
+  `store/read.ts`
+- **The load chart is written at capture time, never summed at read time.**
+  "How busy has this database been today" spans every shape and every capture
+  in the window, which for a large database is over a million rows to
+  difference on a page that polls every five seconds. The capture that already
+  holds both snapshots does the arithmetic once and stores one row, so the
+  chart reads 288. An interval pgops could not measure — one spanning a
+  `pg_stat_statements_reset()` or an eviction — is a gap in the chart rather
+  than a zero. `store/migrations/004-query-load.ts`
+- **pgops folds its own relations out of the lists, and out of nothing else.**
+  Pointed at a database that is also its store, every catalog scan returns the
+  console's own tables, indexes and sequences. The lists hide them and say how
+  many were hidden; the readings — sizes, hit rates — and the checks' own
+  verdicts count them, because a tool that removed itself from its own numbers
+  would be lying about the thing it measures. `lib/fold.ts`
 - **Index suggestions read the planner's plan, not a parse tree.** pgHero
-  parses each statement with `pg_query`, a native libpg_query binding, and
-  answers any join with the literal string `"JOIN not supported yet"`. pgops
-  asks Postgres to plan the statement and reads the plan: every `Seq Scan`
-  names its relation and its own filter, so each side of a join is advised on,
-  and an index the planner already uses leaves no sequential scan to advise on.
-  The column choice is still pgHero's heuristic, transcribed, over `pg_stats`.
-  No dependency is added. `IN` lists count as equality, where pgHero's parser
-  gives up, and an invalid or partial index never counts as covering. See
-  `tools/advice.ts`.
-- **Explain has no `ANALYZE`.** `ANALYZE` executes the statement, and inside a
-  read-only transaction `pg_terminate_backend(…)` and `pg_sleep(…)` still run
-  as pgops's role. pgHero keeps it off by default; pgops's only route to an
-  effect the operator chooses is the audited action ladder. "Visualize", a link
-  to an external plan viewer, is not carried over. See `tools/explain.ts`.
-- **Explain's error messages are allowlisted by SQLSTATE.** pgHero replaces
-  every message it does not recognise, because an error can carry data out —
-  `SELECT '42x'::int` answers with the value it choked on. pgops passes through
-  the structural errors an operator needs (syntax, an undefined table or
-  column, a permission) and reports anything else by its SQLSTATE alone.
-- **Suggestions read live statistics, not three captured hours.** History is
-  optional in pgops and `pg_stat_statements` is not, so suggestions work with
-  no store; the page names the window it read.
-- **`autoindex` is declined**, permanently, for the reasons
-  `enable_query_stats` is: building an index is a schema change against a
-  monitored database. pgHero's builds every suggestion unreviewed. Every pgops
-  suggestion carries the exact statement instead, for the operator to run
-  through their own migration tooling. See the registry entry for #62.
-- **`system_stats` is declined**, permanently. CPU, IOPS and free space come
-  from CloudWatch, Azure Monitor or GCP monitoring — per-cloud credentials and
-  a cloud SDK, for one panel that is blank for everyone self-hosting.
-
-
-## Safety
-
-pgops can terminate a backend, reset statistics and write to a monitored
-database. Everything below exists because of that.
-
-Actions sit on a ladder, and a deployment opts in to the whole ladder or none
-of it. **`PGOPS_ALLOW_ACTIONS` is unset by default, and while it is unset the
-routes do not exist** — every method answers 404, byte-identical to a path with
-no route at all, which an integration test asserts against a real server rather
-than against the gate in isolation.
-
-| Tier | Actions | Gate |
-|---|---:|---|
-| 0 | every read, and explaining a statement | always available |
-| 1 | terminate one session, analyze tables | flag **and** an inline confirmation with a required reason |
-| 2 | terminate every long-running query, reset query statistics, reset database statistics | tier 1, **and** the database name typed back |
-| 3 | schema changes | **unreachable.** Not gated — absent. See the two declines above. |
-
-The typed confirmation at tier 2 is checked on the server, not only in the
-browser: a confirmation the client alone enforces is one `curl` away from
-bypassed.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/kill-confirm-dark.png">
-  <img alt="A row in the sessions table with the terminate control open: a reason field, a red-outlined Confirm button shown greyed out and disabled, a Cancel button, and the note reason required, it is audited." src="docs/screenshots/kill-confirm-light.png">
-</picture>
-
-Terminate is a two-step inline control, not a modal. The reason field is not a
-formality and Confirm stays disabled until it has one — the text is written to
-the audit record, so a kill with no stated reason is a kill nobody can account
-for afterwards. The panel opens leftward over the row rather than widening the
-table, so the button never lands off the edge of the screen.
-
-- **Actions are off by default, and the route does not exist without the flag.**
-  With `PGOPS_ALLOW_ACTIONS` unset, **every** method on `/api/db/<name>/kill`
-  answers **404**, not 403 — a 403 advertises a kill endpoint that is merely
-  switched off. Every method matters and is the part that is easy to get
-  wrong: the route file exports only `POST`, so Next answers `GET` with a 405
-  *before* any handler runs, and a 405 where a missing route would say 404 is
-  itself the disclosure. The gate therefore sits in `proxy.ts`, above method
-  dispatch; the route keeps its own copy so the property does not rest on a
-  matcher. A flagless deployment is byte-identical to a build without the
-  file, and a test asserts exactly that rather than merely asserting 404.
-  The route also requires `Content-Type: application/json` and
-  answers **415** otherwise, because a cross-origin HTML form cannot set that
-  header and basic-auth credentials ride cross-site automatically.
-- **`PGOPS_ALLOW_ACTIONS=true` with no `PGOPS_USERNAME` is an unauthenticated
-  kill endpoint.** The action gate and basic auth are independent safeguards,
-  and neither one covers this combination: with actions on and auth off,
-  anyone who can reach the port can terminate backends, and the audit record
-  simply says `anonymous`. pgops warns on stderr the first time such a request arrives but
-  does not refuse to serve — some deployments legitimately put an
-  authenticating proxy in front. If yours does not, set `PGOPS_USERNAME` and
-  `PGOPS_PASSWORD` whenever you set `PGOPS_ALLOW_ACTIONS`.
-- **`kill` is pinned to the session identity, not the pid.** The target's
-  `backend_start` is captured when you select the row and compared, inside the
-  same statement as the terminate, against a snapshot of `pg_stat_activity`. A
-  pid that Postgres recycled between your click and your confirmation comes back
-  `session-changed` and is left alone. Killing a blocker never cascades to its
-  waiters.
-- **Every kill is audited**, success or failure, as one JSON line to **stdout**
-  — the channel your log shipper already reads, and the record's real home,
-  since a container's local filesystem is not durable — and, best-effort, to
-  `~/.pgops/audit.log`. The record names the authenticated operator, the target,
-  a required free-text reason, and the outcome. A failed write goes to stderr;
-  it never silently disappears and never turns a successful kill into a
-  reported failure.
-- **Explain plans a statement; it never runs one.** The text an operator
-  pastes is the one input pgops sends to a database that it did not write, and
-  it takes one path, `planStatements`. It is prepared as a *named* statement,
-  so Postgres itself refuses a second command smuggled in after a `;` — an
-  empty parameter list does not do this, and a test holds the difference. It
-  runs inside `BEGIN READ ONLY` and is always rolled back. The connection it
-  used is destroyed afterwards rather than returned to the pool, because
-  prepared statements survive a rollback. There is no `ANALYZE`.
-- **Every rendered query is redacted.** `redactSecrets` runs on every query this
-  console displays, and on every audit record before it is written. This matters
-  more on the web than in a terminal: a screenshot needs a human to take it, a
-  URL forwards itself.
-- **Basic auth is the floor, not the answer.** `PGOPS_USERNAME` /
-  `PGOPS_PASSWORD` give you HTTP basic auth over every route that can read or
-  change a database. For anything real, put a reverse proxy in front — OAuth2
-  Proxy, ALB auth, IAP. That is what pgHero's own guide says, and it is what
-  this project's spec says too. Run it behind TLS; basic auth over plaintext is
-  a password in every request.
-
-pgops runs no DDL against a monitored database. Given `PGOPS_STORE_URL` it
-creates and migrates its own `pgops` schema in that store, and nowhere else —
-a source guard confines every DDL statement in the repo to
-`packages/checks/src/store/migrations/`. It does not install extensions or
-manage roles. Give its role the least privilege that works:
-`pg_read_all_stats` to see other sessions' queries, and `pg_signal_backend`
-only if you intend to use `kill`. Explain and suggested indexes also need
-`SELECT` on the tables they plan: Postgres checks it even for a plan that reads
-no rows. Grant it per table or schema, or `pg_read_all_data` for all of them;
-without it, each plan says which table it was refused. Without `pg_signal_backend` the console
-still reads everything; a kill returns the permission error Postgres gave, in
-the page, rather than a blank.
-
-## Requirements
-
-- **Postgres 14 or newer.** Tested against 14, 16, 17 and 18 in CI on every push.
-- `pg_stat_statements` for the Queries route. Everything else works without it,
-  and the route says what is missing rather than rendering empty.
-- A Postgres database for `PGOPS_STORE_URL` if you want history. It can be one
-  of the databases you monitor, but pgops will not pick one for you: without
-  that variable it writes nothing anywhere.
-- Docker, to build and run the image — there is no published one yet.
-
-## Development
-
-```sh
-npm install
-npm run db:up                      # throwaway Postgres on :55432, prints DATABASE_URL
-npm run db:seed                    # optional: manufacture a lock chain to look at
-export DATABASE_URL='postgres://postgres:secret@localhost:55432/appdb'
-export PGOPS_STORE_URL="$DATABASE_URL" # optional: enables history
-npm run --workspace @pgops/web dev     # http://localhost:3000
-npm run db:down                        # tear it down
-```
-
-`db:up` preloads `pg_stat_statements`, so the Queries route has something to
-show. See [scripts/dev-db.sh](scripts/dev-db.sh).
-
-The repo is two workspaces: `packages/checks`, a framework-free package holding
-every SQL check, the history store and the one code path that issues
-`pg_terminate_backend`; and `apps/web`, the Next.js console that renders them.
-The checks package knows nothing about React.
-[dba-playbook/](dba-playbook/) is neither: it is the hand-written SQL the
-checks were derived from, kept runnable so a finding can be reproduced in
-`psql` without trusting this tool. [docs/design/](docs/design/) holds the
-design documents each phase was built from, and
-[docs/postgres-for-pgops-deep-dive.pdf](docs/postgres-for-pgops-deep-dive.pdf)
-the Postgres internals the checks read.
-
-```sh
-npm test                                    # unit — checks, pure logic, source guards
-npm run test:web                            # the console's component and route tests
-npm run test:int                            # integration, against a real Postgres (Docker)
-npm run typecheck:test                      # types across packages/, including test files
-npm run --workspace @pgops/checks typecheck
-npm run --workspace @pgops/web typecheck
-```
+  parses each statement with a native `pg_query` binding and answers any join
+  with "JOIN not supported yet". pgops asks Postgres to plan the statement and
+  advises on every sequential scan the plan names, with no added dependency.
+  `tools/advice.ts`
+- **Explain has no `ANALYZE`** and no link to an external plan viewer. Its
+  error messages are allowlisted by SQLSTATE. `tools/explain.ts`
+- **Suggestions read live statistics**, so they work with no store; the page
+  names the window it read.
 
 ## What happened to the terminal UI
 
-pgops began as an Ink terminal program: a tab strip, keystrokes, an ASCII
-cockpit. **That UI was removed in v1.0.** The reasoning is in
-[the web console design](docs/design/2026-08-26-pgops-web-design.md) — an
-incident tool that can only be reached by ssh-ing to a box with the right
-`DATABASE_URL` in its environment is reachable by one person at a time,
-and the checks it ran deserved a surface the whole on-call rotation can open. The
-SQL, the thresholds, the redaction and the kill guard were not rewritten; they
-were lifted into `packages/checks` and are what the console runs today.
-
-There is no `pgops` binary, and one is no longer planned. The CLI this README
-once promised — `pgops check --format json`, plus a `pgops init` to create the
-history schema — was cut when the store landed: migrations run at boot and
-capture runs in-process behind an advisory lock, so the package would have
-existed only to wrap a function the server already calls. `captureOnce` takes a
-context and returns, so if a CLI is ever wanted it is a wrapper, not a rewrite.
-If you came here from the old README looking for `pgops locks`, it is the
-`/db/<name>/locks` route.
-
-Nothing was ever published to npm, so no installed version was taken away.
+pgops began as an Ink terminal program. It was removed in v1.0: an incident
+tool that can only be reached by ssh-ing to a box with the right
+`DATABASE_URL` is reachable by one person at a time, and the checks it ran
+deserved a surface the whole on-call rotation can open. The SQL, thresholds,
+redaction and kill guard were lifted into `packages/checks` and are what the
+console runs today. There is no `pgops` binary and none is planned; nothing
+was ever published to npm. The reasoning is in the
+[web console design](docs/design/2026-08-26-pgops-web-design.md).
 
 ## License
 

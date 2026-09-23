@@ -136,6 +136,6 @@ export const blocked: Check<BlockedRow, BlockedData> = {
     if (d.count === 0) return { level: 'ok' };
     const crit = t.find((x) => x.level === 'critical');
     const level = crit && (d.longestQueryAgeSecs ?? 0) >= crit.value ? 'critical' : 'warn';
-    return { level, note: `${d.count} session(s) blocked` };
+    return { level, note: `${d.count} session${d.count === 1 ? '' : 's'} blocked` };
   },
 };

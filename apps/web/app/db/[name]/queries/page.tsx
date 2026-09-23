@@ -3,13 +3,15 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { CHECKS, SERIES, slowQueries, SLOW_QUERY_DEFAULTS } from '@pgops/checks';
 import { runCheckFor, runSeriesFor } from '@/lib/check';
+import { LOAD_HOURS, queryLoadFor } from '@/lib/load';
+import { LineChart } from '@/components/line-chart';
 import { CheckPanel } from '@/components/check-panel';
 import { Badge } from '@/components/ui/badge';
 import { Refresh } from '@/components/refresh';
 import { ConfirmAction } from '@/components/confirm-action';
 import { actionsAllowed } from '@/lib/actions';
 import { Sql } from '@/components/sql';
-import { formatCount, formatMillis } from '@/lib/format';
+import { formatAgo, formatCount, formatMillis, plural } from '@/lib/format';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
 
@@ -104,6 +106,9 @@ export default async function Queries({
   // Spec §5.1: P3's only visible deliverable. One indexed lookup per render,
   // and it must stay that way — this is an INCIDENT page and it polls at 5s.
   const since = await lastIntervalByQueryid(name, result.ok ? result.data.rows : []);
+  // One indexed read of at most 288 rows — see lib/load.ts. Omitted with no
+  // store, exactly as the since-last-capture column is.
+  const load = await queryLoadFor(name);
   // Read after runCheckFor has already awaited connection(), so this page is
   // dynamic before the gate is read and the gate reflects the deployment
   // rather than being frozen at build time. Not hoisted to module scope; see
@@ -170,6 +175,8 @@ export default async function Queries({
         }}
       </CheckPanel>
 
+      <Load load={load} />
+
       <CheckPanel title="Query statistics" result={result}>
         {(d) => {
           // WHICH shapes the panel above is counting.
@@ -192,7 +199,7 @@ export default async function Queries({
           return (
           <>
             <p className="mb-2 text-sm text-muted-foreground">
-              {formatCount(d.totalShapes)} statement shape(s)
+              {plural(d.totalShapes, 'statement shape')}
               {/* `?sort=` is reachable with no control on the page for it, so an
                   operator who lands on a non-default URL has no other way to
                   tell which ordering produced these rows — except on an EMPTY
@@ -204,7 +211,7 @@ export default async function Queries({
                   keeps that fallback unobserved, rather than asserting an
                   ordering that never happened. */}
               {d.rows.length > 0 ? ` · sorted by ${d.sort}` : ''}
-              {d.statsResetAt ? ` · stats reset ${d.statsResetAt}` : ''}
+              {d.statsResetAt ? ` · stats reset ${formatAgo(d.statsResetAt)}` : ''}
               {/* There is no `truncated` flag on QueryStatsData: totalShapes is
                   every shape visible to this role BEFORE the LIMIT, so a short
                   rows array against a larger totalShapes IS the truncation. */}
@@ -301,6 +308,67 @@ export default async function Queries({
         }}
       </CheckPanel>
     </>
+  );
+}
+
+/**
+ * How busy this database has been for a day, in one line.
+ *
+ * THE ONE THING ON THIS PAGE THAT IS NOT ABOUT A SHAPE. Every other number
+ * here ranks statements against each other, which answers "what is worst" and
+ * not "is this unusual" — and during an incident the second question is the
+ * one that decides whether the ranking matters at all. A shape at the top of
+ * the table is either the reason the database is busy or simply the busiest
+ * thing on an ordinary Tuesday, and the chart is what tells the two apart.
+ *
+ * TWO LINES, BECAUSE ONE CANNOT ANSWER THE QUESTION. Execution time alone
+ * rises for two unrelated reasons — the database got slower, or it got more
+ * traffic — and those have opposite fixes. Read beside calls the pair is
+ * unambiguous: time up with calls flat is work that got slower, both up is
+ * load that arrived, and time up with calls DOWN is the worst of the three,
+ * because it means each remaining statement is taking longer while clients
+ * are already giving up. `query_load` has stored `calls` since migration 004
+ * and `StoredLoad` has always carried it; only the second chart was missing.
+ *
+ * Silent when there is no store, like the since-last-capture column, and
+ * silent when the store is broken because the sentence above the table
+ * already says so — see lib/load.ts.
+ */
+function Load({ load }: { load: Awaited<ReturnType<typeof queryLoadFor>> }) {
+  if (!load.ok) return null;
+  if (load.points.length < 2) {
+    return (
+      <p className="mb-3 text-sm text-muted-foreground">
+        Not enough history for a load chart yet — it needs two captures, five
+        minutes apart.
+      </p>
+    );
+  }
+  // Side by side, and on the same window, so the two lines can be compared
+  // at a glance rather than by scrolling between them — which is the whole
+  // reason the second one is here.
+  return (
+    <div className="mb-3 grid gap-x-8 gap-y-4 lg:grid-cols-2">
+      <div>
+        {/* No box: a box means look here (check-panel.tsx), and this is a
+            reading. A hairline under the title, like every other section that
+            reports rather than warns. */}
+        <h2 className="mb-2 border-b pb-2 font-medium">Execution time per capture interval</h2>
+        <LineChart
+          points={load.points.map((p) => ({ at: p.capturedAt, value: p.totalExecTime }))}
+          label={`total execution time across every statement, over ${LOAD_HOURS} hours`}
+          format={formatMillis}
+        />
+      </div>
+      <div>
+        <h2 className="mb-2 border-b pb-2 font-medium">Calls per capture interval</h2>
+        <LineChart
+          points={load.points.map((p) => ({ at: p.capturedAt, value: p.calls }))}
+          label={`calls across every statement, over ${LOAD_HOURS} hours`}
+          format={formatCount}
+        />
+      </div>
+    </div>
   );
 }
 

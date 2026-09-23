@@ -141,3 +141,89 @@ describe('CheckPanel guidance', () => {
     expect(r.text()).toContain('OK');
   });
 });
+
+/**
+ * A box means look here.
+ *
+ * Compact halved the space a healthy check took and left it wearing the same
+ * bordered card as an incident, so a triage page with nothing wrong was still
+ * nine outlined boxes — furniture at the weight of a signal. The border is
+ * now the third thing, after the accent bar and the badge, that says the same
+ * one word.
+ *
+ * Asserted on the CLASS, which this suite otherwise avoids — every other test
+ * here reads text and roles. There is no other way to see it: the rule is
+ * entirely visual, it is the whole content of this phase, and "renders a
+ * border" is not something a screen reader or a text assertion can observe.
+ */
+describe('a box means look here', () => {
+  const box = (el: Element | null) => el!.className.includes('border') && !el!.className.includes('border-b');
+
+  const panel = async (
+    result: Parameters<typeof CheckPanel<{ n: number }>>[0]['result'],
+    compact = false,
+  ) => {
+    const r = await render(
+      <CheckPanel title="Replication slots" result={result} compact={compact}>
+        {(d) => <span>{d.n} slots</span>}
+      </CheckPanel>,
+    );
+    return r;
+  };
+
+  const ok = { ok: true as const, data: { n: 0 }, verdict: { level: 'ok' as const }, measuredAt: 0 };
+  const warn = { ...ok, verdict: { level: 'warn' as const, note: '3 inactive' } };
+  const critical = { ...ok, verdict: { level: 'critical' as const, note: '3 inactive' } };
+  const reading = { ...ok, verdict: null };
+  const broken = {
+    ok: false as const, reason: 'privilege' as const, message: 'permission denied',
+  };
+
+  it('draws no card around a healthy check', async () => {
+    const r = await panel(ok);
+    expect(box(r.container.querySelector('section'))).toBe(false);
+    // Still says OK, in words. This is a change of weight, not of content.
+    expect(r.text()).toContain('OK');
+    expect(r.text()).toContain('0 slots');
+  });
+
+  it('draws no card around a check with no verdict either', async () => {
+    const r = await panel(reading);
+    expect(box(r.container.querySelector('section'))).toBe(false);
+  });
+
+  it.each([['warn', warn], ['critical', critical]] as const)(
+    'draws a card, an accent bar and a tint at %s',
+    async (level, result) => {
+      const r = await panel(result);
+      const section = r.container.querySelector('section')!;
+      expect(box(section)).toBe(true);
+      expect(section.className).toContain('border-l-4');
+      expect(section.className).toContain(
+        level === 'critical' ? 'bg-critical-surface' : 'bg-warning-surface');
+    },
+  );
+
+  /**
+   * "We could not look" keeps its box. It is not a quiet state — it is the
+   * one this console exists to hold apart from "we looked and it is fine" —
+   * but it gets NO tint and NO bar, because gray is what the absence of a
+   * verdict looks like here and a failed check has no level to colour with.
+   */
+  it('keeps the card for a check that could not run, without colouring it', async () => {
+    const r = await panel(broken);
+    const section = r.container.querySelector('section')!;
+    expect(box(section)).toBe(true);
+    expect(section.className).not.toContain('border-l-4');
+    expect(section.className).not.toContain('surface');
+  });
+
+  it('applies the same rule to a compact panel', async () => {
+    const healthy = await panel(ok, true);
+    expect(box(healthy.container.firstElementChild)).toBe(false);
+
+    const loud = await panel(critical, true);
+    expect(box(loud.container.firstElementChild)).toBe(true);
+    expect(loud.container.firstElementChild!.className).toContain('bg-critical-surface');
+  });
+});

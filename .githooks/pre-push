@@ -1,0 +1,35 @@
+#!/bin/sh
+# What the `integration` and `image` CI jobs used to run. These need Docker and
+# take about fifteen minutes, so they run on the push, not on every commit.
+#
+# TWO THINGS THE WORKFLOW DID THAT THIS CANNOT:
+#
+# 1. Linux. These hooks run on the developer's machine, and the last bug this
+#    repo shipped to CI was invisible on macOS: `npm run` interposes sh between
+#    the harness and `next`, and on Linux a SIGTERM to npm orphans the server
+#    still holding the port, so every later test silently ran against it. macOS
+#    sh execs its last command, so the orphan never appeared. Every leg failed
+#    in CI; every leg passed locally. Nothing below would have caught it.
+# 2. The 14/16/17/18 matrix in parallel. Here the versions run one after
+#    another, so the default is the single version below. Run the real matrix
+#    before anything you would have let CI gate:
+#
+#      PGOPS_HOOK_PG_VERSIONS='14 16 17 18' git push
+#
+# `git push --no-verify` skips this hook.
+set -e
+
+versions=${PGOPS_HOOK_PG_VERSIONS:-17}
+
+for v in $versions; do
+  echo "pre-push: integration tests against Postgres $v"
+  PGOPS_TEST_PG_VERSION="$v" npm run test:int
+done
+
+# The source-level half of this rule is apps/web/test/guards.test.ts (every
+# page is dynamic, nothing opts back into static rendering); this is the half
+# that builds an actual image on a machine with the wrong DATABASE_URL and runs
+# it with the right one. Neither substitutes for the other: the guard cannot
+# see a build, and a build cannot see an import.
+echo "pre-push: image smoke test"
+./scripts/image-smoke.sh

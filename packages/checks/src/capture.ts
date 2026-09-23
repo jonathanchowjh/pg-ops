@@ -1,11 +1,17 @@
 import { redactSecrets } from './redact.js';
 import { guardClient, messageOf } from './run.js';
+import { HYGIENE_CHECK_IDS } from './checks/areas.js';
+import { CHECKS } from './registry.js';
+import { runCheck } from './run.js';
+import { deltas, type CounterPoint } from './series/query-stats.js';
 import { releaseCaptureLock, tryCaptureLock } from './store/lock.js';
+import { readLastSnapshot } from './store/read.js';
 import {
-  RETENTION, insertQueryStats, insertSpaceStats, prune, upsertDatabase, upsertQueries,
-  type QueryStatsSnapshot, type Retention, type SpaceSnapshot,
+  RETENTION, insertQueryLoad, insertQueryStats, insertSpaceStats, prune, recordCheckResults,
+  upsertDatabase, upsertQueries,
+  type QueryStatsSnapshot, type Retention, type SpaceSnapshot, type StoredCheckWrite,
 } from './store/write.js';
-import type { CheckContext, FailureReason } from './types.js';
+import type { Check, CheckContext, CheckResult, FailureReason } from './types.js';
 
 export type CaptureOutcome =
   /**
@@ -238,6 +244,13 @@ export async function captureOnce(
       }
       await insertQueryStats(client, stats);
 
+      // The whole database's work in THIS interval, differenced here rather
+      // than at read time — see migration 004 for the arithmetic that would
+      // otherwise land on a page polling every five seconds. The previous
+      // snapshot is read on the client this transaction already holds.
+      const load = queryLoadRow(stats, await readLastSnapshot(client, dbId, capturedAt));
+      if (load !== null) await insertQueryLoad(client, dbId, capturedAt, load);
+
       // `size_bytes === null` means the relation was dropped between the
       // pg_class scan and the size call. Skipped, never stored: `Number(null)`
       // is 0, and a 0-byte snapshot reads on a space chart as the table
@@ -285,3 +298,232 @@ interface QueryRow {
 }
 /** `size_bytes` is NULL for a relation dropped mid-scan — see SPACE_SQL. */
 interface SpaceRow { relation: string; size_bytes: string | null }
+
+
+/**
+ * Sum one interval's work across every shape, or report that there was no
+ * interval to measure.
+ *
+ * `deltas` is called per shape rather than reimplemented, which is the whole
+ * point: the discontinuity rule (series/query-stats.ts) is one rule with one
+ * set of tests, and a second copy of it here would drift. A shape whose
+ * interval spans a `pg_stat_statements_reset()` or an LRU eviction yields no
+ * interval and contributes NOTHING — not a clamped zero, which would read on
+ * the chart as a quiet five minutes rather than as a gap.
+ *
+ * `null` when no shape contributed: the first capture of a database, a
+ * database whose pg_stat_statements is unavailable, and a cluster-wide reset
+ * all reach it. No row is written, so the chart draws a gap there. A zero row
+ * would be the "we could not look" / "we looked and it was idle" conflation
+ * this project holds a line against everywhere else.
+ *
+ * Exported for its own unit test — it is the one piece of capture that is
+ * pure arithmetic, and the reset case is awkward to stage against a live
+ * database.
+ */
+export function queryLoadRow(
+  snapshots: readonly QueryStatsSnapshot[],
+  previous: ReadonlyMap<number, CounterPoint>,
+): { totalExecTime: number; calls: number } | null {
+  let totalExecTime = 0;
+  let calls = 0;
+  let measured = 0;
+  for (const s of snapshots) {
+    const prev = previous.get(s.queryId);
+    // Absent means pgops had not seen this shape at the previous capture.
+    // Its counter is cumulative since ITS first sighting, so there is no
+    // interval here, only a total of unknown age.
+    if (prev === undefined) continue;
+    const [interval] = deltas([prev, counterPoint(s)]);
+    if (interval === undefined) continue;
+    totalExecTime += interval.totalExecTime;
+    calls += interval.calls;
+    measured += 1;
+  }
+  return measured === 0 ? null : { totalExecTime, calls };
+}
+
+/** A snapshot as the series code sees it. Same fields, different shape. */
+function counterPoint(s: QueryStatsSnapshot): CounterPoint {
+  return {
+    capturedAt: s.capturedAt,
+    calls: s.calls,
+    totalExecTime: s.totalExecTime,
+    rows: s.rows,
+    sharedBlksHit: s.sharedBlksHit,
+    sharedBlksRead: s.sharedBlksRead,
+    statsReset: s.statsReset,
+  };
+}
+
+/**
+ * One check's result, flattened for the cache.
+ *
+ * Exported for its own unit test: the failure branch is the one that matters
+ * and it is awkward to provoke against a live database. A check that could
+ * not run is STORED, carrying its message and no level — "we could not look"
+ * is a reading the triage line has to show. Were it skipped, the previous
+ * pass's verdict would sit in the cache going stale while reading as current.
+ *
+ * A check that ran and reached no verdict stores `level: null`, not `ok`:
+ * 15 of the 21 hygiene checks report a reading and never judge, and this
+ * project holds "we do not judge" distinct from "we judged and it is fine"
+ * everywhere else (spec 2026-09-03 §1.1).
+ */
+export function checkResultRow(checkId: string, result: CheckResult<unknown>): StoredCheckWrite {
+  if (!result.ok) {
+    return { checkId, ok: false, level: null, note: null, message: result.message };
+  }
+  return {
+    checkId,
+    ok: true,
+    level: result.verdict?.level ?? null,
+    note: result.verdict?.note ?? null,
+    message: null,
+  };
+}
+
+export type HygieneOutcome =
+  | { ok: true; checks: number; failed: number }
+  | { ok: false; reason: FailureReason; message: string }
+  | { ok: 'skipped'; reason: 'locked' };
+
+/**
+ * Run every `class: 'hygiene'` check against one database and cache what it
+ * found, so the triage page can report a finding nobody opened a page for.
+ *
+ * SEPARATE FROM `captureOnce`, AND AFTER IT. That function holds one store
+ * client across two scans of the monitored database, every insert and the
+ * prune, in a single transaction, so that retention cannot drift from
+ * capture. These are 21 catalog scans, each allowed ten seconds by its own
+ * `timeoutMs`; run inside that transaction they would hold the store's write
+ * path open for minutes at a time. The scans here need no transaction at all
+ * — they are independent reads — and only the write at the end does.
+ *
+ * SEQUENTIAL, for the same reason the scheduler iterates databases in series:
+ * a diagnostic tool must never be the reason a database runs out of
+ * connections. Twenty-one scans at up to ten seconds each is bounded well
+ * inside the five-minute interval, and the tick that follows is skipped
+ * rather than queued if it is not.
+ *
+ * NEVER throws, same contract as `captureOnce` and for the same reason: it
+ * runs on a background timer, where an unhandled rejection takes the web
+ * process down.
+ */
+export async function captureHygiene(
+  ctx: CheckContext,
+  name: string,
+): Promise<HygieneOutcome> {
+  if (!ctx.store) {
+    return {
+      ok: false,
+      reason: 'missing-store',
+      message: 'No store configured; set PGOPS_STORE_URL to record hygiene findings.',
+    };
+  }
+  const store = ctx.store;
+  let client;
+  let release;
+  try {
+    client = await store.connect();
+    // See captureOnce: a checked-out client with no 'error' listener turns a
+    // store failover into a fatal unhandled event rather than a failed pass.
+    release = guardClient(client);
+  } catch (err) {
+    return { ok: false, reason: 'unreachable', message: messageOf(err) };
+  }
+
+  let databaseId: number | null = null;
+  let locked = false;
+  try {
+    databaseId = await upsertDatabase(client, name);
+    if (!(await tryCaptureLock(client, databaseId))) {
+      // Another replica is already scanning this database. Skip, never queue.
+      return { ok: 'skipped', reason: 'locked' };
+    }
+    locked = true;
+
+    const rows: StoredCheckWrite[] = [];
+    for (const id of HYGIENE_CHECK_IDS) {
+      // The cast is the price of iterating a heterogeneous registry: every
+      // hygiene check takes either no options or an options object whose
+      // every field is optional, so `{}` is the canonical input — and it is
+      // the same input every hygiene PAGE passes, which is what makes the
+      // cached result the page's own result rather than a second opinion.
+      const check = CHECKS[id as keyof typeof CHECKS] as unknown as Check<unknown, unknown, unknown>;
+      // runCheck never rejects: a timeout, a missing privilege and a dropped
+      // relation all come back as `ok: false` and are cached as such.
+      rows.push(checkResultRow(id, await runCheck(ctx, check, {})));
+    }
+
+    await writeCheckPass(client, databaseId, rows);
+    return { ok: true, checks: rows.length, failed: rows.filter((r) => !r.ok).length };
+  } catch (err) {
+    return { ok: false, reason: 'error', message: messageOf(err) };
+  } finally {
+    if (locked && databaseId !== null) await releaseCaptureLock(client, databaseId);
+    release();
+  }
+}
+
+
+/**
+ * Stamp one pass with the STORE's clock and write it.
+ *
+ * The timestamp comes from the store rather than from `new Date()` here, for
+ * the reason `captureOnce` gives at length: several replicas may write the
+ * same database, and under clock skew a process-side timestamp makes "how
+ * old is this reading" wrong on the page that renders it — which, for these
+ * rows, is the whole content of the line.
+ */
+async function writeCheckPass(
+  client: import('pg').PoolClient,
+  databaseId: number,
+  rows: readonly StoredCheckWrite[],
+): Promise<void> {
+  const { rows: at } = await client.query<{ now: Date }>('SELECT now() AS now');
+  await recordCheckResults(client, databaseId, at[0]!.now, rows);
+}
+
+/**
+ * Cache the results a PAGE just computed.
+ *
+ * The hygiene pages run their checks on visit, as they always have. This
+ * writes what they found into the same cache the capture tick fills, so the
+ * triage line and the page agree the moment anyone has looked — rather than
+ * the line reporting a five-minute-old finding the page has just disproved.
+ *
+ * No advisory lock, deliberately. The lock in `captureHygiene` exists to stop
+ * two replicas SCANNING the same database at once; the scan here has already
+ * happened, and what is left is one upsert whose conflict resolution is
+ * last-write-wins by design.
+ *
+ * Never throws: a page must render its checks even when the store is
+ * unreachable. The caller gets `false` and shows nothing about it — a failed
+ * cache write is not a finding about the database, and the triage line
+ * already reports its own staleness.
+ */
+export async function cacheCheckPass(
+  store: import('pg').Pool,
+  name: string,
+  rows: readonly StoredCheckWrite[],
+): Promise<boolean> {
+  if (rows.length === 0) return true;
+  let client;
+  let release;
+  try {
+    client = await store.connect();
+    release = guardClient(client);
+  } catch {
+    return false;
+  }
+  try {
+    const databaseId = await upsertDatabase(client, name);
+    await writeCheckPass(client, databaseId, rows);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    release();
+  }
+}

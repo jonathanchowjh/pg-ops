@@ -48,10 +48,17 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-type Page = (props: { params: Promise<{ name: string }> }) => Promise<React.ReactElement>;
+type Page = (props: {
+  params: Promise<{ name: string }>;
+  searchParams: Promise<{ pgops?: string }>;
+}) => Promise<React.ReactElement>;
 
-const show = async (page: Page) => {
-  const element = await page({ params: Promise.resolve({ name: 'prod' }) });
+/** `query` is the URL's search parameters — `{ pgops: 'show' }` unfolds. */
+const show = async (page: Page, query: { pgops?: string } = {}) => {
+  const element = await page({
+    params: Promise.resolve({ name: 'prod' }),
+    searchParams: Promise.resolve(query),
+  });
   rendered = await render(element);
   return rendered;
 };
@@ -154,8 +161,13 @@ describe('/cleanup/space', () => {
   /**
    * One capture is not a trend. growthBytes is arithmetically 0 and rendering
    * "0 B" would claim a week of flatness from a single reading.
+   *
+   * Said ONCE, above the list, with the number that explains it — not once
+   * per row. A thirty-relation database printed "not enough history" thirty
+   * times, so the page's most repeated words explained an absence rather than
+   * describing the database.
    */
-  it('says so when a relation has only one capture, rather than claiming no growth', async () => {
+  it('says so once above the list when there is only one capture', async () => {
     overrides.set('relationSizes', ok({
       relations: [{ name: 'public.events', type: 'table', sizeBytes: 500 }],
       total: 1, truncated: false,
@@ -171,7 +183,11 @@ describe('/cleanup/space', () => {
 
     const r = await show(Space);
 
-    expect(r.text()).toContain('not enough history');
+    const text = r.text();
+    expect(text).toContain('one capture so far');
+    // Once, not once per row — and the row itself carries a dash.
+    expect(text.match(/one capture so far/g)).toHaveLength(1);
+    expect(text).not.toContain('not enough history');
   });
 
   /**

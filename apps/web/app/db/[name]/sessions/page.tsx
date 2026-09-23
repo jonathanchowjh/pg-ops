@@ -4,6 +4,7 @@ import { CHECKS } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
 import { APP_NAME } from '@/lib/config';
 import { actionsAllowed } from '@/lib/actions';
+import { foldFrom } from '@/lib/fold';
 import { CheckPanel } from '@/components/check-panel';
 import { KillButton } from '@/components/kill-button';
 import { ConfirmAction } from '@/components/confirm-action';
@@ -30,7 +31,11 @@ export default async function Sessions({
 }) {
   const { name } = await params;
   const { limit, pgops } = await searchParams;
-  const showPgops = pgops === 'show';
+  // The same fold the hygiene lists use, on a different subject: there it is
+  // pgops's own relations, here its own connections. The rule that the state
+  // lives in the URL and that every other parameter travels with it is
+  // shared — see lib/fold.ts.
+  const fold = foldFrom(`/db/${name}/sessions`, { limit, pgops });
   const parsed = Number(limit);
   // Promise.all, not two sequential awaits: this is the one page whose
   // entire subject is the live connection picture, and two serialized round
@@ -79,11 +84,10 @@ export default async function Sessions({
           // always stated; only the rows are behind a link.
           const mine = d.sessions.filter((s) => s.app === APP_NAME || s.app === `${APP_NAME}-store`);
           const theirs = d.sessions.filter((s) => !(s.app === APP_NAME || s.app === `${APP_NAME}-store`));
-          const shown = showPgops ? d.sessions : theirs;
+          const shown = fold.show ? d.sessions : theirs;
           // `limit` is carried through so toggling the fold does not silently
-          // reset a limit the operator set in the URL.
-          const href = { pathname: `/db/${name}/sessions`, query: {
-            ...(limit ? { limit } : {}), ...(showPgops ? {} : { pgops: 'show' }) } };
+          // reset a limit the operator set in the URL — foldFrom's rule.
+          const href = fold.href;
           return (
           <>
             {d.truncated ? (
@@ -150,19 +154,10 @@ export default async function Sessions({
                           one that was never set. The Source column beside it
                           already used `||` for exactly this. */}
                       <TableCell>{s.app || '—'}</TableCell>
-                      {/* No `truncate` here. It sets overflow-hidden + ellipsis
-                          on the cell while <Sql> sets overflow-x-auto on the
-                          <code> inside it — two competing overflow contexts, so
-                          the query scrolled inside a box that also clipped it
-                          and the ellipsis never appeared. The cap stays; the
-                          child does the scrolling, which is the one of the two
-                          behaviours that can still reveal the whole query. */}
-                      {/* Widened with the shell. The cap is what forced each
-                          query into its OWN horizontal scrollbar — a table of
-                          twenty independently-scrolling cells, when the table
-                          itself already scrolls as one piece (ui/table.tsx sets
-                          overflow-x-auto). It stays capped so one long statement
-                          cannot push the action column off the right. */}
+                      {/* No `truncate` here, and none needed: <Sql> clamps to
+                          two lines itself. The cap stays so that one long
+                          statement cannot push the Terminate column off the
+                          right of the table. */}
                       <TableCell className="max-w-2xl"><Sql>{s.query}</Sql></TableCell>
                       {canAct ? (
                         // `relative` is the anchor for KillButton's confirm
@@ -180,11 +175,11 @@ export default async function Sessions({
             )}
             {shown.length > 0 && mine.length > 0 ? (
               <p className="mt-3 text-sm text-muted-foreground">
-                {showPgops
+                {fold.show
                   ? `Including ${formatCount(mine.length)} of pgops's own connections. `
                   : `${formatCount(mine.length)} of pgops's own connections hidden. `}
                 <Link href={href} className="underline underline-offset-4">
-                  {showPgops ? 'hide them' : 'show them'}
+                  {fold.show ? 'hide them' : 'show them'}
                 </Link>
               </p>
             ) : null}

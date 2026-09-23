@@ -448,6 +448,34 @@ describe('the poll boundary', () => {
    * here, and a silent one: it renders identically and simply multiplies the
    * console's own load by the number of databases configured.
    */
+  /**
+   * The triage page gained hygiene lines, and this is what keeps them cheap.
+   *
+   * It polls every five seconds. The checks behind those lines are catalog
+   * scans allowed ten seconds each — `table_sizes` alone touches every
+   * relation — so the page must read the CACHE the capture tick wrote and
+   * never run one itself. The failure this prevents is invisible in a
+   * screenshot: the page looks identical either way, and the only evidence
+   * is the load arriving at the database this console promises not to
+   * burden.
+   *
+   * Asserted on the page's own source rather than a module graph: the page
+   * reaches its data through exactly two seams, `runCheckFor` for the live
+   * checks and `hygieneFor` for the cache, and a hygiene check could only
+   * get onto it by being named here.
+   */
+  it('reads hygiene from the cache on the polled page, never by running a check', () => {
+    const triage = strip(readFileSync(join(APP, 'db', '[name]', 'page.tsx'), 'utf8'));
+    const hygieneIds = Object.values(CHECKS)
+      .filter((c) => c.class === 'hygiene')
+      .map((c) => c.id);
+
+    for (const id of hygieneIds) {
+      expect(triage).not.toMatch(new RegExp(`CHECKS\\.${id}\\b`));
+    }
+    expect(triage).toMatch(/hygieneFor\(/);
+  });
+
   it('polls the overview strictly slower than an incident page', () => {
     const interval = (file: string): number => {
       const m = /<Refresh\s+intervalMs=\{([0-9_]+)\}/.exec(strip(readFileSync(file, 'utf8')));

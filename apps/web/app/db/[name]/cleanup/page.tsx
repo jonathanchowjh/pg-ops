@@ -5,6 +5,7 @@ import { CheckPanel } from '@/components/check-panel';
 import { Refresh } from '@/components/refresh';
 import { SettingsDisclosure } from '@/components/status-bar';
 import { formatBytes, formatCount, formatDuration } from '@/lib/format';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 
 export async function generateMetadata({
   params,
@@ -60,17 +61,33 @@ export default async function Cleanup({
         {(d) => {
           const worst = d.worst[0];
           if (!worst) return <p className="text-sm text-muted-foreground">No databases reporting.</p>;
+          // A TABLE, not a key-value list. Two numbers joined by a middle
+          // dot in one right-aligned run cannot be compared down a column,
+          // which is the only question this panel is asked: which database is
+          // closest to the horizon. Same conversion as the Maintenance page.
           return (
-            <ul className="text-sm">
-              {d.worst.map((w) => (
-                <li key={w.database} className="flex justify-between gap-4 py-0.5">
-                  <span className="font-medium">{w.database}</span>
-                  <span className="text-muted-foreground">
-                    {formatCount(w.txnsUntilShutdown)} txns left · {w.pctToForcedVacuum}% of horizon
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>database</TableHead>
+                  <TableHead className="text-right">txns left</TableHead>
+                  <TableHead className="text-right">of horizon</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {d.worst.map((w) => (
+                  <TableRow key={w.database}>
+                    <TableCell className="font-medium">{w.database}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatCount(w.txnsUntilShutdown)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {w.pctToForcedVacuum}%
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           );
         }}
       </CheckPanel>
@@ -110,18 +127,33 @@ export default async function Cleanup({
             return <p className="text-sm text-muted-foreground">None configured.</p>;
           }
           return (
-            <ul className="text-sm">
-              {d.slots.map((s) => (
-                <li key={s.name} className="flex justify-between gap-4 py-0.5">
-                  <span className="font-medium">{s.name}</span>
-                  <span className="text-muted-foreground">
-                    {s.active ? 'active' : 'INACTIVE'}
-                    {' · '}{s.slotType}
-                    {s.retainedBytes === null ? '' : ` · ${formatBytes(s.retainedBytes)} retained`}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>slot</TableHead>
+                  <TableHead>state</TableHead>
+                  <TableHead>type</TableHead>
+                  <TableHead className="text-right">retained</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {d.slots.map((s) => (
+                  <TableRow key={s.name}>
+                    <TableCell className="font-mono font-medium">{s.name}</TableCell>
+                    {/* INACTIVE stays shouted. An inactive slot is the one
+                        that pins WAL forever, and it is the whole reason this
+                        panel exists. */}
+                    <TableCell>{s.active ? 'active' : 'INACTIVE'}</TableCell>
+                    <TableCell>{s.slotType}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {s.retainedBytes === null
+                        ? <span className="text-muted-foreground">—</span>
+                        : formatBytes(s.retainedBytes)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           );
         }}
       </CheckPanel>

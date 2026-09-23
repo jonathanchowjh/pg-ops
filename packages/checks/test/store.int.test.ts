@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { CURRENT_VERSION, migrate } from '../src/store/schema.js';
 import { withAdvisoryLock } from '../src/store/lock.js';
 import {
-  RETENTION, insertQueryStats, insertSpaceStats, prune, upsertDatabase, upsertQueries,
+  RETENTION, insertQueryStats, insertSpaceStats, prune, recordCheckResults, upsertDatabase,
+  upsertQueries,
 } from '../src/store/write.js';
-import { readQueryStats, readRelationSpace, readSpaceGrowth } from '../src/store/read.js';
+import {
+  readCheckResults, readQueryStats, readRelationSpace, readSpaceGrowth,
+} from '../src/store/read.js';
 import { withPostgres } from './harness.js';
 
 /**
@@ -43,8 +46,12 @@ describe('migrate', () => {
         `SELECT table_name FROM information_schema.tables
           WHERE table_schema = 'pgops' ORDER BY table_name`,
       );
+      // Spelt out rather than derived, deliberately: this is the inventory a
+      // migration is supposed to change, so it should be edited by whoever
+      // changes it and read by whoever reviews that.
       expect(rows.map((r) => r.table_name)).toEqual([
-        'databases', 'queries', 'query_stats', 'schema_version', 'space_stats',
+        'check_results', 'databases', 'queries', 'query_load', 'query_stats',
+        'schema_version', 'space_stats',
       ]);
     });
   });
@@ -504,6 +511,96 @@ describe('readRelationSpace', () => {
         new Date(base), new Date(base + 10 * 60_000), { maxPoints: 3 });
 
       expect(points.map((p) => p.sizeBytes)).toEqual([7, 8, 9]);
+    });
+  });
+});
+
+/**
+ * The hygiene cache: one row per check per database, overwritten each pass.
+ *
+ * Unlike query_stats and space_stats this keeps NO history — nothing reads a
+ * hygiene finding from last Tuesday, and 21 checks at a five-minute cadence
+ * would be 85,000 rows a fortnight for a table whose only question is "what
+ * did the last pass find". So the primary key carries no timestamp and every
+ * write is an upsert, which is what these pin.
+ */
+describe('the hygiene cache', () => {
+  const at = (iso: string) => new Date(iso);
+
+  it('keeps one row per check and lets the newest pass win', async () => {
+    await withStore(async (client) => {
+      const dbId = await upsertDatabase(client, 'prod');
+      await recordCheckResults(client, dbId, at('2026-09-23T10:00:00Z'), [
+        { checkId: 'unusedIndexes', ok: true, level: 'warn', note: '2 unused', message: null },
+        { checkId: 'sequences', ok: true, level: 'ok', note: null, message: null },
+      ]);
+      await recordCheckResults(client, dbId, at('2026-09-23T10:05:00Z'), [
+        { checkId: 'unusedIndexes', ok: true, level: 'ok', note: null, message: null },
+      ]);
+
+      const rows = await readCheckResults(client, 'prod');
+      expect(rows).toHaveLength(2);
+      const unused = rows.find((r) => r.checkId === 'unusedIndexes')!;
+      expect(unused.level).toBe('ok');
+      expect(unused.note).toBeNull();
+      expect(unused.capturedAt).toEqual(at('2026-09-23T10:05:00Z'));
+      // Untouched by the second pass, and still readable at its own age.
+      expect(rows.find((r) => r.checkId === 'sequences')!.capturedAt)
+        .toEqual(at('2026-09-23T10:00:00Z'));
+    });
+  });
+
+  /**
+   * "We could not look" is a reading the triage line has to show, so a check
+   * that FAILED is stored rather than skipped. Were it skipped, the previous
+   * pass's verdict would sit there going stale while reading as current.
+   */
+  it('stores a check that could not run, with its message', async () => {
+    await withStore(async (client) => {
+      const dbId = await upsertDatabase(client, 'prod');
+      await recordCheckResults(client, dbId, at('2026-09-23T10:00:00Z'), [
+        { checkId: 'indexHitRate', ok: true, level: 'ok', note: null, message: null },
+      ]);
+      await recordCheckResults(client, dbId, at('2026-09-23T10:05:00Z'), [
+        {
+          checkId: 'indexHitRate', ok: false, level: null, note: null,
+          message: 'permission denied for view pg_statio_user_indexes',
+        },
+      ]);
+
+      const [row] = await readCheckResults(client, 'prod');
+      expect(row).toMatchObject({ ok: false, level: null, message: 'permission denied for view pg_statio_user_indexes' });
+    });
+  });
+
+  it('reads only the database it was asked about', async () => {
+    await withStore(async (client) => {
+      const prod = await upsertDatabase(client, 'prod');
+      const staging = await upsertDatabase(client, 'staging');
+      await recordCheckResults(client, prod, at('2026-09-23T10:00:00Z'), [
+        { checkId: 'sequences', ok: true, level: 'critical', note: '1 sequence past 90%', message: null },
+      ]);
+      await recordCheckResults(client, staging, at('2026-09-23T10:00:00Z'), [
+        { checkId: 'sequences', ok: true, level: 'ok', note: null, message: null },
+      ]);
+
+      expect((await readCheckResults(client, 'prod'))[0]!.level).toBe('critical');
+      expect((await readCheckResults(client, 'staging'))[0]!.level).toBe('ok');
+    });
+  });
+
+  it('is empty, not an error, for a database that has never been captured', async () => {
+    await withStore(async (client) => {
+      expect(await readCheckResults(client, 'never-seen')).toEqual([]);
+    });
+  });
+
+  /** An empty pass writes nothing rather than issuing a VALUES with no rows. */
+  it('accepts an empty pass', async () => {
+    await withStore(async (client) => {
+      const dbId = await upsertDatabase(client, 'prod');
+      await expect(recordCheckResults(client, dbId, at('2026-09-23T10:00:00Z'), []))
+        .resolves.toBeUndefined();
     });
   });
 });

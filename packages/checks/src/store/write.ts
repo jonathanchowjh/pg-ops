@@ -96,6 +96,20 @@ export async function upsertQueries(
 }
 
 /**
+ * One check's outcome, flattened for storage. `level` and `note` come from
+ * the check's `Verdict` and are null for the 15 hygiene checks that report a
+ * reading without judging it; `message` is the failure text and is null
+ * whenever `ok` is true.
+ */
+export interface StoredCheckWrite {
+  checkId: string;
+  ok: boolean;
+  level: string | null;
+  note: string | null;
+  message: string | null;
+}
+
+/**
  * Multi-row INSERTs rather than one per shape: a 5,000-shape database would
  * otherwise issue 5,000 round trips every five minutes against a database
  * pgops is supposed to be leaving alone.
@@ -163,18 +177,94 @@ async function insertSpaceStatsChunk(
 }
 
 /**
+ * One hygiene pass's results for one database, upserted.
+ *
+ * `capturedAt` is passed in rather than taken here so every row of one pass
+ * carries the same instant, and so that instant comes from the STORE's clock
+ * — the same rule `captureOnce` follows for snapshots, and for the same
+ * reason: several replicas may capture the same database, and a process-side
+ * timestamp under clock skew would make "how old is this reading" wrong on
+ * the page that renders it.
+ *
+ * A failed check is written like any other, carrying `ok: false` and its
+ * message. Skipping it would leave the previous pass's verdict in place,
+ * reading as current.
+ *
+ * One statement, values flattened into `$n` placeholders — the same shape as
+ * the inserts above, and for the same reason: never interpolated. The row
+ * count here is the number of hygiene checks (21 today), which is nowhere
+ * near a Bind's parameter ceiling, so unlike `insertQueryStats` this needs no
+ * chunking.
+ */
+export async function recordCheckResults(
+  client: PoolClient,
+  databaseId: number,
+  capturedAt: Date,
+  results: readonly StoredCheckWrite[],
+): Promise<void> {
+  if (results.length === 0) return;
+  const values: unknown[] = [];
+  const tuples = results.map((r) => {
+    values.push(databaseId, r.checkId, capturedAt, r.ok, r.level, r.note, r.message);
+    const n = values.length;
+    return `($${n - 6}, $${n - 5}, $${n - 4}, $${n - 3}, $${n - 2}, $${n - 1}, $${n})`;
+  });
+  await client.query(
+    `INSERT INTO pgops.check_results
+       (database_id, check_id, captured_at, ok, level, note, message)
+     VALUES ${tuples.join(', ')}
+     ON CONFLICT (database_id, check_id) DO UPDATE SET
+       captured_at = EXCLUDED.captured_at,
+       ok          = EXCLUDED.ok,
+       level       = EXCLUDED.level,
+       note        = EXCLUDED.note,
+       message     = EXCLUDED.message`,
+    values,
+  );
+}
+
+/**
+ * The whole database's work in one capture interval.
+ *
+ * `totalExecTime` and `calls` are already differenced and already summed —
+ * see `queryLoadRow` in capture.ts, which applies the discontinuity rule per
+ * shape before adding them up. Nothing here interprets them.
+ *
+ * `ON CONFLICT DO NOTHING`, like the snapshot inserts: a retried tick must
+ * not fail on an interval already recorded.
+ */
+export async function insertQueryLoad(
+  client: PoolClient,
+  databaseId: number,
+  capturedAt: Date,
+  load: { totalExecTime: number; calls: number },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO pgops.query_load (database_id, captured_at, total_exec_time, calls)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT DO NOTHING`,
+    [databaseId, capturedAt, load.totalExecTime, load.calls],
+  );
+}
+
+/**
  * Pruning is called by `captureOnce` inside the SAME transaction as the
  * inserts, so retention cannot drift from capture — a separate schedule is a
  * second thing to get wrong, and the failure mode (a store that grows without
  * bound) is silent until the disk fills.
  *
- * THREE tables, not two. `pgops.queries` holds one row per distinct shape ever
+ * FOUR tables. `pgops.queries` holds one row per distinct shape ever
  * seen and nothing ever deleted from it, so the claim above was true of only
  * two of the three growing tables: a database with churning generated SQL
  * accumulated normalised text forever. Orphans were invisible because every
  * read joins through `query_stats`, which is exactly what made it silent.
  * Deleted last, so the snapshot delete above has already removed the rows that
  * make a shape an orphan.
+ *
+ * `query_load` follows `query_stats`'s retention rather than carrying its own:
+ * it is the same measurement at a coarser grain, and a load chart that
+ * outlived the per-shape rows behind it would show a spike with nothing to
+ * open.
  */
 export async function prune(
   client: PoolClient,
@@ -183,6 +273,11 @@ export async function prune(
 ): Promise<void> {
   await client.query(
     `DELETE FROM pgops.query_stats
+       WHERE database_id = $1 AND captured_at < now() - ($2 || ' days')::interval`,
+    [databaseId, String(retention.queryStatsDays)],
+  );
+  await client.query(
+    `DELETE FROM pgops.query_load
        WHERE database_id = $1 AND captured_at < now() - ($2 || ' days')::interval`,
     [databaseId, String(retention.queryStatsDays)],
   );

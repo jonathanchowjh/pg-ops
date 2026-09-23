@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatDelta, formatDuration, formatMillis, planLines } from '@/lib/format';
+import {
+  formatAge, formatBytes, formatDelta, formatDuration, formatMillis, planLines, plural,
+} from '@/lib/format';
 
 describe('formatDuration', () => {
   it('renders null as an em dash rather than "0s" or "null"', () => {
@@ -113,5 +115,61 @@ describe('planLines', () => {
   it('joins array-valued details, and omits an alias equal to the relation', () => {
     expect(planLines({ 'Node Type': 'Seq Scan', 'Relation Name': 't', Schema: 's', Alias: 't', 'Sort Key': ['a DESC', 'b'] }))
       .toEqual(['Seq Scan on s.t', '  Sort Key: a DESC, b']);
+  });
+});
+
+/**
+ * `0 slot(s)` is how a program writes when it has not decided what it is
+ * saying, and this console is read by someone who has just been woken up.
+ */
+describe('plural', () => {
+  it('agrees with the count', () => {
+    expect(plural(1, 'root blocker')).toBe('1 root blocker');
+    expect(plural(2, 'root blocker')).toBe('2 root blockers');
+  });
+
+  /** English's rule, not a special case: "0 sequences", never "0 sequence". */
+  it('gives zero the plural', () => {
+    expect(plural(0, 'sequence')).toBe('0 sequences');
+  });
+
+  it('takes an irregular plural rather than guessing one', () => {
+    expect(plural(2, 'index', 'indexes')).toBe('2 indexes');
+    expect(plural(1, 'index', 'indexes')).toBe('1 index');
+  });
+
+  it('groups the number, like every other count on the page', () => {
+    expect(plural(12_000, 'session')).toBe('12,000 sessions');
+  });
+});
+
+/**
+ * A second duration formatter, for the question `formatDuration` is not built
+ * for: "how long since this table was last vacuumed", which is routinely days
+ * or weeks. `formatDuration` tops out in hours on purpose — `27h 52m` is the
+ * right answer for a long transaction and is pinned above — and the same rule
+ * renders a fortnight as `336h 0m`.
+ */
+describe('formatAge', () => {
+  it('uses one unit, so a column of them compares at a glance', () => {
+    expect(formatAge(45)).toBe('45s');
+    expect(formatAge(125)).toBe('2m');
+    expect(formatAge(3 * 3600 + 40 * 60)).toBe('3h');
+  });
+
+  /**
+   * Two days, not one, before days take over: "36h" is a more useful answer
+   * than "1d" for a vacuum that ran yesterday evening.
+   */
+  it('keeps hours until they stop being readable', () => {
+    expect(formatAge(36 * 3600)).toBe('36h');
+    expect(formatAge(47 * 3600)).toBe('47h');
+    expect(formatAge(48 * 3600)).toBe('2d');
+    expect(formatAge(14 * 86_400)).toBe('14d');
+  });
+
+  /** Clock skew between the server and the statistics it read. */
+  it('clamps a negative age to 0s', () => {
+    expect(formatAge(-5)).toBe('0s');
   });
 });

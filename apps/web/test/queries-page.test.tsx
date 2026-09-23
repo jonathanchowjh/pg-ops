@@ -13,7 +13,7 @@ import Queries from '@/app/db/[name]/queries/page';
 // overrides it to prove `query-stats.ts`'s `sort: 'total'` fallback on zero
 // rows never reaches the page as a "sorted by …" label — see the describe
 // block below.
-const { BASE_ROW, rowsState, seriesState } = vi.hoisted(() => {
+const { BASE_ROW, rowsState, seriesState, loadState } = vi.hoisted(() => {
   const BASE_ROW = {
     queryid: '1', query: 'select 1', calls: 100, totalMs: 2000, meanMs: 20,
     stddevMs: 0, rows: 100, cacheHitPct: 100, redacted: false,
@@ -21,11 +21,21 @@ const { BASE_ROW, rowsState, seriesState } = vi.hoisted(() => {
   const seriesState: { result: unknown } = {
     result: { ok: false, reason: 'missing-store', message: 'no store' },
   };
-  return { BASE_ROW, rowsState: { rows: [BASE_ROW] as (typeof BASE_ROW)[] }, seriesState };
+  // The 24-hour load chart, off by default for the same reason the
+  // since-last-capture column is: no store.
+  const loadState: { result: unknown } = { result: { ok: false, message: 'History is off.' } };
+  return {
+    BASE_ROW, rowsState: { rows: [BASE_ROW] as (typeof BASE_ROW)[] }, seriesState, loadState,
+  };
 });
 
 // The page's only Postgres-touching call. Faked the same way sessions-page.test.tsx
 // does it, so the page runs as a plain function over a plain data shape.
+vi.mock('@/lib/load', () => ({
+  LOAD_HOURS: 24,
+  queryLoadFor: vi.fn(async () => loadState.result),
+}));
+
 vi.mock('@/lib/check', () => ({
   // `runSeriesFor` is mocked alongside `runCheckFor` because the page now
   // calls both through the same seam. Defaults to missing-store, which is
@@ -66,6 +76,7 @@ afterEach(() => {
   rendered = undefined;
   rowsState.rows = [BASE_ROW];
   seriesState.result = { ok: false, reason: 'missing-store', message: 'no store' };
+  loadState.result = { ok: false, message: 'History is off.' };
 });
 
 describe('the Queries tab is extended, not replaced', () => {
@@ -125,7 +136,7 @@ describe('Queries page — default sort', () => {
       searchParams: Promise.resolve({ sort: 'mean' }),
     });
     rendered = await render(element);
-    expect(rendered.text()).toContain('0 statement shape(s)');
+    expect(rendered.text()).toContain('0 statement shapes');
     expect(rendered.text()).not.toMatch(/sorted by/);
   });
 });
@@ -297,5 +308,89 @@ describe('the statistics controls', () => {
     const r = await show();
     expect(r.text()).toMatch(/pg_stat_statements|statement statistics/i);
     expect(r.text()).toMatch(/table and index statistics/i);
+  });
+});
+
+/**
+ * The one thing on this page that is not about a shape.
+ *
+ * Every other number here ranks statements against each other, which answers
+ * "what is worst" and not "is this unusual" — and during an incident the
+ * second question decides whether the ranking matters at all.
+ */
+describe('the 24-hour load chart', () => {
+  const at = (minsAgo: number) => new Date(Date.now() - minsAgo * 60_000);
+
+  const show = async () => {
+    const element = await Queries({
+      params: Promise.resolve({ name: 'prod' }),
+      searchParams: Promise.resolve({}),
+    });
+    rendered = await render(element);
+    return rendered;
+  };
+
+  it('draws the series when the store has one', async () => {
+    loadState.result = {
+      ok: true,
+      points: [
+        { capturedAt: at(15), totalExecTime: 1_200, calls: 400 },
+        { capturedAt: at(10), totalExecTime: 2_400, calls: 800 },
+        { capturedAt: at(5), totalExecTime: 900, calls: 300 },
+      ],
+    };
+    const r = await show();
+    expect(r.container.querySelector('polyline')).not.toBeNull();
+    expect(r.text()).toContain('Execution time per capture interval');
+  });
+
+  /**
+   * Execution time alone rises for two unrelated reasons with opposite
+   * fixes — the database got slower, or more traffic arrived — and the pair
+   * is what tells them apart. `calls` has been in `query_load` since
+   * migration 004 and in `StoredLoad` all along; only the chart was missing.
+   */
+  it('charts calls beside execution time, because time alone is ambiguous', async () => {
+    loadState.result = {
+      ok: true,
+      points: [
+        { capturedAt: at(15), totalExecTime: 1_200, calls: 400 },
+        { capturedAt: at(10), totalExecTime: 2_400, calls: 800 },
+        { capturedAt: at(5), totalExecTime: 900, calls: 300 },
+      ],
+    };
+    const r = await show();
+    expect(r.text()).toContain('Calls per capture interval');
+    expect(r.container.querySelectorAll('polyline')).toHaveLength(2);
+    // The calls axis is labelled with the calls, not with milliseconds.
+    expect(r.text()).toContain('800');
+  });
+
+  /**
+   * Silent with no store, exactly as the since-last-capture column is — and
+   * silent when the store is BROKEN, because the sentence above the table
+   * already says so once. Two reports of one failure is worse than one.
+   */
+  it('is absent with no store, and says nothing extra when the store is broken', async () => {
+    const off = await show();
+    expect(off.container.querySelector('polyline')).toBeNull();
+    off.unmount();
+
+    loadState.result = { ok: false, message: 'could not read history' };
+    const broken = await show();
+    expect(broken.container.querySelector('polyline')).toBeNull();
+    expect(broken.text()).not.toContain('could not read history');
+  });
+
+  /**
+   * One capture is not an interval, and an interval is what the chart draws.
+   * A one-point series would render an empty SVG — a chart that silently
+   * disappears rather than saying why.
+   */
+  it('says what it is waiting for when there is only one capture', async () => {
+    loadState.result = { ok: true, points: [{ capturedAt: at(3), totalExecTime: 5, calls: 1 }] };
+    const r = await show();
+    expect(r.container.querySelector('polyline')).toBeNull();
+    expect(r.text()).toContain('needs two captures');
   });
 });

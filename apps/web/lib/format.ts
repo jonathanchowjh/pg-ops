@@ -13,8 +13,82 @@ export function formatDuration(secs: number | null): string {
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
+/**
+ * A count and its noun, agreeing.
+ *
+ * `0 slot(s)` is how a program writes when it has not decided what it is
+ * saying, and this console is read at three in the morning by someone who has
+ * been woken up. Pluralising in English is irregular enough that a helper
+ * cannot guess — so the plural is PASSED where it is not just `+s`, rather
+ * than inferred from a rule with exceptions nobody will remember.
+ *
+ * Zero takes the plural, which is English's rule and not a special case:
+ * "0 sequences", never "0 sequence".
+ */
+export function plural(n: number, one: string, many = `${one}s`): string {
+  return `${formatCount(n)} ${n === 1 ? one : many}`;
+}
+
+/**
+ * How long ago something happened, to ONE unit.
+ *
+ * A second formatter beside `formatDuration`, for the same reason
+ * `formatMillis` is a third: they answer different questions at different
+ * magnitudes. `formatDuration` is built for a session's age and deliberately
+ * tops out in hours — its docblock explains that a 27-hour transaction's
+ * seconds are noise, and `27h 52m` is the right answer there and is pinned by
+ * a test. "When was this table last vacuumed" is routinely days or weeks, and
+ * `960h 0m` is not an answer anybody reads.
+ *
+ * One unit, not two, because this is a COLUMN: `3d`, `18h`, `42m` compare
+ * down a page at a glance, where `2d 7h` and `18h 3m` do not. The exact
+ * instant stays in the markup — see `When` — for anyone who needs it.
+ */
+export function formatAge(secs: number): string {
+  const s = Math.max(0, Math.floor(secs));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  // Two days, not one: "36h" is a more useful answer than "1d" for a vacuum
+  // that ran yesterday evening, and the day count only starts earning its
+  // place once the hour count stops being readable.
+  if (s < 48 * 3600) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86_400)}d`;
+}
+
+/**
+ * An instant, as how long ago it was. `null` when there is no instant.
+ *
+ * AN AGE, NOT A TIMESTAMP, and the reason is the same one the charts give
+ * for relative axis labels: this renders on the server, which does not know
+ * the reader's timezone, so `2026-09-23 04:04:10.578415+00` is a claim about
+ * a clock pgops cannot see — printed to the microsecond, which no operator
+ * has ever needed from a statistics reset.
+ *
+ * Returns `null` rather than a word for the empty case, because the callers
+ * disagree about what it means: a table that was never vacuumed says
+ * "never", a `stats reset` that never happened says "Never", and a sentence
+ * that mentions the reset only in passing omits the clause entirely.
+ */
+export function formatAgo(at: Date | string | null | undefined): string | null {
+  if (at == null) return null;
+  const d = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${formatAge((Date.now() - d.getTime()) / 1_000)} ago`;
+}
+
+/**
+ * A COUNT IS A WHOLE NUMBER, which is why this rounds.
+ *
+ * Every reading it is given already is one — calls, rows, shapes,
+ * transactions, standbys, captures. The fractional inputs come from the
+ * chart, whose axis ticks are interpolated between the bounds of a series:
+ * a calls axis ruled `681 · 457.667 · 234.333 · 11` invites the reader to
+ * believe pgops measured two thirds of a call. Rounding here rather than at
+ * the chart keeps the knowledge that counts are integral in the formatter
+ * that knows it, instead of in a caller that would have to be told.
+ */
 export function formatCount(n: number): string {
-  return new Intl.NumberFormat('en-US').format(n);
+  return new Intl.NumberFormat('en-US').format(Math.round(n));
 }
 
 /**

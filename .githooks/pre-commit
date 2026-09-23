@@ -1,0 +1,35 @@
+#!/bin/sh
+# What the `static` CI job used to run, now run here before each commit.
+# Everything in this file is fast (no Docker, no containers) and so belongs on
+# the commit, not the push: about a minute on a warm cache.
+#
+# The step ordering is the workflow's and is load-bearing, not alphabetical:
+#
+#   typecheck:test              rootDir is the repo root, src and test both
+#                               inside it — the broad one.
+#   @pgops/checks typecheck     A DIFFERENT PROJECT: rootDir ./src with test
+#                               excluded, the exact project `build` emits
+#                               from. A src file importing from test/ — the
+#                               leak that would put test-only code in the
+#                               published dist/ — is TS6059 here and SILENT
+#                               above. Verified by probe, both directions.
+#                               boundaries.test.ts asserts this line stays.
+#   @pgops/checks build         package.json's main/types/exports all point
+#                               into dist/ and the typechecks above are all
+#                               --noEmit, so without this nothing ever
+#                               produces it. Also asserted by
+#                               boundaries.test.ts.
+#   test / test:web             The unit and component suites.
+#
+# `git commit --no-verify` skips this hook when you need a checkpoint commit
+# on a branch that does not typecheck yet.
+set -e
+
+echo "pre-commit: typecheck, unit and component tests"
+
+npm run typecheck:test
+npm run --workspace @pgops/checks typecheck
+npm run --workspace @pgops/checks build
+npm test
+npm run --workspace @pgops/web typecheck
+npm run test:web

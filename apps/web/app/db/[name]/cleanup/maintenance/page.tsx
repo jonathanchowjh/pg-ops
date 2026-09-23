@@ -1,10 +1,14 @@
 import type { Metadata } from 'next';
 import { CHECKS } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
+import { cacheChecks } from '@/lib/hygiene';
 import { CheckPanel } from '@/components/check-panel';
+import { Findings } from '@/components/findings';
+import { foldFrom } from '@/lib/fold';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ConfirmAction } from '@/components/confirm-action';
 import { actionsAllowed } from '@/lib/actions';
-import { formatCount } from '@/lib/format';
+import { formatAgo, formatCount } from '@/lib/format';
 
 export async function generateMetadata({
   params,
@@ -17,9 +21,7 @@ export async function generateMetadata({
 
 /** `null` is "never", which is the finding here — not a cell to leave blank. */
 function when(at: Date | string | null): string {
-  if (at === null) return 'never';
-  const d = at instanceof Date ? at : new Date(at);
-  return Number.isNaN(d.getTime()) ? 'never' : d.toISOString().slice(0, 16).replace('T', ' ');
+  return formatAgo(at) ?? 'never';
 }
 
 /**
@@ -32,15 +34,29 @@ function when(at: Date | string | null): string {
  */
 export default async function Maintenance({
   params,
+  searchParams,
 }: {
   params: Promise<{ name: string }>;
+  searchParams: Promise<{ pgops?: string }>;
 }) {
   const { name } = await params;
+  // pgops's own relations, folded out of both lists — the same rule the other
+  // four hygiene pages follow. Seven of the twelve rows here belong to the
+  // console when it shares a database with its store.
+  const fold = foldFrom(`/db/${name}/cleanup/maintenance`, await searchParams);
   const [stats, danger, running] = await Promise.all([
     runCheckFor(name, CHECKS.tableStats, {}),
     runCheckFor(name, CHECKS.autovacuumDanger, {}),
     runCheckFor(name, CHECKS.vacuumProgress),
   ]);
+
+  // The same readings, written where the triage page can see them. The page
+  // is unchanged — it ran these checks just now, on visit — and this is what
+  // stops the triage line reporting a finding this page has already
+  // disproved. Never throws, and does nothing at all without a store.
+  await cacheChecks(name, {
+    tableStats: stats, autovacuumDanger: danger, vacuumProgress: running,
+  });
   // Read after runCheckFor has awaited connection(), so the gate reflects the
   // deployment rather than being frozen at build time.
   const canAct = actionsAllowed(process.env);
@@ -60,23 +76,40 @@ export default async function Maintenance({
             );
           }
           return (
-            <ul className="text-sm">
-              {d.vacuums.map((v) => (
-                <li key={v.pid} className="flex justify-between gap-4 py-0.5">
-                  <span className="font-medium">{v.relation ?? `pid ${v.pid}`}</span>
-                  <span className="text-muted-foreground">
-                    {v.phase}
-                    {' · '}
-                    {/*
-                      The `initializing` phase reports heap_blks_total = 0 and
-                      pctScanned null. `0%` there would read as a vacuum that
-                      is stuck — on the vacuum most likely to be looked at.
-                    */}
-                    {v.pctScanned === null ? 'progress not yet known' : `${v.pctScanned}%`}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            // NOT folded, unlike the two lists below. A vacuum running on
+            // pgops's own store is a vacuum running on this database, and it
+            // is competing for the same I/O as everything else — hiding it
+            // would be hiding load, which is the one thing the Sessions
+            // page's fold is careful never to do.
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>relation</TableHead>
+                  <TableHead>phase</TableHead>
+                  <TableHead className="text-right">scanned</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {d.vacuums.map((v) => (
+                  <TableRow key={v.pid}>
+                    <TableCell className="font-mono font-medium">
+                      {v.relation ?? `pid ${v.pid}`}
+                    </TableCell>
+                    <TableCell>{v.phase}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {/*
+                        The `initializing` phase reports heap_blks_total = 0 and
+                        pctScanned null. `0%` there would read as a vacuum that
+                        is stuck — on the vacuum most likely to be looked at.
+                      */}
+                      {v.pctScanned === null
+                        ? <span className="text-muted-foreground">not yet known</span>
+                        : `${v.pctScanned}%`}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           );
         }}
       </CheckPanel>
@@ -87,26 +120,28 @@ export default async function Maintenance({
             return <p className="text-sm text-muted-foreground">No tables in a visible schema.</p>;
           }
           return (
-            <>
-              <ul className="text-sm">
-                {d.tables.map((t) => (
-                  <li key={t.table} className="flex justify-between gap-4 py-0.5">
-                    <span className="font-medium">{t.table}</span>
-                    <span className="text-muted-foreground">
-                      {formatCount(t.deadRows)} dead
-                      {' · vacuumed '}{when(t.lastVacuum ?? t.lastAutovacuum)}
-                      {' · analyzed '}{when(t.lastAnalyze ?? t.lastAutoanalyze)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-              {d.truncated ? (
-                <p className="mt-2 text-sm text-muted-foreground">
-                  Showing {formatCount(d.tables.length)} of {formatCount(d.total)},
-                  worst first by dead rows.
-                </p>
-              ) : null}
-            </>
+            <Findings
+              items={d.tables}
+              total={d.total}
+              fold={fold}
+              subject={(t: typeof d.tables[number]) => t.table}
+              columns={['table', 'dead rows>', 'vacuumed>', 'analyzed>']}
+            >
+              {(t: typeof d.tables[number]) => (
+                <TableRow key={t.table}>
+                  <TableCell className="font-mono font-medium">{t.table}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatCount(t.deadRows)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {when(t.lastVacuum ?? t.lastAutovacuum)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {when(t.lastAnalyze ?? t.lastAutoanalyze)}
+                  </TableCell>
+                </TableRow>
+              )}
+            </Findings>
           );
         }}
       </CheckPanel>
@@ -129,21 +164,22 @@ export default async function Maintenance({
                 The wraparound alarm on the Cleanup tab reads the database as a whole.
                 This is which relation is holding it back.
               </p>
-              <ul className="text-sm">
-                {d.relations.map((r) => (
-                  <li key={r.relation} className="flex justify-between gap-4 py-0.5">
-                    <span className="font-medium">{r.relation}</span>
-                    <span className="text-muted-foreground">
-                      {formatCount(r.txnsRemaining)} txns left
-                    </span>
-                  </li>
-                ))}
-              </ul>
-              {d.truncated ? (
-                <p className="mt-2 text-sm text-muted-foreground">
-                  Showing {formatCount(d.relations.length)} of {formatCount(d.total)}, oldest first.
-                </p>
-              ) : null}
+              <Findings
+                items={d.relations}
+                total={d.total}
+                fold={fold}
+                subject={(r: typeof d.relations[number]) => r.relation}
+                columns={['relation', 'transactions left>']}
+              >
+                {(r: typeof d.relations[number]) => (
+                  <TableRow key={r.relation}>
+                    <TableCell className="font-mono font-medium">{r.relation}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatCount(r.txnsRemaining)}
+                    </TableCell>
+                  </TableRow>
+                )}
+              </Findings>
             </>
           );
         }}

@@ -54,26 +54,51 @@ export default async function DbLayout({
   // because an uncapped console puts 2500px lines of prose on an ultrawide,
   // which is its own kind of unreadable; it just sits far enough out that an
   // ordinary 1440 or 1920 display fills it.
+  //
+  // 84rem, down from 100rem. 1600px was wider than the widest thing here
+  // needs and it cost the page its edges: at that width a row of three
+  // compact panels sat with a third of the screen of white to its right, and
+  // nothing lined up with anything. 1344px still fills a 1440 display and
+  // still holds the queries table without scrolling.
+  //
+  // `pb-24`, not `pb-6`. At 24px the last table row ended flush against the
+  // window edge, so a page that HAD reached its end looked like one that had
+  // stopped scrolling — the operator kept pushing at a page that was already
+  // finished. An empty band is the terminator.
   return (
-    <main className="mx-auto w-full max-w-[100rem] p-6">
-      <header className="mb-2">
-        {/* The way back. Every /db/* page was a one-way trip — comparing two
-            databases during an incident meant the browser's back button or
-            editing the URL, on the console whose front door exists precisely
-            to be returned to. */}
-        <Link
-          href="/"
-          className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-        >
-          ← All databases
-        </Link>
-        {/* The operator's label, then what the server itself answers. The
-            order is deliberate: the label is what they navigated by, the
-            line under it is what that label turned out to mean. */}
-        <h1 className="mt-1 text-xl font-semibold">{name}</h1>
-        <StatusBar result={who} />
-      </header>
-      <Nav name={name} />
+    <main className="mx-auto w-full max-w-[84rem] px-6 pb-24">
+      {/* STICKY, and it is the identity guard that makes it so rather than
+          fashion. The name below is "the only thing standing between an
+          operator with three tabs open and acting on the wrong database" —
+          and on the pages where that matters most it stopped being true.
+          /queries is 4,400px tall and /sessions carries a Terminate button in
+          every row, so past the first screenful the operator was reading a
+          database whose name had scrolled away, with the tabs out of reach
+          too. `-mx-6 px-6 pt-6` moves the shell's top padding inside the
+          sticky block so nothing shows above it as the page slides under. */}
+      <div className="sticky top-0 z-20 -mx-6 bg-background px-6 pt-6">
+        <header className="mb-2">
+          {/* The way back. Every /db/* page was a one-way trip — comparing two
+              databases during an incident meant the browser's back button or
+              editing the URL, on the console whose front door exists precisely
+              to be returned to. */}
+          <Link
+            href="/"
+            className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          >
+            ← All databases
+          </Link>
+          {/* The operator's label, then what the server itself answers. The
+              order is deliberate: the label is what they navigated by, the
+              line under it is what that label turned out to mean. */}
+          {/* The largest thing on any page, because acting on the wrong
+              database is the expensive mistake and the name is the only thing
+              standing between an operator with three tabs open and making it. */}
+          <h1 className="mt-1 text-[1.75rem]/[1.15] font-semibold tracking-[-0.02em]">{name}</h1>
+          <StatusBar result={who} />
+        </header>
+        <Nav name={name} />
+      </div>
       {children}
     </main>
   );

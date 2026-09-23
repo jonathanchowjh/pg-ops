@@ -23,10 +23,28 @@ export function Sql({ children }: { children: string | null | undefined }) {
   // replaced the guarantee, so it is restored here, at the one caller that
   // renders a query — `packages/checks` gains no behaviour this phase.
   //
-  // Lossless for the reader either way: this renders in a single-line, x-
-  // scrolling `<code>` block, so the newlines were never visible as newlines.
+  // Lossless for the reader either way: a rendered statement is wrapped and
+  // clamped, never laid out as source, so the newlines were never visible as
+  // newlines.
   const oneLine = children.replace(/\s+/g, ' ').trim();
   if (oneLine === '') return <span>—</span>;
 
-  return <code className="block max-w-full overflow-x-auto font-mono text-xs">{redactSecrets(oneLine)}</code>;
+  // CLAMPED, NOT SCROLLED, and the reason is a rule in the overflow spec
+  // rather than a taste: `overflow-x: auto` computes the OTHER axis from
+  // `visible` to `auto` too, so every statement on the page was a two-axis
+  // scroll container. The Queries page rendered a hundred of them, each 16px
+  // tall and 900px wide over a line that could be 23,000px long, and a
+  // trackpad gesture that begins over any one of them is captured by it —
+  // the page stopped scrolling under the pointer for most of its own area.
+  //
+  // Two lines is about 200 characters, which identifies a statement; the
+  // whole text belongs on the query's own page, where there is room to read
+  // it. Inside a table the row also stays one height whatever it holds, and
+  // `ui/table` still scrolls the table sideways as ONE piece, which is the
+  // single horizontal scroller this console ever wanted.
+  return (
+    <code className="line-clamp-2 max-w-full font-mono text-xs break-words">
+      {redactSecrets(oneLine)}
+    </code>
+  );
 }

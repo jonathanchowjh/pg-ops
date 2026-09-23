@@ -231,3 +231,177 @@ export async function readRelationSpace(
 
   return rows.map((r) => ({ capturedAt: r.captured_at, sizeBytes: Number(r.size_bytes) }));
 }
+
+/**
+ * One check's cached outcome, as the console reads it back.
+ *
+ * `capturedAt` is what the surface renders as an age. It is per row, not per
+ * pass: a check that timed out on the last pass still carries the instant of
+ * the pass that wrote it, so an area whose members disagree about their age
+ * reports the OLDEST — which is the honest one.
+ */
+export interface StoredCheckResult {
+  checkId: string;
+  ok: boolean;
+  level: string | null;
+  note: string | null;
+  message: string | null;
+  capturedAt: Date;
+}
+
+/**
+ * Every cached hygiene result for one database.
+ *
+ * A database the store has never seen returns `[]` rather than throwing: a
+ * console pointed at a newly configured database has an empty cache for its
+ * first five minutes, which is an age the surface reports as `unknown`, not
+ * an error to render.
+ *
+ * Accepts a `Pool` or a `PoolClient` for the same reason `readQueryStats`
+ * does — the scheduler calls it on a checked-out client inside its own pass,
+ * a page calls it on the pool.
+ */
+export async function readCheckResults(
+  store: Pool | PoolClient,
+  databaseName: string,
+): Promise<StoredCheckResult[]> {
+  const { rows } = await store.query<{
+    check_id: string; ok: boolean; level: string | null;
+    note: string | null; message: string | null; captured_at: Date;
+  }>(
+    `SELECT r.check_id, r.ok, r.level, r.note, r.message, r.captured_at
+       FROM pgops.check_results r
+       JOIN pgops.databases d ON d.id = r.database_id
+      WHERE d.name = $1
+      ORDER BY r.check_id`,
+    [databaseName],
+  );
+  return rows.map((r) => ({
+    checkId: r.check_id,
+    ok: r.ok,
+    level: r.level,
+    note: r.note,
+    message: r.message,
+    capturedAt: r.captured_at,
+  }));
+}
+
+/**
+ * The most recent snapshot strictly before `before`, keyed by `query_id`.
+ *
+ * Read by `captureOnce` on the client it already holds, to difference the
+ * snapshot it has just taken into one `query_load` row. It returns the
+ * previous CAPTURE — every shape at one instant — rather than each shape's
+ * own last sighting, because an interval is only an interval if both ends
+ * were measured at the same moment. A shape absent from this map is one
+ * pgops had not seen at that instant, and it contributes nothing.
+ *
+ * `query_stats_captured_at_idx` is `(database_id, captured_at DESC)`, so both
+ * the `max` and the rows it selects are index scans.
+ */
+export async function readLastSnapshot(
+  store: Pool | PoolClient,
+  databaseId: number,
+  before: Date,
+): Promise<Map<number, CounterPoint>> {
+  const { rows } = await store.query<SnapshotRow>(
+    `SELECT s.query_id, s.captured_at, s.calls::text AS calls,
+            s.total_exec_time, s.rows::text AS rows,
+            s.shared_blks_hit::text AS shared_blks_hit,
+            s.shared_blks_read::text AS shared_blks_read,
+            s.stats_reset
+       FROM pgops.query_stats s
+      WHERE s.database_id = $1
+        AND s.captured_at = (SELECT max(p.captured_at)
+                               FROM pgops.query_stats p
+                              WHERE p.database_id = $1 AND p.captured_at < $2)`,
+    [databaseId, before],
+  );
+  return new Map(rows.map((r) => [r.query_id, {
+    capturedAt: r.captured_at,
+    calls: Number(r.calls),
+    totalExecTime: r.total_exec_time,
+    rows: Number(r.rows),
+    sharedBlksHit: Number(r.shared_blks_hit),
+    sharedBlksRead: Number(r.shared_blks_read),
+    statsReset: r.stats_reset,
+  }]));
+}
+
+interface SnapshotRow {
+  query_id: number; captured_at: Date; calls: string;
+  total_exec_time: number; rows: string;
+  shared_blks_hit: string; shared_blks_read: string; stats_reset: Date | null;
+}
+
+/** One capture interval's total work across every shape. */
+/**
+ * One shape's statement text, by `queryid`.
+ *
+ * The query detail page identified its subject as a 19-digit integer and
+ * nothing else — a page about a statement that never showed the statement.
+ * `queryShapeHistory` deliberately returns `Interval[]` ("the caller already
+ * knows which shape it asked about"), and that is true of the ID and false of
+ * the text, so the text is fetched here instead of widening the series.
+ *
+ * ONE INDEXED LOOKUP: `pgops.queries` is `UNIQUE (database_id, queryid)`.
+ * The text was redacted before it was written (see migration 001), so what
+ * comes back is already safe to render.
+ *
+ * `null` when the store has never seen the shape — which is an ordinary
+ * state, not an error: the operator may have followed a link to a statement
+ * that has since aged out of the retention window.
+ */
+export async function readQueryText(
+  store: Pool | PoolClient,
+  databaseName: string,
+  queryid: string,
+): Promise<string | null> {
+  const { rows } = await store.query<{ query: string }>(
+    `SELECT q.query
+       FROM pgops.queries q
+       JOIN pgops.databases d ON d.id = q.database_id
+      WHERE d.name = $1 AND q.queryid = $2`,
+    [databaseName, queryid],
+  );
+  return rows[0]?.query ?? null;
+}
+
+export interface StoredLoad { capturedAt: Date; totalExecTime: number; calls: number }
+
+/**
+ * The whole database's load over a window, one point per capture, oldest
+ * first.
+ *
+ * No `maxPoints`. Every other series read here is bounded because its row
+ * count is shapes × captures; this table holds one row per capture, so a
+ * 24-hour window at the five-minute cadence is 288 rows and the bound would
+ * be ceremony. A caller asking for a wider window than a chart can draw is a
+ * question for the caller.
+ *
+ * Rows are already differenced intervals — see migration 004. A capture that
+ * recorded no measurable interval simply has no row, and the chart draws the
+ * gap rather than a zero.
+ */
+export async function readQueryLoad(
+  store: Pool | PoolClient,
+  databaseName: string,
+  from: Date,
+  to: Date,
+): Promise<StoredLoad[]> {
+  const { rows } = await store.query<{
+    captured_at: Date; total_exec_time: number; calls: string;
+  }>(
+    `SELECT l.captured_at, l.total_exec_time, l.calls::text AS calls
+       FROM pgops.query_load l
+       JOIN pgops.databases d ON d.id = l.database_id
+      WHERE d.name = $1 AND l.captured_at >= $2 AND l.captured_at <= $3
+      ORDER BY l.captured_at ASC`,
+    [databaseName, from, to],
+  );
+  return rows.map((r) => ({
+    capturedAt: r.captured_at,
+    totalExecTime: r.total_exec_time,
+    calls: Number(r.calls),
+  }));
+}

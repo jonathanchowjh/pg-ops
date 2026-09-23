@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { describe, expect, it } from 'vitest';
-import { captureOnce } from '../src/capture.js';
+import { captureOnce, checkResultRow, queryLoadRow } from '../src/capture.js';
+import type { CounterPoint } from '../src/series/query-stats.js';
+import type { QueryStatsSnapshot } from '../src/store/write.js';
 import type { CheckContext } from '../src/types.js';
 
 /**
@@ -180,5 +182,131 @@ describe('captureOnce and a relation dropped mid-scan', () => {
     expect(captured).not.toContain('public.gone');
     // And nothing was stored as 0 bytes.
     expect(captured).not.toContain(0);
+  });
+});
+
+
+/**
+ * The cache stores what a check FOUND, including that it found nothing
+ * because it could not look. The failure branch is here rather than in the
+ * integration test because provoking a real privilege error mid-pass is
+ * awkward, and this is where the distinction actually lives.
+ */
+describe('checkResultRow', () => {
+  const measuredAt = Date.now();
+
+  it('stores a failed check with its message and no level', () => {
+    expect(checkResultRow('indexHitRate', {
+      ok: false, reason: 'privilege', message: 'permission denied for pg_statio_user_indexes',
+    })).toEqual({
+      checkId: 'indexHitRate',
+      ok: false,
+      level: null,
+      note: null,
+      message: 'permission denied for pg_statio_user_indexes',
+    });
+  });
+
+  it('stores a verdict with its note', () => {
+    expect(checkResultRow('unusedIndexes', {
+      ok: true, data: {}, measuredAt, verdict: { level: 'warn', note: '2 unused indexes' },
+    })).toMatchObject({ ok: true, level: 'warn', note: '2 unused indexes', message: null });
+  });
+
+  /**
+   * A reading, not a judgement. `level: null` is what keeps "we do not judge"
+   * distinct from "we judged and it is fine" — substituting `ok` here would
+   * paint a green line on an area nobody has an opinion about.
+   */
+  it('stores a check that reached no verdict as no level at all', () => {
+    expect(checkResultRow('indexList', { ok: true, data: {}, measuredAt, verdict: null }))
+      .toMatchObject({ ok: true, level: null, note: null });
+  });
+});
+
+
+/**
+ * The load row is the one piece of capture that is pure arithmetic, and the
+ * cases that matter are the ones a live database will not stage on demand: a
+ * `pg_stat_statements_reset()` landing between two captures, and the very
+ * first capture of a database.
+ *
+ * What it must never do is write a zero. A zero on the load chart reads as
+ * five idle minutes; a missing row reads as a gap. This project holds those
+ * apart everywhere else, and a total summed over shapes is exactly where the
+ * distinction is easiest to lose.
+ */
+describe('queryLoadRow', () => {
+  const AT = new Date('2026-09-23T12:00:00Z');
+  const EARLIER = new Date('2026-09-23T11:55:00Z');
+
+  /** A cumulative snapshot, as `captureOnce` has just built it. */
+  function snapshot(queryId: number, over: Partial<QueryStatsSnapshot> = {}): QueryStatsSnapshot {
+    return {
+      databaseId: 1, queryId, capturedAt: AT,
+      calls: 100, totalExecTime: 1_000, rows: 500,
+      sharedBlksHit: 900, sharedBlksRead: 100, statsReset: null,
+      ...over,
+    };
+  }
+
+  /** The same shape at the previous capture. */
+  function before(over: Partial<CounterPoint> = {}): CounterPoint {
+    return {
+      capturedAt: EARLIER,
+      calls: 40, totalExecTime: 250, rows: 200,
+      sharedBlksHit: 400, sharedBlksRead: 50, statsReset: null,
+      ...over,
+    };
+  }
+
+  it('sums the interval across every shape', () => {
+    const load = queryLoadRow(
+      [snapshot(1), snapshot(2, { calls: 10, totalExecTime: 80 })],
+      new Map([[1, before()], [2, before({ calls: 4, totalExecTime: 30 })]]),
+    );
+    // (100-40) + (10-4) calls; (1000-250) + (80-30) ms.
+    expect(load).toEqual({ calls: 66, totalExecTime: 800 });
+  });
+
+  /**
+   * A shape pgops had not seen at the previous capture has a counter
+   * cumulative since ITS first sighting, which is a total of unknown age
+   * rather than this interval's work.
+   */
+  it('ignores a shape with no previous reading', () => {
+    const load = queryLoadRow(
+      [snapshot(1), snapshot(2, { calls: 9_999, totalExecTime: 99_999 })],
+      new Map([[1, before()]]),
+    );
+    expect(load).toEqual({ calls: 60, totalExecTime: 750 });
+  });
+
+  it('drops a shape whose interval spans a reset, and keeps the rest', () => {
+    const load = queryLoadRow(
+      // Shape 2's counters climbed PAST their old values after the reset, so
+      // counter comparison alone would miss it — stats_reset is what catches
+      // it, and charting that total would read as a five-minute spike.
+      [snapshot(1), snapshot(2, { calls: 5_000, totalExecTime: 60_000, statsReset: AT })],
+      new Map([[1, before()], [2, before({ calls: 4_900, totalExecTime: 59_000 })]]),
+    );
+    expect(load).toEqual({ calls: 60, totalExecTime: 750 });
+  });
+
+  /**
+   * The mutation this catches: contributing a clamped zero instead of
+   * nothing. A cluster-wide reset would then write `{calls: 0}` — a row
+   * claiming the database did no work in an interval pgops could not
+   * measure.
+   */
+  it('reports no row at all when nothing was measurable', () => {
+    expect(queryLoadRow(
+      [snapshot(1, { statsReset: AT }), snapshot(2, { statsReset: AT })],
+      new Map([[1, before()], [2, before()]]),
+    )).toBeNull();
+  });
+
+  it('reports no row for the first capture of a database', () => {
+    expect(queryLoadRow([snapshot(1), snapshot(2)], new Map())).toBeNull();
   });
 });

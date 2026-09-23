@@ -37,17 +37,22 @@ const badgeVariants = cva(
         default: "bg-primary text-primary-foreground [a]:hover:bg-primary/80",
         secondary:
           "bg-secondary text-secondary-foreground [a]:hover:bg-secondary/80",
+        // `critical-ink`, not `destructive`: measured, destructive on its own
+        // 10% tint is 3.99:1 in light mode — below the floor for text this
+        // size, on the badge that means "wake someone up". See globals.css
+        // and tokens.test.ts. The ring keeps `destructive`, which is a fill
+        // and not text.
         destructive:
-          "bg-destructive/10 text-destructive focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:focus-visible:ring-destructive/40 [a]:hover:bg-destructive/20",
+          "bg-critical-ink/10 text-critical-ink focus-visible:ring-destructive/20 dark:bg-critical-ink/20 dark:focus-visible:ring-destructive/40 [a]:hover:bg-critical-ink/20",
         // The two variants stock shadcn has no opinion about, because stock
         // shadcn is not a severity scale. `destructive` above already
         // established the idiom — a tinted fill under same-hue text — so
         // these are that idiom at two more hues, not a new mechanism. See
         // globals.css for why the grayscale palette could not express this.
         warning:
-          "bg-warning/10 text-warning dark:bg-warning/20 [a]:hover:bg-warning/20",
+          "bg-warning-ink/10 text-warning-ink dark:bg-warning-ink/20 [a]:hover:bg-warning-ink/20",
         success:
-          "bg-success/10 text-success dark:bg-success/20 [a]:hover:bg-success/20",
+          "bg-success-ink/10 text-success-ink dark:bg-success-ink/20 [a]:hover:bg-success-ink/20",
         outline:
           "border-border text-foreground [a]:hover:bg-muted [a]:hover:text-muted-foreground",
         ghost:

@@ -28,6 +28,27 @@ export function accentClass(verdict: Verdict | null | undefined): string {
   return '';
 }
 
+/**
+ * The tint a container wears behind that accent.
+ *
+ * A GROUND, not a highlight, and deliberately barely there — 1.05:1 against
+ * the canvas in light mode. The bar and the badge carry the signal; this only
+ * joins the panel's title, reading and explanation into one block so the eye
+ * takes them as one thing. tokens.test.ts holds both ends of that: the text
+ * on it clears 4.5:1, and the tint itself stays between 1.02 and 1.4 against
+ * the canvas, so it can neither vanish nor shout.
+ *
+ * Nothing at `ok`, nothing at `null`, and nothing for a FAILED check — the
+ * same rule as the accent. Gray is what "no information" looks like here, and
+ * a check that could not run has no verdict to tint with.
+ */
+export function surfaceClass(verdict: Verdict | null | undefined): string {
+  if (!verdict) return '';
+  if (verdict.level === 'critical') return 'bg-critical-surface';
+  if (verdict.level === 'warn') return 'bg-warning-surface';
+  return '';
+}
+
 /** The worst of two levels, for a container summarising several checks. */
 const RANK: Record<VerdictLevel, number> = { ok: 0, warn: 1, critical: 2 };
 export function worse(a: Verdict, b: Verdict): Verdict {
@@ -46,11 +67,13 @@ export function worse(a: Verdict, b: Verdict): Verdict {
  * the overview could be read correctly only by reading it word by word —
  * which is the one thing nobody does while the pager is going off.
  */
-export function VerdictBadge({ verdict }: { verdict: Verdict }) {
+export function VerdictBadge({ verdict, note = true }: { verdict: Verdict; note?: boolean }) {
   return (
     <span className="inline-flex items-center gap-2">
       <Badge variant={VARIANT[verdict.level]}>{LABEL[verdict.level]}</Badge>
-      {verdict.note ? <span className="text-sm text-muted-foreground">{verdict.note}</span> : null}
+      {note && verdict.note
+        ? <span className="text-sm text-muted-foreground">{verdict.note}</span>
+        : null}
     </span>
   );
 }

@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import type { ReactNode } from 'react';
 import Link from 'next/link';
 import {
   CHECKS,
@@ -7,47 +6,19 @@ import {
   type InvalidConstraint, type TableIndexUsage,
 } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
+import { cacheChecks } from '@/lib/hygiene';
 import { CheckPanel } from '@/components/check-panel';
+import { TableCell, TableRow } from '@/components/ui/table';
+import { Findings } from '@/components/findings';
+import { foldFrom } from '@/lib/fold';
 import { Sql } from '@/components/sql';
-import { formatBytes, formatCount } from '@/lib/format';
+import { formatAgo, formatBytes, formatCount } from '@/lib/format';
 
 export async function generateMetadata(
   { params }: { params: Promise<{ name: string }> },
 ): Promise<Metadata> {
   const { name } = await params;
   return { title: `${name} · Indexes` };
-}
-
-/**
- * Every capped list on this page, list and truncation sentence together.
- *
- * `total` is the pre-LIMIT `count(*) OVER ()` — the only number that knows how
- * much the cap hid (§5). Telling an operator a truncated list was the whole
- * answer is the failure this page exists to avoid.
- *
- * The count shown is derived from `items` INSIDE this component rather than
- * passed in beside it. An earlier version took `shown` and `total` as two
- * props, and a mutation that passed `items.length` for both — restoring
- * exactly the `rows.length` bug §5 forbids — survived the suite, because only
- * one of the six call sites had a truncation test. One prop fewer removes the
- * mistake instead of testing for it six times.
- */
-function Findings<T>({ items, total, children }: {
-  items: readonly T[];
-  total: number;
-  children: (item: T) => ReactNode;
-}) {
-  return (
-    <>
-      <ul className="text-sm">{items.map(children)}</ul>
-      {total > items.length ? (
-        <p className="mt-2 text-sm text-muted-foreground">
-          Showing {formatCount(items.length)} of {formatCount(total)}. Narrow the database or
-          raise the cap to see the rest.
-        </p>
-      ) : null}
-    </>
-  );
 }
 
 /** The empty state every finding panel shares — a sentence, never a blank box. */
@@ -77,8 +48,15 @@ function Nothing({ children }: { children: string }) {
  * it gets a link and a sentence naming its cost, and is reached by an explicit
  * click.
  */
-export default async function Indexes({ params }: { params: Promise<{ name: string }> }) {
+export default async function Indexes({ params, searchParams }: {
+  params: Promise<{ name: string }>;
+  searchParams: Promise<{ pgops?: string }>;
+}) {
   const { name } = await params;
+  // pgops's own indexes, folded out of every list below — see lib/fold.ts.
+  // The database this console is pointed at may also be its store, and eight
+  // of the nine rows in an inventory then belong to the tool.
+  const fold = foldFrom(`/db/${name}/queries/indexes`, await searchParams);
 
   const [
     hitRate, invalid, constraints, unused, duplicates, usage, missing, caching, list, reset,
@@ -95,6 +73,16 @@ export default async function Indexes({ params }: { params: Promise<{ name: stri
     runCheckFor(name, CHECKS.lastStatsReset),
   ]);
 
+  // The same readings, written where the triage page can see them. The page
+  // is unchanged — it ran these checks just now, on visit — and this is what
+  // stops the triage line reporting a finding this page has already
+  // disproved. Never throws, and does nothing at all without a store.
+  await cacheChecks(name, {
+    indexHitRate: hitRate, invalidIndexes: invalid, invalidConstraints: constraints,
+    unusedIndexes: unused, duplicateIndexes: duplicates, indexUsage: usage,
+    missingIndexes: missing, indexCaching: caching, indexList: list, lastStatsReset: reset,
+  });
+
   return (
     <>
       <div className="grid gap-4">
@@ -104,31 +92,43 @@ export default async function Indexes({ params }: { params: Promise<{ name: stri
             // and 0% is a reading that would sit under a 99% threshold as
             // though the cache were failing.
             ? <Nothing>No index I/O recorded yet.</Nothing>
-            : <p className="text-2xl font-semibold tabular-nums">{d.rate.toFixed(2)}%</p>)}
+            : <p className="text-xl font-semibold tabular-nums text-foreground">{d.rate.toFixed(2)}%</p>)}
         </CheckPanel>
 
-        <CheckPanel title="Invalid indexes" result={invalid}>
+        <CheckPanel title="Invalid indexes" result={invalid} count={(d) => d.total}>
           {(d) => (d.indexes.length === 0
             ? <Nothing>No invalid indexes.</Nothing>
             : (
-              <Findings items={d.indexes} total={d.total}>
+              <Findings
+                items={d.indexes}
+                total={d.total}
+                fold={fold}
+                subject={(i: IndexFinding) => i.name}
+                columns={['index', 'on table', 'size>']}
+              >
                   {(i: IndexFinding) => (
-                    <li key={i.name} className="py-1">
-                      <span className="font-mono font-medium">{i.name}</span>{' '}
-                      <span className="text-muted-foreground">
-                        on {i.table} · {formatBytes(i.sizeBytes)}
-                      </span>
-                    </li>
+                    <TableRow key={i.name}>
+                      <TableCell className="font-mono font-medium">{i.name}</TableCell>
+                      <TableCell className="font-mono">{i.table}</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatBytes(i.sizeBytes)}
+                      </TableCell>
+                    </TableRow>
                   )}
                 </Findings>
             ))}
         </CheckPanel>
 
-        <CheckPanel title="Unvalidated constraints" result={constraints}>
+        <CheckPanel title="Unvalidated constraints" result={constraints} count={(d) => d.total}>
           {(d) => (d.constraints.length === 0
             ? <Nothing>No unvalidated constraints.</Nothing>
             : (
-              <Findings items={d.constraints} total={d.total}>
+              <Findings
+                items={d.constraints}
+                total={d.total}
+                fold={fold}
+                subject={(c: InvalidConstraint) => c.table}
+              >
                   {(c: InvalidConstraint) => (
                     <li key={`${c.table}.${c.name}`} className="py-1">
                       <span className="font-mono font-medium">{c.name}</span>{' '}
@@ -140,94 +140,149 @@ export default async function Indexes({ params }: { params: Promise<{ name: stri
             ))}
         </CheckPanel>
 
-        <CheckPanel title="Unused indexes" result={unused}>
+        <CheckPanel title="Unused indexes" result={unused} count={(d) => d.total}>
           {(d) => (d.indexes.length === 0
             ? <Nothing>No unused indexes over the reporting floor.</Nothing>
             : (
-              <Findings items={d.indexes} total={d.total}>
+              <Findings
+                items={d.indexes}
+                total={d.total}
+                fold={fold}
+                subject={(i: IndexFinding) => i.name}
+                columns={['index', 'on table', 'size>']}
+              >
                   {(i: IndexFinding) => (
-                    <li key={i.name} className="py-1">
-                      <span className="font-mono font-medium">{i.name}</span>{' '}
-                      <span className="text-muted-foreground">
-                        on {i.table} · {formatBytes(i.sizeBytes)}
-                      </span>
-                    </li>
+                    <TableRow key={i.name}>
+                      <TableCell className="font-mono font-medium">{i.name}</TableCell>
+                      <TableCell className="font-mono">{i.table}</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatBytes(i.sizeBytes)}
+                      </TableCell>
+                    </TableRow>
                   )}
                 </Findings>
             ))}
         </CheckPanel>
 
-        <CheckPanel title="Duplicate indexes" result={duplicates}>
+        <CheckPanel title="Duplicate indexes" result={duplicates} count={(d) => d.total}>
           {(d) => (d.pairs.length === 0
             ? <Nothing>No redundant indexes.</Nothing>
             : (
-              <Findings items={d.pairs} total={d.total}>
+              <Findings
+                items={d.pairs}
+                total={d.total}
+                fold={fold}
+                subject={(p: DuplicatePair) => p.name}
+                columns={['index', 'on table', 'covered by', 'size>']}
+              >
                   {(p: DuplicatePair) => (
-                    <li key={p.name} className="py-1">
-                      <span className="font-mono font-medium">{p.name}</span>{' '}
-                      <span className="text-muted-foreground">
-                        on {p.table} · {formatBytes(p.sizeBytes)} · covered by{' '}
-                      </span>
-                      <span className="font-mono">{p.coveredBy}</span>
-                    </li>
+                    <TableRow key={p.name}>
+                      <TableCell className="font-mono font-medium">{p.name}</TableCell>
+                      <TableCell className="font-mono">{p.table}</TableCell>
+                      <TableCell className="font-mono">{p.coveredBy}</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatBytes(p.sizeBytes)}
+                      </TableCell>
+                    </TableRow>
                   )}
                 </Findings>
             ))}
         </CheckPanel>
 
-        <CheckPanel title="Tables that may need an index" result={missing}>
+        <CheckPanel title="Tables that may need an index" result={missing} count={(d) => d.total}>
           {(d) => (d.tables.length === 0
             ? <Nothing>No tables qualify.</Nothing>
             : (
-              <Findings items={d.tables} total={d.total}>
+              <Findings
+                items={d.tables}
+                total={d.total}
+                fold={fold}
+                subject={(t: TableIndexUsage) => t.table}
+                columns={['relation', 'index scans>', 'rows>']}
+              >
                   {(t: TableIndexUsage) => <TableUsageRow key={t.table} table={t} />}
                 </Findings>
             ))}
         </CheckPanel>
 
-        <CheckPanel title="Index usage by table" result={usage}>
+        <CheckPanel title="Index usage by table" result={usage} count={(d) => d.total}>
           {(d) => (d.tables.length === 0
             ? <Nothing>No tables with recorded scans.</Nothing>
             : (
-              <Findings items={d.tables} total={d.total}>
+              <Findings
+                items={d.tables}
+                total={d.total}
+                fold={fold}
+                subject={(t: TableIndexUsage) => t.table}
+                columns={['relation', 'index scans>', 'rows>']}
+              >
                   {(t: TableIndexUsage) => <TableUsageRow key={t.table} table={t} />}
                 </Findings>
             ))}
         </CheckPanel>
 
-        <CheckPanel title="Index caching" result={caching}>
+        <CheckPanel title="Index caching" result={caching} count={(d) => d.total}>
           {(d) => (d.indexes.length === 0
             ? <Nothing>No index I/O recorded yet.</Nothing>
             : (
-              <Findings items={d.indexes} total={d.total}>
+              <Findings
+                items={d.indexes}
+                total={d.total}
+                fold={fold}
+                subject={(i: IndexCachingEntry) => i.name}
+                columns={['index', 'cache hit rate>']}
+              >
                   {(i: IndexCachingEntry) => (
-                    <li key={i.name} className="flex justify-between gap-4 py-1">
-                      <span className="font-mono">{i.name}</span>
-                      <span className="tabular-nums text-muted-foreground">
+                    <TableRow key={i.name}>
+                      <TableCell className="font-mono">{i.name}</TableCell>
+                      <TableCell className="text-right tabular-nums">
                         {/* null is "no I/O yet", never 0% — see toIndexCaching. */}
-                        {i.hitRate === null ? 'no reads yet' : `${i.hitRate.toFixed(2)}%`}
-                      </span>
-                    </li>
+                        {i.hitRate === null
+                          ? <span className="text-muted-foreground">no reads yet</span>
+                          : `${i.hitRate.toFixed(2)}%`}
+                      </TableCell>
+                    </TableRow>
                   )}
                 </Findings>
             ))}
         </CheckPanel>
 
         {/* The inventory, last. */}
-        <CheckPanel title="All indexes" result={list}>
+        <CheckPanel title="All indexes" result={list} count={(d) => d.total}>
           {(d) => (d.indexes.length === 0
             ? <Nothing>This database has no indexes.</Nothing>
             : (
-              <Findings items={d.indexes} total={d.total}>
+              <Findings
+                items={d.indexes}
+                total={d.total}
+                fold={fold}
+                subject={(i: IndexEntry) => i.name}
+                columns={['index', 'on table', 'kind', 'size>']}
+              >
                   {(i: IndexEntry) => (
-                    <li key={i.name} className="py-1">
-                      <span className="font-mono font-medium">{i.name}</span>{' '}
-                      <span className="text-muted-foreground">
-                        on {i.table} · {formatBytes(i.sizeBytes)}
-                        {i.primary ? ' · primary key' : i.unique ? ' · unique' : ''}
-                      </span>
-                      <Sql>{i.definition}</Sql>
-                    </li>
+                    <TableRow key={i.name}>
+                      <TableCell className="font-mono font-medium align-top">
+                        {i.name}
+                        {/* The inventory is read to FIND an index, and every
+                            row carrying its full CREATE statement turned a
+                            list of names into a wall of SQL — the one panel
+                            on this page where scanning is the whole task. The
+                            statement is one click away and nothing is lost. */}
+                        <details className="mt-1 font-sans font-normal">
+                          <summary className="cursor-pointer text-xs text-muted-foreground">
+                            definition
+                          </summary>
+                          <Sql>{i.definition}</Sql>
+                        </details>
+                      </TableCell>
+                      <TableCell className="font-mono align-top">{i.table}</TableCell>
+                      <TableCell className="align-top text-muted-foreground">
+                        {i.primary ? 'primary key' : i.unique ? 'unique' : ''}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums align-top">
+                        {formatBytes(i.sizeBytes)}
+                      </TableCell>
+                    </TableRow>
                   )}
                 </Findings>
             ))}
@@ -237,7 +292,7 @@ export default async function Indexes({ params }: { params: Promise<{ name: stri
           {(d) => (
             // `null` is "never reset since this server started counting",
             // which is a reading. An epoch date would be a fabricated one.
-            <span className="tabular-nums">{d.statsReset ?? 'Never'}</span>
+            <span className="tabular-nums">{formatAgo(d.statsReset) ?? 'Never'}</span>
           )}
         </CheckPanel>
 
@@ -288,17 +343,20 @@ export default async function Indexes({ params }: { params: Promise<{ name: stri
 /** Shared by #24 `index_usage` and #25 `missing_indexes` — one row shape, two questions. */
 function TableUsageRow({ table }: { table: TableIndexUsage }) {
   return (
-    <li className="flex justify-between gap-4 py-1">
-      <span className="font-mono">{table.table}</span>
-      <span className="tabular-nums text-muted-foreground">
+    <TableRow>
+      <TableCell className="font-mono">{table.table}</TableCell>
+      <TableCell className="text-right tabular-nums">
         {/* null means this table has NO indexes at all — not 0% of scans
             using one. The two are different findings and the check keeps them
-            apart, so the page must too. */}
+            apart, so the page must too. A dash would be the third thing, and
+            it would read as either. */}
         {table.indexHitRate === null
-          ? 'no indexes'
-          : `${table.indexHitRate.toFixed(0)}% index scans`}
-        {' · '}{formatCount(table.estimatedRows)} rows
-      </span>
-    </li>
+          ? <span className="text-muted-foreground">no indexes</span>
+          : `${table.indexHitRate.toFixed(0)}%`}
+      </TableCell>
+      <TableCell className="text-right tabular-nums">
+        {formatCount(table.estimatedRows)}
+      </TableCell>
+    </TableRow>
   );
 }

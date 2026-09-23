@@ -4,9 +4,17 @@ import QueryDetail from '@/app/db/[name]/queries/[queryid]/page';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const { series, runSeriesFor } = vi.hoisted(() => ({
+const { series, runSeriesFor, sqlState } = vi.hoisted(() => ({
   series: new Map<string, unknown>(),
   runSeriesFor: vi.fn(),
+  sqlState: { text: null as string | null },
+}));
+
+// The page's only other Postgres-touching call, faked the same way
+// queries-page.test.tsx fakes `queryLoadFor`, so the page runs as a plain
+// function over a plain data shape.
+vi.mock('@/lib/load', () => ({
+  queryTextFor: vi.fn(async () => sqlState.text),
 }));
 
 vi.mock('@/lib/check', () => ({
@@ -24,6 +32,7 @@ afterEach(() => {
   rendered?.unmount();
   rendered = undefined;
   series.clear();
+  sqlState.text = null;
   vi.clearAllMocks();
 });
 
@@ -34,6 +43,32 @@ const show = async (queryid: string) => {
 };
 
 describe('/queries/[queryid]', () => {
+  /**
+   * The page identified its subject as a 19-digit integer and showed the SQL
+   * nowhere, so an operator who followed a link from the Queries table could
+   * not confirm they had clicked the row they meant — and on a shape with no
+   * comparable history, the page said nothing about the query at all.
+   */
+  it('names the statement, not just the id it is keyed on', async () => {
+    sqlState.text = 'SELECT * FROM orders WHERE customer_id = $1';
+    const r = await show('-4065672920244396678');
+    expect(r.text()).toContain('SELECT * FROM orders WHERE customer_id = $1');
+    // The id stays: it is what the URL is keyed on and what gets pasted.
+    expect(r.text()).toContain('-4065672920244396678');
+  });
+
+  /**
+   * A statement the store has never seen — or cannot be read because the
+   * store is off — falls back to what the page always had. It does not
+   * report a second failure: the history read below it already says whether
+   * the store answered.
+   */
+  it('falls back to the id when the statement cannot be had', async () => {
+    sqlState.text = null;
+    const r = await show('-4065672920244396678');
+    expect(r.text()).toContain('Query -4065672920244396678');
+  });
+
   it('charts calls and total time over the window', async () => {
     series.set('queryShapeHistory', {
       ok: true, readAt: 0,
@@ -46,8 +81,11 @@ describe('/queries/[queryid]', () => {
     });
     const r = await show('1234567890');
     expect(r.text()).toContain('1234567890');
-    // Two series, two charts: calls and total exec time.
-    expect(r.container.querySelectorAll('polyline')).toHaveLength(2);
+    // Three series, three charts: calls, total exec time and rows. None of
+    // the three answers "why did this shape get worse" on its own — see the
+    // page. `rows` was captured and differenced from the start and appeared
+    // only as a scalar until now.
+    expect(r.container.querySelectorAll('polyline')).toHaveLength(3);
     // The latest interval stated as a fact, not only drawn.
     expect(r.text()).toContain('40');
   });

@@ -1,10 +1,13 @@
 import type { Metadata } from 'next';
-import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { CHECKS, type TableCaching, type TableStat, type UnusedTable } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
+import { cacheChecks } from '@/lib/hygiene';
 import { CheckPanel } from '@/components/check-panel';
-import { formatCount } from '@/lib/format';
+import { TableCell, TableRow } from '@/components/ui/table';
+import { Findings } from '@/components/findings';
+import { foldFrom } from '@/lib/fold';
+import { formatAge, formatCount } from '@/lib/format';
 
 export async function generateMetadata(
   { params }: { params: Promise<{ name: string }> },
@@ -13,36 +16,20 @@ export async function generateMetadata(
   return { title: `${name} · Tables` };
 }
 
-/**
- * Every capped list on this page, list and truncation sentence together.
- *
- * The count comes from `items` INSIDE this component rather than as a second
- * prop beside `total` — see the indexes page, where a mutation passing
- * `items.length` for both survived a suite that tested only one of eight call
- * sites. One prop fewer removes the mistake instead of testing for it.
- */
-function Findings<T>({ items, total, children }: {
-  items: readonly T[];
-  total: number;
-  children: (item: T) => ReactNode;
-}) {
-  return (
-    <>
-      <ul className="text-sm">{items.map(children)}</ul>
-      {total > items.length ? (
-        <p className="mt-2 text-sm text-muted-foreground">
-          Showing {formatCount(items.length)} of {formatCount(total)}. Narrow the database or
-          raise the cap to see the rest.
-        </p>
-      ) : null}
-    </>
-  );
-}
-
 /** `null` is "never", which is a reading on a maintenance panel — not a gap. */
 function When({ at }: { at: Date | null }) {
   if (at === null) return <span className="text-muted-foreground">Never</span>;
-  return <time dateTime={at.toISOString()} className="tabular-nums">{at.toISOString()}</time>;
+  // An AGE, not a timestamp. This renders on the server, which does not know
+  // the reader's timezone, so `2026-09-23T03:50:49.042Z` was both unreadable
+  // and a claim about a clock pgops cannot see — four of them per row, down a
+  // column whose question is "how long has it been". The exact instant stays
+  // in `dateTime` and in the tooltip.
+  const ago = formatAge((Date.now() - at.getTime()) / 1_000);
+  return (
+    <time dateTime={at.toISOString()} title={at.toISOString()} className="tabular-nums">
+      {ago} ago
+    </time>
+  );
 }
 
 /**
@@ -50,8 +37,13 @@ function When({ at }: { at: Date | null }) {
  * and statistics reads that do not change between one glance and the next, and
  * `test/guards.test.ts` holds the polling set by name.
  */
-export default async function Tables({ params }: { params: Promise<{ name: string }> }) {
+export default async function Tables({ params, searchParams }: {
+  params: Promise<{ name: string }>;
+  searchParams: Promise<{ pgops?: string }>;
+}) {
   const { name } = await params;
+  // pgops's own tables, folded out of every list below — see lib/fold.ts.
+  const fold = foldFrom(`/db/${name}/queries/tables`, await searchParams);
 
   const [hitRate, unused, stats, caching] = await Promise.all([
     runCheckFor(name, CHECKS.tableHitRate),
@@ -59,6 +51,14 @@ export default async function Tables({ params }: { params: Promise<{ name: strin
     runCheckFor(name, CHECKS.tableStats, {}),
     runCheckFor(name, CHECKS.tableCaching, {}),
   ]);
+
+  // The same readings, written where the triage page can see them. The page
+  // is unchanged — it ran these checks just now, on visit — and this is what
+  // stops the triage line reporting a finding this page has already
+  // disproved. Never throws, and does nothing at all without a store.
+  await cacheChecks(name, {
+    tableHitRate: hitRate, unusedTables: unused, tableStats: stats, tableCaching: caching,
+  });
 
   return (
     <>
@@ -69,10 +69,10 @@ export default async function Tables({ params }: { params: Promise<{ name: strin
             // 0% would sit under a 99% threshold as though the cache were
             // failing on a server that has simply not been asked for anything.
             ? <p className="text-sm text-muted-foreground">No heap I/O recorded yet.</p>
-            : <p className="text-2xl font-semibold tabular-nums">{d.rate.toFixed(2)}%</p>)}
+            : <p className="text-xl font-semibold tabular-nums text-foreground">{d.rate.toFixed(2)}%</p>)}
         </CheckPanel>
 
-        <CheckPanel title="Unused tables" result={unused}>
+        <CheckPanel title="Unused tables" result={unused} count={(d) => d.total}>
           {(d) => (d.tables.length === 0
             ? (
               /*
@@ -100,59 +100,85 @@ export default async function Tables({ params }: { params: Promise<{ name: strin
               </p>
             )
             : (
-              <Findings items={d.tables} total={d.total}>
+              <Findings
+                items={d.tables}
+                total={d.total}
+                fold={fold}
+                subject={(t: UnusedTable) => t.table}
+                columns={['table', 'rows>']}
+              >
                 {(t: UnusedTable) => (
-                  <li key={t.table} className="flex justify-between gap-4 py-1">
-                    <span className="font-mono">{t.table}</span>
-                    <span className="tabular-nums text-muted-foreground">
-                      {formatCount(t.estimatedRows)} rows
-                    </span>
-                  </li>
+                  <TableRow key={t.table}>
+                    <TableCell className="font-mono">{t.table}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatCount(t.estimatedRows)}
+                    </TableCell>
+                  </TableRow>
                 )}
               </Findings>
             ))}
         </CheckPanel>
 
-        <CheckPanel title="Maintenance" result={stats}>
+        <CheckPanel title="Maintenance" result={stats} count={(d) => d.total}>
           {(d) => (d.tables.length === 0
             ? <p className="text-sm text-muted-foreground">No tables.</p>
             : (
-              <Findings items={d.tables} total={d.total}>
+              <Findings
+                items={d.tables}
+                total={d.total}
+                fold={fold}
+                subject={(t: TableStat) => t.table}
+                columns={['table', 'live>', 'dead>', 'vacuumed', 'analyzed']}
+              >
                 {(t: TableStat) => (
-                  <li key={t.table} className="border-t py-2 first:border-t-0">
-                    <div className="flex flex-wrap justify-between gap-x-4">
-                      <span className="font-mono">{t.table}</span>
-                      <span className="tabular-nums text-muted-foreground">
-                        {formatCount(t.liveRows)} live · {formatCount(t.deadRows)} dead
-                      </span>
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-x-4 text-xs text-muted-foreground">
-                      <span>vacuum <When at={t.lastVacuum} /></span>
-                      <span>autovacuum <When at={t.lastAutovacuum} /></span>
-                      <span>analyze <When at={t.lastAnalyze} /></span>
-                      <span>autoanalyze <When at={t.lastAutoanalyze} /></span>
-                    </div>
-                  </li>
+                  <TableRow key={t.table}>
+                    <TableCell className="font-mono">{t.table}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatCount(t.liveRows)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatCount(t.deadRows)}
+                    </TableCell>
+                    {/* Manual and automatic in one cell, labelled, rather than
+                        four columns: the question is "when was this last
+                        touched", and which of the two did it is the detail. */}
+                    <TableCell className="text-xs text-muted-foreground">
+                      <div>by hand <When at={t.lastVacuum} /></div>
+                      <div>auto <When at={t.lastAutovacuum} /></div>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      <div>by hand <When at={t.lastAnalyze} /></div>
+                      <div>auto <When at={t.lastAutoanalyze} /></div>
+                    </TableCell>
+                  </TableRow>
                 )}
               </Findings>
             ))}
         </CheckPanel>
 
-        <CheckPanel title="Table caching" result={caching}>
+        <CheckPanel title="Table caching" result={caching} count={(d) => d.total}>
           {(d) => (d.tables.length === 0
             ? <p className="text-sm text-muted-foreground">No heap I/O recorded yet.</p>
             : (
-              <Findings items={d.tables} total={d.total}>
+              <Findings
+                items={d.tables}
+                total={d.total}
+                fold={fold}
+                subject={(t: TableCaching) => t.table}
+                columns={['table', 'cache hit rate>']}
+              >
                 {(t: TableCaching) => (
-                  <li key={t.table} className="flex justify-between gap-4 py-1">
-                    <span className="font-mono">{t.table}</span>
-                    <span className="tabular-nums text-muted-foreground">
+                  <TableRow key={t.table}>
+                    <TableCell className="font-mono">{t.table}</TableCell>
+                    <TableCell className="text-right tabular-nums">
                       {/* null is "no I/O yet", never 0% — pgHero's own query
                           collapses these with `CASE WHEN ... THEN 0`, and
                           tables.ts deliberately does not. */}
-                      {t.hitRate === null ? 'no reads yet' : `${t.hitRate.toFixed(2)}%`}
-                    </span>
-                  </li>
+                      {t.hitRate === null
+                        ? <span className="text-muted-foreground">no reads yet</span>
+                        : `${t.hitRate.toFixed(2)}%`}
+                    </TableCell>
+                  </TableRow>
                 )}
               </Findings>
             ))}

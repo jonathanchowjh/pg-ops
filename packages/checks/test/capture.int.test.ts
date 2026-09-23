@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { describe, expect, inject, it } from 'vitest';
 import { captureOnce } from '../src/capture.js';
+import { readQueryText } from '../src/store/read.js';
 import { migrate } from '../src/store/schema.js';
 import { withPostgres } from './harness.js';
 
@@ -393,3 +394,114 @@ describe('captureOnce — what it refuses to lie about', () => {
     });
   });
 });
+
+
+/**
+ * The load row — the one thing capture writes that is not a copy of what it
+ * read. Unit-tested for its arithmetic (capture.test.ts); this pins the two
+ * properties that only a real store can show: that the first capture writes
+ * nothing, and that retention reaches the table.
+ */
+describe('readQueryText', () => {
+  /**
+   * The query detail page identifies its subject by `queryid` alone, so this
+   * is the one lookup standing between an operator and a page that names a
+   * 19-digit integer and nothing else.
+   *
+   * THE TYPES DO NOT MATCH ON PAPER: `pgops.queries.queryid` is bigint and
+   * the caller passes the string out of the URL, because a 64-bit hash does
+   * not survive a JS number. That comparison is the thing worth proving
+   * against a real server rather than reasoning about.
+   */
+  it('finds a shape by the queryid string a URL carries', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
+      await migrate(pool);
+      const t = `text_probe_${Date.now()}`;
+      await pool.query(`CREATE TABLE ${t} (id int)`);
+      await pool.query(`SELECT id FROM ${t}`);
+      await captureOnce({ ...ctx, store: pool }, 'prod');
+
+      const { rows } = await pool.query<{ queryid: string; query: string }>(
+        `SELECT q.queryid::text AS queryid, q.query
+           FROM pgops.queries q WHERE q.query LIKE $1`,
+        [`%${t}%`],
+      );
+      expect(rows.length).toBeGreaterThan(0);
+      const row = rows[0]!;
+
+      expect(await readQueryText(pool, 'prod', row.queryid)).toBe(row.query);
+    });
+  });
+
+  /**
+   * A shape the store has never seen is an ordinary state, not an error: the
+   * operator may have followed a link to a statement that has since aged out
+   * of the retention window. The page falls back to the id it already has.
+   */
+  it('answers null for a shape this database has never captured', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
+      await migrate(pool);
+      await captureOnce({ ...ctx, store: pool }, 'prod');
+      expect(await readQueryText(pool, 'prod', '1234567890123456789')).toBeNull();
+      // And scoped to the database it was asked about, not to the cluster.
+      expect(await readQueryText(pool, 'no-such-db', '1')).toBeNull();
+    });
+  });
+});
+
+describe('captureOnce and the load series', () => {
+  it('writes no row for the first capture and one for the second', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
+      await migrate(pool);
+      const withStore = { ...ctx, store: pool };
+
+      await captureOnce(withStore, 'prod');
+      // One cumulative snapshot is not an interval. A zero row here would
+      // claim the database was idle for five minutes it was never watched.
+      expect(await loadRows(pool)).toHaveLength(0);
+
+      // Real work between the two captures, so the interval is not empty.
+      for (let i = 0; i < 20; i += 1) await pool.query('SELECT count(*) FROM pg_class');
+      await captureOnce(withStore, 'prod');
+
+      const rows = await loadRows(pool);
+      expect(rows).toHaveLength(1);
+      expect(Number(rows[0]!.calls)).toBeGreaterThan(0);
+      expect(rows[0]!.total_exec_time).toBeGreaterThan(0);
+    });
+  }, 120_000);
+
+  it('prunes the load series on the same retention as the snapshots', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
+      await migrate(pool);
+      const withStore = { ...ctx, store: pool };
+      await captureOnce(withStore, 'prod');
+
+      // A row older than query_stats' retention, planted directly: the point
+      // is that `prune` covers this table, not that time passes.
+      await pool.query(
+        `INSERT INTO pgops.query_load (database_id, captured_at, total_exec_time, calls)
+         SELECT d.id, now() - interval '30 days', 1.0, 1 FROM pgops.databases d WHERE d.name = 'prod'`,
+      );
+      expect(await loadRows(pool)).toHaveLength(1);
+
+      await captureOnce(withStore, 'prod');
+      // The planted row is gone. Anything the second capture wrote is new.
+      const rows = await loadRows(pool);
+      expect(rows.every((r) => r.captured_at.getTime() > Date.now() - 60_000)).toBe(true);
+    });
+  }, 120_000);
+});
+
+async function loadRows(pool: pg.Pool): Promise<
+  { captured_at: Date; total_exec_time: number; calls: string }[]
+> {
+  const { rows } = await pool.query<{ captured_at: Date; total_exec_time: number; calls: string }>(
+    'SELECT captured_at, total_exec_time, calls::text AS calls FROM pgops.query_load ORDER BY captured_at',
+  );
+  return rows;
+}

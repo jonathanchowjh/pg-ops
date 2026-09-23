@@ -3,7 +3,9 @@ import Link from 'next/link';
 import { SERIES } from '@pgops/checks';
 import type { Interval } from '@pgops/checks';
 import { runSeriesFor } from '@/lib/check';
-import { Spark } from '@/components/spark';
+import { queryTextFor } from '@/lib/load';
+import { Sql } from '@/components/sql';
+import { LineChart } from '@/components/line-chart';
 import { formatCount, formatMillis } from '@/lib/format';
 
 /** Twenty-four hours, and the snapshot count that covers it at 5-minute capture. */
@@ -32,9 +34,15 @@ export default async function QueryDetail({
   params: Promise<{ name: string; queryid: string }>;
 }) {
   const { name, queryid } = await params;
-  const history = await runSeriesFor(name, SERIES.queryShapeHistory,
-    { from: new Date(Date.now() - HOURS * 3_600_000), to: new Date() },
-    { databaseName: name, queryid, maxSnapshots: MAX_SNAPSHOTS });
+  // Both at once: neither read depends on the other, and this page is the
+  // one place in the console where a statement is the subject rather than a
+  // row, so waiting for them in turn would be two round trips for one view.
+  const [history, sql] = await Promise.all([
+    runSeriesFor(name, SERIES.queryShapeHistory,
+      { from: new Date(Date.now() - HOURS * 3_600_000), to: new Date() },
+      { databaseName: name, queryid, maxSnapshots: MAX_SNAPSHOTS }),
+    queryTextFor(name, queryid),
+  ]);
 
   return (
     <div className="grid gap-4">
@@ -42,10 +50,20 @@ export default async function QueryDetail({
         <Link href={`/db/${name}/queries`} className="text-sm underline underline-offset-2">
           ← All queries
         </Link>
+        {/* THE STATEMENT IS THE HEADING. This page identified its subject
+            as a 19-digit integer and showed the SQL nowhere — so an operator
+            who followed a link from the Queries table could not confirm they
+            had clicked the row they meant, and on a shape with no comparable
+            history the page said nothing about the query at all. The ID stays
+            below it: it is what the URL is keyed on and what a colleague gets
+            pasted into chat. */}
         <h1 className="mt-2 font-medium">
-          Query <code className="font-mono text-sm">{queryid}</code>
+          {sql === null
+            ? <>Query <code className="font-mono text-sm">{queryid}</code></>
+            : <Sql>{sql}</Sql>}
         </h1>
         <p className="text-sm text-muted-foreground">
+          {sql === null ? null : <><code className="font-mono">{queryid}</code> · </>}
           Movement over the last {HOURS} hours, between captures.
         </p>
       </div>
@@ -94,22 +112,47 @@ function History({
 
   const latest = points[points.length - 1]!;
 
+  // THREE SERIES, READ TOGETHER. Each answers a different question about the
+  // same shape and none of them answers it alone: calls is how often it ran,
+  // total time is what that cost, and rows is how much work each run did.
+  // Time up with calls flat and rows flat is a plan that got worse; time up
+  // with rows up is a table that grew under a query that was always going to
+  // scan it. `rows` was captured, stored and differenced into `Interval` from
+  // the start and appeared only as the "Latest rows" scalar below — the shape
+  // of it was thrown away on every render.
   return (
     <div className="grid gap-4">
-      <div className="rounded border p-3">
-        <h2 className="mb-2 text-sm font-medium">Calls per interval</h2>
-        <Spark points={points.map((p) => p.calls)} label={`calls over ${HOURS} hours`} />
+      <div className="grid gap-x-8 gap-y-4 lg:grid-cols-2">
+        <div>
+          <h2 className="mb-2 border-b pb-2 font-medium">Calls per interval</h2>
+          {/* An interval is plotted at the instant it ENDED. Its work happened
+              across the five minutes before that, and the end is the only one
+              of the two moments the reading is true of. */}
+          <LineChart
+            points={points.map((p) => ({ at: p.to, value: p.calls }))}
+            label={`calls per interval over ${HOURS} hours`}
+            format={formatCount}
+          />
+        </div>
+        <div>
+          <h2 className="mb-2 border-b pb-2 font-medium">Total time per interval</h2>
+          <LineChart
+            points={points.map((p) => ({ at: p.to, value: p.totalExecTime }))}
+            label={`total execution time per interval over ${HOURS} hours`}
+            format={formatMillis}
+          />
+        </div>
+        <div>
+          <h2 className="mb-2 border-b pb-2 font-medium">Rows per interval</h2>
+          <LineChart
+            points={points.map((p) => ({ at: p.to, value: p.rows }))}
+            label={`rows returned per interval over ${HOURS} hours`}
+            format={formatCount}
+          />
+        </div>
       </div>
-      <div className="rounded border p-3">
-        <h2 className="mb-2 text-sm font-medium">Total time per interval</h2>
-        <Spark
-          points={points.map((p) => p.totalExecTime)}
-          label={`total execution time over ${HOURS} hours`}
-        />
-      </div>
-      {/* The charts are the shape; this is the fact. A sparkline has no axis,
-          so without the latest interval stated it says "it went up" and not
-          from what to what. */}
+      {/* The charts carry their own axes now; this is the exact latest
+          reading, which an axis rounded to two bounds cannot give. */}
       <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
         <Fact label="Latest calls" value={formatCount(latest.calls)} />
         <Fact label="Latest total time" value={formatMillis(latest.totalExecTime)} />

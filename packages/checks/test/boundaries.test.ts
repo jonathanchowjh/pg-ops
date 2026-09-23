@@ -229,43 +229,41 @@ describe('the package boundary', () => {
    * `error TS6059: File '…/test/harness.ts' is not under 'rootDir' '…/src'`
    * from this step, and zero errors from `typecheck:test`.
    *
-   * This test does not re-run tsc — it asserts CI's `static` job still
-   * invokes that script, so a future edit to the workflow that drops the
-   * step is a red test rather than a silent loss.
+   * This test does not re-run tsc — it asserts the pre-commit hook still
+   * invokes that script, so an edit that drops the step is a red test rather
+   * than a silent loss. It pinned `.github/workflows/ci.yml`'s `static` job
+   * until the workflow was replaced by `.githooks/`; the step, and the reason
+   * for it, are unchanged.
    *
-   * The workflow carries a prose comment describing this very step, right
-   * above where it runs — an unanchored substring search matches the run
-   * command's text equally well from inside a `#` comment, so commenting
-   * the real step out while leaving prose that happens to quote it would
-   * still read as green. Anchored to a real YAML step line (`- run:`, any
-   * leading indentation, nothing after the command but trailing
-   * whitespace) so only an actual step satisfies it.
+   * The hook carries a prose comment describing this very step — an
+   * unanchored substring search matches the command's text equally well from
+   * inside a `#` comment, so commenting the real line out while leaving prose
+   * that happens to quote it would still read as green. Anchored to a real
+   * command line (start of line, nothing after it but trailing whitespace) so
+   * only an actual step satisfies it.
    */
-  it('runs this package\'s own typecheck in CI — the package\'s own project, the one build emits from', () => {
-    const ciPath = new URL('../../../.github/workflows/ci.yml', import.meta.url);
-    const ci = readFileSync(ciPath, 'utf8');
-    expect(ci).toMatch(/^\s*-\s*run:\s*npm run --workspace @pgops\/checks typecheck\s*$/m);
+  it('runs this package\'s own typecheck before a commit — the package\'s own project, the one build emits from', () => {
+    const hook = readFileSync(new URL('../../../.githooks/pre-commit', import.meta.url), 'utf8');
+    expect(hook).toMatch(/^npm run --workspace @pgops\/checks typecheck\s*$/m);
   });
 
   /**
    * M1, the same class of gap as Ruling 46 above and closed the same way.
    * `package.json` declares `main`/`types`/`exports` into `dist/`, but every
-   * typecheck in the `static` job is `--noEmit`, so nothing in CI ever
-   * produced that directory. `dist/` is gitignored, so what a developer has
-   * on disk is whatever they last built by hand — the reviewer found a stale
-   * one whose `index.js` still carried "redactSecrets is Task 5's module and
-   * does not exist yet". A local import would resolve against that; CI would
-   * MODULE_NOT_FOUND.
+   * typecheck in the pre-commit hook is `--noEmit`, so without this step
+   * nothing ever produces that directory. `dist/` is gitignored, so what a
+   * developer has on disk is whatever they last built by hand — the reviewer
+   * found a stale one whose `index.js` still carried "redactSecrets is Task
+   * 5's module and does not exist yet". A local import would resolve against
+   * that; a clean checkout would MODULE_NOT_FOUND.
    *
-   * Anchored to a real `- run:` step line for the same reason as the
-   * typecheck assertion: the workflow carries prose about this step directly
-   * above it, and an unanchored substring match reads a commented-out step
-   * as green.
+   * Anchored to a real command line for the same reason as the typecheck
+   * assertion: the hook carries prose about this step directly above it, and
+   * an unanchored substring match reads a commented-out step as green.
    */
-  it('builds this package in CI — main/types/exports point at dist/', () => {
-    const ciPath = new URL('../../../.github/workflows/ci.yml', import.meta.url);
-    const ci = readFileSync(ciPath, 'utf8');
-    expect(ci).toMatch(/^\s*-\s*run:\s*npm run --workspace @pgops\/checks build\s*$/m);
+  it('builds this package before a commit — main/types/exports point at dist/', () => {
+    const hook = readFileSync(new URL('../../../.githooks/pre-commit', import.meta.url), 'utf8');
+    expect(hook).toMatch(/^npm run --workspace @pgops\/checks build\s*$/m);
   });
 
   /**

@@ -5,7 +5,7 @@ import { runToolFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
 import { IndexAdviceList } from '@/components/index-advice';
 import { Sql } from '@/components/sql';
-import { formatCount, formatMillis } from '@/lib/format';
+import { formatAgo, formatCount, formatMillis } from '@/lib/format';
 
 export async function generateMetadata(
   { params }: { params: Promise<{ name: string }> },
@@ -40,7 +40,7 @@ export default async function Suggested({ params }: { params: Promise<{ name: st
               <p className="max-w-prose text-sm text-muted-foreground">
                 From the busiest query shapes over {SUGGESTION_DEFAULTS.minMeanMs}&nbsp;ms and{' '}
                 {SUGGESTION_DEFAULTS.minCalls} calls in pg_stat_statements, since statistics were last reset
-                {d.statsResetAt === null ? '' : ` (${d.statsResetAt})`}. Each shape is planned, not run;
+                {d.statsResetAt === null ? '' : ` (${formatAgo(d.statsResetAt)})`}. Each shape is planned, not run;
                 the columns are chosen by pgHero&rsquo;s heuristic from column statistics. Confirm before
                 building anything — pgops never runs these statements.
               </p>

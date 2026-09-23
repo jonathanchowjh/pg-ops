@@ -46,8 +46,11 @@ afterEach(() => {
 });
 
 // Async Server Component: CALL it, then render the element it returns.
-const html = async () => {
-  const element = await Indexes({ params: Promise.resolve({ name: 'prod' }) });
+const html = async (query: { pgops?: string } = {}) => {
+  const element = await Indexes({
+    params: Promise.resolve({ name: 'prod' }),
+    searchParams: Promise.resolve(query),
+  });
   rendered = await render(element);
   return rendered.container.innerHTML;
 };
@@ -218,5 +221,112 @@ describe('the indexes page', () => {
     const out = await html();
     expect(out).toContain('Never');
     expect(out).not.toContain('1970');
+  });
+});
+
+/**
+ * pgops's own relations, folded out of the lists an operator reads.
+ *
+ * The case is not hypothetical: the documented single-database setup points
+ * the console at the database that is also its store, and every catalog scan
+ * then returns the tool's own indexes alongside the application's.
+ */
+describe('the pgops fold', () => {
+  const unused = (...names: string[]) => ok({
+    indexes: names.map((name) => ({ name, table: 'public.t', sizeBytes: 8192 })),
+    total: names.length,
+    truncated: false,
+  });
+
+  it('hides its own indexes and says how many it hid', async () => {
+    overrides.set('unusedIndexes', unused('public.orders_idx', 'pgops.query_stats_captured_at_idx'));
+    const out = await html();
+    expect(out).toContain('public.orders_idx');
+    expect(out).not.toContain('pgops.query_stats_captured_at_idx');
+    // Counted, never silently dropped: pgops's schema is really in this
+    // database and really does take space.
+    expect(rendered!.text()).toContain("1 more is pgops's own, hidden");
+  });
+
+  it('shows them on ?pgops=show, and offers the way back', async () => {
+    overrides.set('unusedIndexes', unused('public.orders_idx', 'pgops.query_stats_captured_at_idx'));
+    const out = await html({ pgops: 'show' });
+    expect(out).toContain('pgops.query_stats_captured_at_idx');
+    expect(rendered!.text()).toContain('hide them');
+  });
+
+  it('says nothing at all when none of the rows are its own', async () => {
+    overrides.set('unusedIndexes', unused('public.orders_idx'));
+    await html();
+    expect(rendered!.text()).not.toContain("pgops's own");
+  });
+
+  /**
+   * THE VERDICT IS NOT FOLDED, and this is the property that keeps the fold
+   * honest. A check's verdict is computed in `packages/checks` over every row
+   * its SQL returned — so the triage line can say "2 unused indexes" while
+   * this page draws one. Filtering the check instead would hide pgops's cost
+   * from pgops's own numbers, which is exactly what the Sessions page refuses
+   * to do.
+   */
+  it('leaves the check\'s own verdict counting every row', async () => {
+    overrides.set('unusedIndexes', {
+      ...unused('public.orders_idx', 'pgops.query_stats_captured_at_idx'),
+      verdict: { level: 'warn', note: '2 unused indexes' },
+    });
+    await html();
+    expect(rendered!.text()).toContain('2 unused indexes');
+  });
+});
+
+/**
+ * The panels that find things and judge nothing.
+ *
+ * Fifteen of the twenty-one hygiene checks reach no verdict by design, which
+ * left the panels with the most rows in them as the least marked things on
+ * the page: "Duplicate indexes" listing nine redundant indexes had a bare
+ * heading while "Index cache hit rate" carried a green badge for having
+ * nothing to report.
+ */
+describe('the count chip', () => {
+  it('marks a verdict-less panel with how many it found', async () => {
+    overrides.set('duplicateIndexes', ok({
+      pairs: [
+        { name: 'public.a_idx', table: 'public.t', sizeBytes: 8192, coveredBy: 'public.b_idx' },
+        { name: 'public.c_idx', table: 'public.t', sizeBytes: 8192, coveredBy: 'public.d_idx' },
+      ],
+      total: 2,
+      truncated: false,
+    }));
+    await html();
+    const chip = [...rendered!.container.querySelectorAll('[data-slot="badge"]')]
+      .find((b) => b.textContent === '2');
+    expect(chip).toBeDefined();
+    // Neutral. Colour on this console means a threshold was crossed, and
+    // there is no threshold here — that is what `verdict: null` means.
+    expect(chip!.getAttribute('data-variant')).toBe('secondary');
+  });
+
+  it('shows no chip when the panel found nothing', async () => {
+    await html();
+    const chips = [...rendered!.container.querySelectorAll('[data-variant="secondary"]')];
+    expect(chips).toHaveLength(0);
+  });
+
+  /** A check that judged has something stronger to say, and says it alone. */
+  it('yields to a verdict rather than competing with it', async () => {
+    overrides.set('unusedIndexes', {
+      ...ok({
+        indexes: [{ name: 'public.orders_idx', table: 'public.t', sizeBytes: 8192 }],
+        total: 1,
+        truncated: false,
+      }),
+      verdict: { level: 'warn', note: '1 unused index' },
+    });
+    await html();
+    const badges = [...rendered!.container.querySelectorAll('[data-slot="badge"]')]
+      .map((b) => `${b.getAttribute('data-variant')}:${b.textContent}`);
+    expect(badges).toContain('warning:WARN');
+    expect(badges).not.toContain('secondary:1');
   });
 });

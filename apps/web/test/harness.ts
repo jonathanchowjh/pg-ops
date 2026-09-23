@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { Client } from 'pg';
 
@@ -24,9 +25,23 @@ export interface Console {
   url: string;
 }
 
-async function waitForPort(url: string, timeoutMs = 60_000): Promise<void> {
+/**
+ * `next` itself, not `npm run start`. On Linux `npm run` puts `npm → sh →
+ * next` between us and the listener, and a SIGTERM to npm kills npm and sh
+ * but orphans `next` still holding the port — every later `withConsole` on
+ * that worker then hit EADDRINUSE and silently tested the orphan instead
+ * (CI run 35677090028: 23 failures, all "expected 404"). macOS's sh execs
+ * its last command, so the orphan never appeared locally.
+ */
+const NEXT_BIN = fileURLToPath(new URL('../node_modules/next/dist/bin/next', import.meta.url));
+const WEB_DIR = fileURLToPath(new URL('..', import.meta.url));
+
+async function waitForPort(url: string, server: ChildProcess, timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    // Our server is gone, so anything still answering on the port is someone
+    // else's — a test must not pass or fail against it.
+    if (server.exitCode !== null) throw new Error(`console exited with code ${server.exitCode} before ${url} was up`);
     try {
       const r = await fetch(url, { signal: AbortSignal.timeout(2_000) });
       if (r.status < 500) return;
@@ -73,7 +88,13 @@ function run(command: string, args: string[]): Promise<void> {
  */
 export async function withConsole(
   fn: (c: Console) => Promise<void>,
-  extraEnv: Record<string, string> = {},
+  /**
+   * Extra server environment. A FUNCTION when a value has to name the
+   * throwaway container — `PGOPS_STORE_URL` is the case: the store's
+   * connection string does not exist until the container has started, which
+   * is after this argument is passed.
+   */
+  extraEnv: Record<string, string> | ((url: string) => Record<string, string>) = {},
 ): Promise<void> {
   let pg: StartedPostgreSqlContainer | undefined;
   let server: ChildProcess | undefined;
@@ -93,7 +114,8 @@ export async function withConsole(
     const url = pg.getConnectionUri();
     const port = 3100 + Math.floor(Number(process.env.VITEST_WORKER_ID ?? 1));
 
-    server = spawn('npm', ['run', '--workspace', '@pgops/web', 'start', '--', '--port', String(port)], {
+    server = spawn(process.execPath, [NEXT_BIN, 'start', '--port', String(port)], {
+      cwd: WEB_DIR,
       env: {
         ...process.env,
         PGOPS_DATABASES: JSON.stringify([{ name: 'primary', url }]),
@@ -102,13 +124,13 @@ export async function withConsole(
         // environment variables read at request time, so a test proving either
         // one needs to vary the SERVER's environment, not its own. Spread last:
         // a test that deliberately overrides PGOPS_DATABASES should win.
-        ...extraEnv,
+        ...(typeof extraEnv === 'function' ? extraEnv(url) : extraEnv),
       },
       stdio: 'inherit',
     });
 
     const baseUrl = `http://127.0.0.1:${port}`;
-    await waitForPort(baseUrl);
+    await waitForPort(baseUrl, server);
 
     await fn({
       baseUrl,
@@ -122,7 +144,12 @@ export async function withConsole(
   } finally {
     // Always torn down, failure or not — this is a throwaway container the
     // harness itself started, never the developer's own `pgops-dev`.
-    server?.kill('SIGTERM');
+    // Awaited: the next `withConsole` on this worker binds the same port.
+    if (server && server.exitCode === null) {
+      const exited = new Promise((r) => server!.once('exit', r));
+      server.kill('SIGTERM');
+      await exited;
+    }
     await pg?.stop().catch(() => {});
   }
 }

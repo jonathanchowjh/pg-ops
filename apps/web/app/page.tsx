@@ -4,13 +4,54 @@ import { CHECKS, type Verdict, type VerdictLevel } from '@pgops/checks';
 import { databaseNames } from '@/lib/pools';
 import { ConfigError } from '@/lib/config';
 import { runCheckFor } from '@/lib/check';
+import { hygieneFor } from '@/lib/hygiene';
 import { ConfigErrorPage } from '@/components/config-error';
 import { Refresh } from '@/components/refresh';
 import { VerdictBadge, accentClass } from '@/components/verdict-badge';
 import { Badge } from '@/components/ui/badge';
-import { formatCount } from '@/lib/format';
+import { formatCount, formatDuration, plural } from '@/lib/format';
 
 const RANK: Record<VerdictLevel, number> = { ok: 0, warn: 1, critical: 2 };
+
+/**
+ * What the last capture found on this database, in one muted phrase, or
+ * nothing at all.
+ *
+ * The overview's question is "is anything wrong RIGHT NOW", and hygiene is
+ * not an answer to it — so this is deliberately the quietest thing on the
+ * row: caption size, muted ink, no badge, no accent bar, and it never touches
+ * `worstVerdict`. A database with two unused indexes and no incident still
+ * reads OK, because it is OK.
+ *
+ * Nothing at all in three cases, and all three are correct silences: no store
+ * (there is no capture to report), a store that could not be read (the
+ * incident half of this row is the page's job, and a second failure message
+ * per row would bury it), and every area healthy (an operator scanning for
+ * trouble does not need twenty rows each saying they have none).
+ *
+ * `hygieneFor` is one indexed read per database, beside the twelve live
+ * checks this page already runs per 30-second tick — so the column is the
+ * work, not the data.
+ */
+async function hygieneSummary(name: string): Promise<string | null> {
+  const read = await hygieneFor(name);
+  if (!read.ok) return null;
+  const loud = read.areas.filter((a) => a.level !== 'ok');
+  if (loud.length === 0) return null;
+  // The notes, not the levels: "2 unused indexes" is what an operator can act
+  // on, where "Indexes WARN" only tells them where to click to find out.
+  const notes = loud.map((a) => a.note ?? `${a.label.toLowerCase()} not assessed`);
+  const age = loud
+    .map((a) => a.ageMs)
+    .filter((ms): ms is number => ms !== null)
+    .reduce<number | null>((oldest, ms) => (oldest === null || ms > oldest ? ms : oldest), null);
+  // The age travels with it for the reason the triage line carries one: this
+  // is a cached reading, and a cached reading with no age claims to be
+  // current.
+  return age === null
+    ? notes.join(' · ')
+    : `${notes.join(' · ')} · ${formatDuration(age / 1_000)} ago`;
+}
 
 /**
  * The overview answers one question — "is anything wrong anywhere?" — so it
@@ -123,7 +164,11 @@ export default async function Overview() {
     return <ConfigErrorPage message={err.message} />;
   }
 
-  const rows = await Promise.all(names.map(async (name) => ({ name, ...(await worstVerdict(name)) })));
+  const rows = await Promise.all(names.map(async (name) => ({
+    name,
+    ...(await worstVerdict(name)),
+    hygiene: await hygieneSummary(name),
+  })));
 
   // Deliberately NOT sorted worst-first. An operator's database list is one
   // they wrote themselves, in an order that means something to them, and they
@@ -139,8 +184,12 @@ export default async function Overview() {
   // know.
   const unknown = rows.filter((r) => r.verdict === null).length;
 
+  // 64rem, not 48. The hygiene column pushed every row into a crowd at the
+  // right edge, and this page is a LIST — it needs the width its widest row
+  // needs, not the width of a paragraph. Still narrower than the 84rem of
+  // /db/*, which holds tables.
   return (
-    <main className="mx-auto max-w-3xl p-6">
+    <main className="mx-auto max-w-5xl p-6">
       <header className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
         <div>
           <h1 className="text-xl font-semibold">pgops</h1>
@@ -175,12 +224,16 @@ export default async function Overview() {
       <p className="mb-3 text-sm">
         {attention === 0 ? (
           <span className="text-muted-foreground">
-            {formatCount(rows.length)} database{rows.length === 1 ? '' : 's'} · none need attention
+            {plural(rows.length, 'database')} · none need attention
           </span>
         ) : (
           <span className="font-medium">
-            {formatCount(attention)} of {formatCount(rows.length)} database
-            {rows.length === 1 ? '' : 's'} need attention
+            {/* The verb agrees with `attention`, which is the subject — "1 of
+                3 databases needs attention", not "need". With one database
+                configured the old sentence read "1 of 1 database need
+                attention" on the console's front page. */}
+            {formatCount(attention)} of {plural(rows.length, 'database')}
+            {attention === 1 ? ' needs' : ' need'} attention
           </span>
         )}
         {/* Counted and said separately, never folded into the line above. A
@@ -203,11 +256,29 @@ export default async function Overview() {
               href={`/db/${r.name}`}
               className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 p-4 hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none"
             >
-              <span className="font-medium">{r.name}</span>
+              {/* Hygiene sits UNDER the name, not beside the badge.
+                  Beside it, "1 unused index · 20s ago" and the verdict's own
+                  note "2 sessions blocked" were two pieces of muted text on
+                  one line with nothing to say which belonged to which — and
+                  the hygiene one came first, so the row led with the thing
+                  that is not urgent. Under the name it has an owner.
+
+                  In its own ink either way. pgHero puts hygiene on the
+                  dashboard; so does this now, but never in the colour or the
+                  weight of an incident — a duplicate index must not tint a
+                  row on the page an operator opens while being paged. A
+                  database with a hygiene finding and no incident still reads
+                  OK, because it is OK: nothing is wrong right now. */}
+              <span>
+                <span className="font-medium">{r.name}</span>
+                {r.hygiene === null ? null : (
+                  <span className="mt-0.5 block text-xs text-muted-foreground">{r.hygiene}</span>
+                )}
+              </span>
               <span className="flex items-center gap-3">
                 {r.unavailable > 0 ? (
                   <span className="text-sm text-muted-foreground">
-                    {formatCount(r.unavailable)} check{r.unavailable === 1 ? '' : 's'} unavailable
+                    {plural(r.unavailable, 'check')} unavailable
                   </span>
                 ) : null}
                 {/* No verdict at all is its own state, and it is deliberately

@@ -95,11 +95,24 @@ describe('the suggested indexes page', () => {
     expect(details.textContent).toContain('No index needed if less than 500 rows');
   });
 
+  /**
+   * AN AGE, NOT A TIMESTAMP. This page printed
+   * `2026-09-20 10:00:00+00` — a claim about a clock the server cannot see,
+   * to a precision no operator has ever wanted from a statistics reset. The
+   * clock is pinned here because the rendered string is now relative to it.
+   */
   it('names the window it read — live statistics since the last reset', async () => {
-    result.current = ok(data({ statsResetAt: '2026-09-20 10:00:00+00' }));
-    const r = await show();
-    expect(r.text()).toContain('since statistics were last reset');
-    expect(r.text()).toContain('2026-09-20 10:00:00+00');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-22T10:00:00Z'));
+    try {
+      result.current = ok(data({ statsResetAt: '2026-09-20 10:00:00+00' }));
+      const r = await show();
+      expect(r.text()).toContain('since statistics were last reset');
+      expect(r.text()).toContain('2d ago');
+      expect(r.text()).not.toContain('2026-09-20');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('renders a missing extension as the panel renders any failure, remedy included', async () => {

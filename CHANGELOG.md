@@ -4,6 +4,177 @@ All notable changes to pgops are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [2.4.0] — 2026-09-23
+
+The hygiene half, brought up to the incident half — P7b, P7c and P7d of the
+[hygiene roll-up design](docs/design/2026-09-22-pgops-hygiene-rollup-design.md).
+A finding nobody opened a page to look for now reaches the page they do open;
+the hygiene pages stop being lists of everything at one weight; and the
+console stops spending the same ink on good news as on bad.
+
+A second live pass over every route closes the release — see §4.12 of the
+design. It found that the console would not scroll, and that two of its
+three charts were drawing things that were not in the data.
+
+### Fixed
+
+- **The page would not scroll.** `<Sql>` set `overflow-x-auto` on every
+  rendered statement, and the CSS overflow spec computes the *other* axis
+  from `visible` to `auto` when one axis is not visible — so each statement
+  was a two-axis scroll container. The Queries page laid a hundred of them
+  across itself, each 16px tall over a line up to 23,000px wide, and a
+  trackpad gesture beginning over any one was captured by it. Statements
+  clamp to two lines; `ui/table` remains the one horizontal scroller, which
+  is what a comment on the sessions page had already argued for.
+- **The database name scrolled away.** On `/queries` (4,400px tall) and
+  `/sessions` (a Terminate button in every row), the identity guard expired
+  at the first screenful. The header sticks.
+- **Nothing marked the end of a page.** The last row sat 24px from the
+  window edge, so a page that had finished scrolling looked like one that
+  had stopped.
+- **The charts were unreadable, and two of them were lying.** At `h-16`
+  across the full shell they were 20:1 ribbons that encoded their whole
+  range in sixty pixels of travel, under a value axis of two labels and a
+  blank field between them. Now capped at 48rem, given real height, and
+  ruled with four labelled gridlines. Three rules, each tested and
+  mutation-checked: fewer than two points is not a chart (one capture drew
+  an empty frame and a `−0s · −0s · now` axis); the axis will not scale
+  below 2% of the reading (a 102 MB table that grew 8 KB drew a line
+  climbing the full plot under four labels all reading "102 MB"); and a flat
+  series gets one gridline rather than an invented range around it (the
+  floor had produced `0 · −0.333 · −0.667 · −1` — negative call counts).
+- **A query detail page with no query on it.** `/queries/<queryid>`
+  identified its subject as a 19-digit integer and showed the statement
+  nowhere. `readQueryText` fetches it in one indexed lookup; it was redacted
+  at write time, so it is safe to render.
+- **Raw timestamps in three more places**, to the microsecond, on a console
+  that renders on the server and does not know the reader's timezone.
+  `formatAgo` now serves all four callers.
+- **Key-value lists on the Cleanup overview**, the shape converted
+  everywhere else, and **a box around the whole Explain page**, written
+  before a border came to mean "an escalated verdict is in here".
+- **`ui/table`'s horizontal scroller had never engaged.** Its wrapper sat in
+  a grid item, whose default `min-width: auto` refuses to shrink below the
+  content's min-content size — so a `whitespace-nowrap` table made the item
+  963px inside a 720px track and `overflow-x-auto` on a box already that wide
+  is a no-op. At 768px the Sessions page was 965px and Queries 1101px, the
+  whole document scrolling sideways. `min-w-0` on the item; all thirteen
+  routes now hold 768 in both themes.
+- **`formatCount` rounds.** Axis ticks are interpolated, so a calls axis
+  read `681 · 457.667 · 234.333 · 11`. A count is a whole number.
+
+- **The `CRITICAL` badge was below the contrast floor.** Measured,
+  `oklch(0.577 0.245 27.325)` on its own 10% tint is 3.99:1 in light mode,
+  against WCAG's 4.5:1 for text this size — on the badge that means wake
+  someone up. New `-ink` tokens fix it, `--muted-foreground` moves with them
+  (it passed by 0.03), and `apps/web/test/tokens.test.ts` parses the
+  stylesheet, redoes the arithmetic and fails by name on any token that
+  drifts under the line. It also asserts every measured token is inside the
+  sRGB gamut, because a colour outside it has three different contrast
+  ratios depending on who resolves it.
+
+### Added
+
+- **Calls beside execution time on Queries, and rows on the query detail
+  page.** No new capture and no migration: `query_load.calls` has been
+  written since migration 004 and `Interval.rows` differenced since P4, and
+  both were discarded on every render. Execution time alone rises both when
+  the database gets slower and when more traffic arrives, which have
+  opposite fixes; read beside calls the pair is unambiguous.
+
+- **A 24-hour load chart on the Queries page**, with a store. Every other
+  number there ranks statements against each other, which answers "what is
+  worst" and not "is this unusual" — and during an incident the second
+  question decides whether the ranking matters at all.
+- **`pgops.query_load`** (migration 004): one row per capture, the whole
+  database's execution time and calls for that interval, differenced inside
+  the capture that already holds both snapshots. Summed at read time instead,
+  a large database would be over a million rows on every five-second poll. An
+  interval spanning a statistics reset contributes nothing, so the chart has a
+  gap exactly where the per-shape series has one — never a zero.
+- **`LineChart`**, replacing `Spark`: a value axis with both bounds, a
+  relative time axis, and a label that reads the series and both its ends
+  aloud. A sparkline said "it went up" and could not say from what, to what,
+  or over how long. It breaks the line where pgops stopped capturing, rather
+  than drawing straight across a hole. Still inline SVG, still no charting
+  dependency.
+- **The pgops fold, on four more pages.** Indexes, Tables, Space and Sequences
+  hide the console's own relations from their lists, count them in one line
+  and show them on `?pgops=show` — the rule Sessions has always applied to
+  pgops's own connections, now shared from `lib/fold.ts`. Readings and the
+  checks' own verdicts still count them: a tool that removed itself from its
+  own numbers would be lying about the thing it measures.
+- **A count chip on the panels that find things and judge nothing.** Fifteen
+  of the twenty-one hygiene checks reach no verdict by design, which left the
+  panels with the most rows in them as the least marked things on the page.
+  Neutral, never a hue — colour here means a threshold was crossed, and there
+  is none.
+- **Hygiene lines on the triage page.** Each band carries the cached state of
+  its areas — Indexes and Tables under Queries, Sequences under Replication &
+  cleanup — with the worst verdict among the area's checks, what it found, the
+  age of the reading, and a link into the page that explains it. This is the
+  one thing pgHero's dashboard did that pgops did not.
+
+- **`pgops.check_results`** (migration 003): one row per check per database,
+  upserted. Not a history — nothing reads a hygiene finding from last week, so
+  there is no retention to run and no prune to get wrong.
+- **A hygiene pass on the capture tick.** Every `class: 'hygiene'` check runs
+  every five minutes, each bounded by its own `timeoutMs`, in its own
+  transactions **after** the capture's has committed — twenty-one catalog
+  scans have no business inside the transaction that holds the store's write
+  path open. Skipped rather than queued when another replica holds the lock,
+  the same rule capture follows.
+- **Write-through from the hygiene pages.** They still run their checks on
+  visit, unchanged, and now cache what they found, so a page and the line
+  beneath it agree the moment anyone has looked.
+- `AREAS` and `hygieneAreas()` in `packages/checks` — which checks belong to
+  which page, and the roll-up, as data and one pure function.
+
+### Changed
+
+- **The Space page says "not enough history" once, not thirty times.** The
+  growth column reads `—` per row and one sentence above the list gives the
+  capture count and how long ago the first was taken. A thirty-relation
+  database's most repeated words explained an absence rather than describing
+  the database.
+- **`Findings` is one component**, shared by Indexes and Tables, which each
+  carried a byte-identical copy.
+- The README's poll boundary. Hygiene pages still never poll; with a store
+  configured, their checks also run on the capture tick. Without one, nothing
+  is scheduled and the triage page says so once, naming the variable.
+
+### Changed — how the console looks
+
+- **A box means look here.** Only a check that needs attention — `warn`,
+  `critical`, or one that could not run — keeps its bordered card, and it
+  gains a tinted surface with the accent bar it already had. Everything else
+  is a row on the canvas under a hairline. A triage page with nothing wrong
+  was nine outlined boxes: furniture at the weight of a signal.
+- **The four gates became a spine.** They have always been a sequence — the
+  gates a request clears, in the order it clears them — and the page never
+  showed it. A numbered rail down the left carries each gate's name, its
+  question and its link, with a rule binding the band beside it. Causes run
+  down the numbers and symptoms run up them. It collapses to plain headings
+  below `lg`.
+- **A type scale of five sizes and nothing between them**, body text in its
+  own token a step lighter than a heading, and the shell down to 84rem.
+- **`0 slot(s)` became `0 slots`**, through one helper that takes an
+  irregular plural rather than guessing it.
+
+### Notes
+
+- **Three areas carry a line, not four.** Space, Maintenance and Settings have
+  no member that can escalate — every one of their checks reports a reading
+  and judges nothing — so a line for them would have to invent a verdict. The
+  design expected `autovacuumDanger` to escalate; it deliberately does not
+  (see the divergence for #45), and `escalates` is derived from the checks so
+  a threshold added later gives an area its line with no edit.
+- **An area's band is declared, not read from its checks' gates.**
+  `invalidConstraints` answers a `keep-up` question on a `work` page, and
+  `tableStats` does the same. The two are allowed to disagree.
+
 ## [2.3.1] — 2026-09-22
 
 A patch for two pages that answered 500 whenever actions were enabled.

@@ -20,9 +20,14 @@ export default async function Explain({ params }: { params: Promise<{ name: stri
   const { name } = await params;
   return (
     <>
-      <section className="space-y-4 rounded-lg border p-4">
+      {/* NO BOX. P7d made a border mean "an escalated verdict is in here"
+          (check-panel.tsx), and this one wrapped the entire page — so it said
+          nothing except "alarm" to an operator trained by the triage page.
+          Every other sub-route under Queries sits flush on the page, and the
+          heading below already separates the tool from the nav above it. */}
+      <section className="space-y-4">
         <header className="space-y-1">
-          <h2 className="font-semibold">Explain</h2>
+          <h2 className="border-b pb-2 font-medium">Explain</h2>
           <p className="max-w-prose text-sm text-muted-foreground">
             Plans the statement without running it. <code>$1</code>-style parameters are planned
             generically, so a shape copied from the Queries tab works as it is. No{' '}

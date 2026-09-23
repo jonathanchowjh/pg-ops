@@ -45,7 +45,19 @@ export async function register(): Promise<void> {
           return [];
         }
       },
-      capture: async (name) => checks.captureOnce(await contextFor(name), name),
+      capture: async (name) => {
+        const ctx = await contextFor(name);
+        const outcome = await checks.captureOnce(ctx, name);
+        // AFTER the capture's transaction has committed, never inside it:
+        // captureOnce holds one store client across two scans and a prune in
+        // a single transaction, and these are 21 catalog scans each allowed
+        // ten seconds. Its own failures are swallowed by contract, and the
+        // capture's outcome is what the scheduler reports on — a hygiene pass
+        // that could not run leaves the previous findings in the cache with
+        // their own age, which the triage line renders as stale.
+        await checks.captureHygiene(ctx, name);
+        return outcome;
+      },
       migrate: checks.migrate,
     });
   } catch (err) {

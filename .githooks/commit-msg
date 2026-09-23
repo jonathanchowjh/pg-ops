@@ -1,0 +1,21 @@
+#!/bin/sh
+# Commits here carry their author's name and nothing else — no Co-Authored-By
+# trailer for the tool that helped write them. Stripped rather than rejected:
+# the trailer is added by tooling, not by a person who can be asked to retype
+# the message, so failing the commit would only move the chore.
+#
+# Enabled by `git config core.hooksPath .githooks`, which a fresh clone does
+# NOT inherit — see CONTRIBUTING.md. The hook is committed so that setting is
+# the only per-clone step.
+set -e
+
+msg=$1
+tmp=$(mktemp)
+
+# Drop the trailers, then drop whatever blank lines they left at the end:
+# awk holds blank lines back and emits them only once real text follows.
+grep -viE '^[[:space:]]*Co-authored-by:[[:space:]]' "$msg" |
+  awk '/^[[:space:]]*$/ { held++; next }
+       { while (held > 0) { print ""; held-- } print }' > "$tmp"
+
+mv "$tmp" "$msg"

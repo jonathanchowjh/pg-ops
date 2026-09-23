@@ -14,6 +14,21 @@ const state = vi.hoisted(() => ({
 // render path, and there is no app router mounted in a unit test.
 vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: () => {} }) }));
 
+// Default: a store that answered and had nothing to report, which is what
+// every test predating the hygiene lines assumes — the bands render exactly
+// as they did before.
+const hygiene = vi.hoisted(() => ({
+  read: { ok: true, areas: [] } as unknown,
+}));
+
+// The hygiene lines read the CACHE, never a check — see lib/hygiene.ts and
+// the guard that holds it. Mocked here for the same reason `@/lib/check` is:
+// these tests render the page with no database and no store.
+vi.mock('@/lib/hygiene', () => ({
+  hygieneFor: vi.fn(async () => hygiene.read),
+  STALE_AFTER_MS: 600_000,
+}));
+
 vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async (_name: string, check: { id: string }) => {
     if (state.mode === 'all-alike') {
@@ -68,7 +83,7 @@ vi.mock('@/lib/check', () => ({
         return {
           ok: true,
           data: { count: 2, longestQueryAgeSecs: 1115, suspectPid: 9403 },
-          verdict: { level: 'critical', note: '2 session(s) blocked' },
+          verdict: { level: 'critical', note: '2 sessions blocked' },
           crossed: {
             level: 'critical', value: 60, unit: 'seconds',
             because: 'past a minute of query age, most client timeouts have already fired',
@@ -96,7 +111,7 @@ vi.mock('@/lib/check', () => ({
             }],
             truncated: false,
           },
-          verdict: { level: 'critical', note: '2 session(s) blocked' },
+          verdict: { level: 'critical', note: '2 sessions blocked' },
           crossed: {
             level: 'critical', value: 60, unit: 'seconds',
             because: 'a minute of blocking outlives most application timeouts',
@@ -137,7 +152,7 @@ vi.mock('@/lib/check', () => ({
       return {
         ok: true,
         data: { count: 2, longestQueryAgeSecs: 2542, suspectPid: 2318 },
-        verdict: { level: 'critical', note: '2 session(s) blocked' },
+        verdict: { level: 'critical', note: '2 sessions blocked' },
         crossed: {
           level: 'critical', value: 60, unit: 'seconds',
           because: 'past a minute of query age, most client timeouts have already fired',
@@ -455,5 +470,108 @@ describe('Triage — the page is derived from the tree', () => {
     expect(bandOf('Lock wait graph')).toBe(GATES.wait.title);
     expect(bandOf('Long-running')).toBe(GATES.work.title);
     expect(bandOf('Wraparound')).toBe(GATES['keep-up'].title);
+  });
+});
+
+
+/**
+ * The hygiene roll-up: one line per area that can escalate, at the foot of
+ * the band its page belongs to.
+ *
+ * This is the console's answer to the one thing pgHero's dashboard does that
+ * pgops's did not — a duplicate index or a sequence near its ceiling was
+ * invisible until somebody opened the page that looks for it, and the page an
+ * operator opens is this one.
+ */
+describe('the triage page — hygiene lines', () => {
+  afterEach(() => { hygiene.read = { ok: true, areas: [] }; });
+
+  const area = (over: Record<string, unknown> = {}) => ({
+    id: 'indexes', label: 'Indexes', href: 'queries/indexes', band: 'work',
+    level: 'ok', note: null, ageMs: 4 * 60_000, ...over,
+  });
+
+  const lines = async (areas: unknown[]): Promise<Rendered> => {
+    state.mode = 'ok';
+    hygiene.read = { ok: true, areas };
+    return render(await Triage({ params: Promise.resolve({ name: 'prod' }) }));
+  };
+
+  it('shows what an area found without anyone opening its page', async () => {
+    const r = await lines([area({ level: 'warn', note: '2 unused indexes' })]);
+    expect(r.text()).toContain('Indexes');
+    expect(r.text()).toContain('2 unused indexes');
+    expect(r.text()).toContain('WARN');
+    r.unmount();
+  });
+
+  it('links to the page that explains the finding', async () => {
+    const r = await lines([area({ level: 'critical', note: '1 invalid index' })]);
+    const href = [...r.container.querySelectorAll('a')]
+      .map((a) => a.getAttribute('href'))
+      .find((h) => h?.endsWith('/queries/indexes'));
+    expect(href).toBe('/db/prod/queries/indexes');
+    r.unmount();
+  });
+
+  /**
+   * The age is the point of a cached reading. Without it the line claims a
+   * currency it does not have — this is a finding from the last capture, not
+   * from this render, and the two are up to five minutes apart.
+   */
+  it('says how old the reading is', async () => {
+    const r = await lines([area({ ageMs: 4 * 60_000 })]);
+    expect(r.text()).toMatch(/4m/);
+    r.unmount();
+  });
+
+  /**
+   * Same rule as everywhere else in this console: "we could not look" never
+   * renders as "we looked and it is fine". A stale, missing or failed
+   * reading is grey and says UNKNOWN, not a green OK.
+   */
+  it('renders an unassessed area as UNKNOWN, not OK', async () => {
+    const r = await lines([area({ level: 'unknown', note: 'never captured', ageMs: null })]);
+    expect(r.text()).toContain('UNKNOWN');
+    expect(r.text()).toContain('never captured');
+    r.unmount();
+  });
+
+  it('puts each line in its own band', async () => {
+    const r = await lines([
+      area({ id: 'indexes', label: 'Indexes', band: 'work' }),
+      area({ id: 'sequences', label: 'Sequences', href: 'cleanup/sequences', band: 'keep-up' }),
+    ]);
+    const text = r.text();
+    // Sequences belongs to the last band, so it must come after the Queries
+    // band's own heading — the line is part of the band, not a footer.
+    expect(text.indexOf('Sequences')).toBeGreaterThan(text.indexOf(GATES['keep-up'].title));
+    r.unmount();
+  });
+
+  /**
+   * A console with no store still triages. The lines say once why they are
+   * empty and name the variable that fills them, rather than rendering four
+   * grey rows that look like findings.
+   */
+  it('says history is off, once, when there is no store', async () => {
+    state.mode = 'ok';
+    hygiene.read = { ok: false, message: 'History is off — set PGOPS_STORE_URL to record hygiene findings.' };
+    const r = await render(await Triage({ params: Promise.resolve({ name: 'prod' }) }));
+
+    const text = r.text();
+    expect(text).toContain('PGOPS_STORE_URL');
+    expect(text.match(/PGOPS_STORE_URL/g)).toHaveLength(1);
+    r.unmount();
+  });
+
+  /** The incident panels are the page; a failed store read must not blank them. */
+  it('still renders the bands when the cache cannot be read', async () => {
+    state.mode = 'ok';
+    hygiene.read = { ok: false, message: 'store unreachable' };
+    const r = await render(await Triage({ params: Promise.resolve({ name: 'prod' }) }));
+
+    for (const gate of GATE_ORDER) expect(r.text()).toContain(GATES[gate].title);
+    r.unmount();
   });
 });

@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { SERIES } from '@pgops/checks';
 import { runSeriesFor } from '@/lib/check';
-import { Spark } from '@/components/spark';
+import { LineChart } from '@/components/line-chart';
 import { formatBytes, formatCount, formatDelta } from '@/lib/format';
 
 /** Thirty days, and §5.1's bound on what that window is allowed to return. */
@@ -97,14 +97,14 @@ function History({
   const last = points[points.length - 1]!;
 
   return (
-    <div className="rounded border p-3">
-      <Spark
-        points={points.map((p) => p.sizeBytes)}
+    <div>
+      <LineChart
+        points={points.map((p) => ({ at: p.capturedAt, value: p.sizeBytes }))}
         label={`${relation} size over ${DAYS} days`}
+        format={formatBytes}
       />
-      {/* The chart is the shape; these are the fact. A sparkline has no axis,
-          so without the endpoints stated it says "it went up" and not by how
-          much. */}
+      {/* The chart carries its own axes now; these are the exact endpoints
+          and the change between them, which two rounded bounds cannot give. */}
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
         <Fact label="First" value={formatBytes(first.sizeBytes)} />
         <Fact label="Latest" value={formatBytes(last.sizeBytes)} />

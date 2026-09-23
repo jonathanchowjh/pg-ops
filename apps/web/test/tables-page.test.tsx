@@ -34,7 +34,7 @@ afterEach(() => {
 });
 
 const html = async () => {
-  const element = await Tables({ params: Promise.resolve({ name: 'prod' }) });
+  const element = await Tables({ params: Promise.resolve({ name: 'prod' }), searchParams: Promise.resolve({}) });
   rendered = await render(element);
   return rendered.container.innerHTML;
 };

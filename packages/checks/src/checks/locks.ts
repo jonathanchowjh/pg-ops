@@ -375,7 +375,10 @@ export const locks: Check<LockRow, LocksData> = {
     if (total === 0) return { level: 'ok' };
     const warn = t.find((x) => x.level === 'warn');
     if (warn && total < warn.value) return { level: 'ok' };
-    const note = `${total} session(s) blocked`;
+    // Inlined rather than a shared helper: this package has exactly one
+    // dependency and two of these, and `indexes.ts` already writes it this
+    // way. The surface's own `plural` is in apps/web and stays there.
+    const note = `${total} session${total === 1 ? '' : 's'} blocked`;
     // I3: the LONGEST ACTUAL WAIT (pg_locks.waitstart), not the root
     // blocker's transaction age. The critical threshold's own `because`
     // talks about the waiters having outlived their application timeouts;
