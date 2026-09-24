@@ -13,3 +13,6 @@ next-env.d.ts
 # Playwright MCP scratch output (page snapshots, console logs) written into
 # whatever directory the browser tooling is driven from.
 .playwright-mcp/
+# Design documents, plans, screenshots and the DBA playbook are kept
+# locally and not published.
+docs/

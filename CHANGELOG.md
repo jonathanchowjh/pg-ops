@@ -9,7 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [2.4.0] — 2026-09-23
 
 The hygiene half, brought up to the incident half — P7b, P7c and P7d of the
-[hygiene roll-up design](docs/design/2026-09-22-pgops-hygiene-rollup-design.md).
+hygiene roll-up design.
 A finding nobody opened a page to look for now reaches the page they do open;
 the hygiene pages stop being lists of everything at one weight; and the
 console stops spending the same ink on good news as on bad.
@@ -279,11 +279,9 @@ now fails any capability added as `planned`.
   `globals.css` could import a stylesheet of variants nothing used, and that
   one import carried the MCP SDK, express and a `qs` advisory into the
   production tree. The scaffold guard now keeps it out.
-- The design documents moved from `docs/superpowers/specs/` to
-  [`docs/design/`](docs/design/). The per-phase execution plans and review
-  transcripts that sat beside them, and the pre-console plan PDF that
-  described the terminal program, are removed; the deep-dive PDF stays and is
-  what `dba-playbook/` now points to.
+- The design documents moved out of `docs/superpowers/specs/`. The
+  per-phase execution plans and review transcripts that sat beside them, and
+  the pre-console plan PDF that described the terminal program, are removed.
 
 ### Fixed
 
@@ -546,7 +544,7 @@ safety off, it can terminate the backend holding everything up.
 
 The hygiene half — indexes, bloat, table and database size, sequence
 exhaustion, maintenance and settings — is **not** in v1 and is not partially
-in v1. It is designed (`docs/design/2026-09-03-pgops-p2-hygiene-design.md`)
+in v1. It is designed
 and scheduled for v2. Shipping half of it would have meant a console that
 answers "are your indexes healthy?" with a screen that is silently incomplete,
 which is the one failure mode this project is built to avoid.

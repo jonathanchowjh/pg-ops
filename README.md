@@ -477,8 +477,6 @@ apps/web/
   lib/pools.ts      One pool per database URL
   proxy.ts          Basic auth and the 404 gate over the action routes
 
-dba-playbook/       The same diagnostics as standalone psql scripts
-docs/design/        Dated design documents each phase was built from
 scripts/            dev-db.sh, the lock-chain seeder, the image smoke test
 ```
 
@@ -487,8 +485,6 @@ scripts/            dev-db.sh, the lock-chain seeder, the image smoke test
 | Document | Content |
 |---|---|
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Working on the code: setup, how a check flows, the rules the tests enforce, conventions, releasing, and a five-day guide for developers new to the codebase. |
-| [dba-playbook/](dba-playbook/) | Six `psql` playbooks covering the same diagnostics by hand. The checks were derived from these and each is kept runnable so any finding can be reproduced without the tool. |
-| [docs/design/](docs/README.md) | The design documents, dated and in order, with a note on which supersedes which. |
 | [CHANGELOG.md](CHANGELOG.md) | Every release, with the reasoning behind each change. |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability and what is in scope. |
 

@@ -102,9 +102,6 @@ apps/web/                 The Next.js console. Renders what packages/checks retu
   proxy.ts                Basic auth, and the 404 gate over the action routes
   test/                   Component tests, route tests, and guards.test.ts
 
-dba-playbook/             The same work by hand in psql. The checks were derived from these.
-docs/design/              The design documents each phase was built from
-docs/screenshots/         What the README shows
 scripts/                  dev-db.sh, the lock-chain seeder, the image smoke test
 ```
 
@@ -264,10 +261,10 @@ puts the decision on a web page with the reasoning written beside it.
 3. In a second terminal, run `npm run db:seed`. Watch the Triage and Locks
    pages change, and find the root blocker: the `batch-worker` session.
 4. While the chain is still held, open a third terminal, run
-   `npm run db:psql`, and paste in the queries from
-   `dba-playbook/00-first-five-minutes.sql` and `01-lock-chain.sql`. Every
-   panel you just saw is one of these queries. Match each panel to its query
-   before moving on.
+   `npm run db:psql`, and paste in the `sql` from
+   `packages/checks/src/checks/locks.ts` and `blocked.ts`. Every panel you
+   just saw is one check's query. Match each panel to its query before moving
+   on.
 5. Terminate the root blocker from the Sessions page, typing any reason. The
    seeder prints that its connection closed and exits, and the dev server's
    terminal prints one JSON audit line naming the target and your reason.
@@ -302,10 +299,6 @@ the comments are the design record.
    — a small page that renders one check.
 8. [apps/web/components/check-panel.tsx](apps/web/components/check-panel.tsx)
    — where the failed case and the verdict badge render.
-
-Then read [docs/README.md](docs/README.md) for what each design document
-decided, and skim the [web console design](docs/design/2026-08-26-pgops-web-design.md)
-sections 1 through 3. You do not need the rest yet.
 
 ### Day 3: run the tests, then break a guard on purpose
 
@@ -455,38 +448,21 @@ and this guide needs a fix, which is itself a good first pull request.
 
 ### Day 5: pick up real work
 
-The open work is described in
-[the hygiene roll-up design](docs/design/2026-09-22-pgops-hygiene-rollup-design.md),
-in four phases. Read it top to bottom first, including its last section,
-which records what a review against the code changed in the first draft. That
-table is a fast lesson in how a design meets the codebase. Then read the
-sections of the earlier designs it cites. A reference like `parity §2.1` means section 2.1 of
-the named document; [docs/README.md](docs/README.md) says which document is
-which.
+Open work is tracked in this repository's issues and, once underway, under
+`[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Pick the smallest item that
+touches one component or one page.
 
-**Study P7a before you write anything.** It is the smallest phase and the
-best model of how work is done here. Two pages crashed because a server
-component passed a function to a client component, which React cannot
-serialise. The design's section 1 names the fix and, just as importantly, the
-test that would have caught it: an integration test that boots the console
-with actions on, because the existing suite only ever ran with them off. When
-P7a has landed, read its diff in this order: the design section, the new
-test, then the fix. That order is the one to copy.
+**Study the 2.3.1 fix before you write anything.** It is the best model of
+how work is done here. Two pages crashed because a server component passed a
+function to a client component, which React cannot serialise. The fix landed
+with the test that would have caught it: an integration test that boots the
+console with actions on, because the existing suite only ever ran with them
+off. Read that diff in this order: the changelog entry, the new test, then
+the fix. That order is the one to copy.
 
-**Then take one P7c task.** P7c's task list, at the end of the design, is
-cut into pieces that each stand alone. Two of them suit a first
-contribution:
-
-- **Task 5, a count on verdict-less panels.** A panel whose check reports a
-  non-empty list but has no verdict, such as duplicate indexes, shows a
-  neutral count where a badge would go. One component,
-  `components/check-panel.tsx`, and its test beside the others in
-  `apps/web/test/`. P7d's task 4 also reshapes this component, so check
-  whether it has landed and build on whichever version is current.
-- **Task 3, the growth sentence on the Space page.** Replace thirty
-  repetitions of "not enough history" with a `—` per row and one sentence
-  above the list saying how many captures the store holds. One page, one
-  store read you can find in `store/read.ts`, and a page test.
+Comments in the code cite design documents by date and section, for example
+`spec 2026-09-03 §2` or `parity §2.1`. Those documents are kept outside the
+repository. Treat the comment itself as the record of the decision.
 
 Whichever you pick:
 
@@ -495,9 +471,9 @@ Whichever you pick:
    starting points for page and component tests.
 2. Write the test first and watch it fail for the reason you expect. Then
    make it pass. Every fix in the changelog was built this way.
-3. Keep the pull request to the one task. P7b touches the store schema, the
-   capture tick and the Triage page, and is a later contribution, not a
-   first.
+3. Keep the pull request to the one task. Anything that touches the store
+   schema, the capture tick and a page together is a later contribution, not
+   a first.
 
 ### How to ask for help
 
@@ -517,6 +493,3 @@ does not.
   the ones around it.
 - A changelog entry under the next version, written for an operator deciding
   whether to upgrade.
-- Screenshots reshot if a page the README shows changed shape. The
-  screenshots live in `docs/screenshots/` in both light and dark, at a fifth
-  of native size.
