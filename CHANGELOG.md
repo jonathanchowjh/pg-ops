@@ -77,12 +77,33 @@ three charts were drawing things that were not in the data.
 
 ### Added
 
-- **Calls beside execution time on Queries, and rows on the query detail
-  page.** No new capture and no migration: `query_load.calls` has been
-  written since migration 004 and `Interval.rows` differenced since P4, and
-  both were discarded on every render. Execution time alone rises both when
-  the database gets slower and when more traffic arrives, which have
-  opposite fixes; read beside calls the pair is unambiguous.
+- **Four charts drawn from series that were already being captured.** No new
+  capture and no migration for any of them: `query_load.calls` has been
+  written since migration 004, `Interval.rows` and the shared-block counters
+  differenced since P4, and `space_stats` filled since P1 — all of it
+  discarded on every render.
+  - *Calls beside execution time on Queries.* Execution time alone rises
+    both when the database gets slower and when more traffic arrives, which
+    have opposite fixes; read beside calls the pair is unambiguous.
+  - *Rows and blocks read from disk on the query detail page*, joining calls
+    and total time. Time up with rows flat is a plan that got worse; time up
+    with blocks read up is a shape that outgrew the cache. Blocks rather than
+    a cache-hit percentage on purpose: a ratio has no value in an interval
+    that touched no shared buffers, and this console does not answer 0% or
+    100% to a question it could not measure — and a hit rate lives in the
+    last fraction of a percent, where the chart's own range floor would
+    flatten exactly the drop worth seeing.
+  - *Total table size over thirty days on the Space page*, summed in Postgres
+    rather than in the console — one indexed aggregate instead of 3.4 million
+    rows crossing the wire. It is deliberately **not** titled "database size":
+    it sums user tables with their indexes and TOAST, excluding the catalogs
+    and pgops's own schema, and would otherwise contradict the live Database
+    size panel eight lines below it by 8 MB. The relation count rides back
+    with the sum, so a fall can be told apart from a capture that measured
+    less of the database.
+- **No chart heading outlives its chart.** `LineChart` renders nothing below
+  two points, so a heading beside it would have stood over blank page on a
+  shape with a single capture.
 
 - **A 24-hour load chart on the Queries page**, with a store. Every other
   number there ranks statements against each other, which answers "what is

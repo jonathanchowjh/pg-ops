@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nextTick, onSettle, onTick, tick, type TickState } from '../components/refresh.js';
+import { nextTick, onSettle, onTick, shouldHold, tick, type TickState } from '../components/refresh.js';
 
 describe('nextTick', () => {
   /**
@@ -79,6 +79,65 @@ describe('onTick and onSettle — the state transitions', () => {
   it('goes idle when nothing was requested during the flight', () => {
     const quiet = { inFlight: true, requested: false, startedAt: 1000 };
     expect(onSettle(quiet, 3000).act).toBe('idle');
+  });
+});
+
+describe('shouldHold — the poll yields to the reader', () => {
+  /**
+   * These pages are as tall as their content by design: sessions come and go,
+   * and a check that flips ok to warn grows from a one-line row into a full
+   * card. When the document shrinks below `scrollY + innerHeight` the browser
+   * clamps the scroll position, which reads as the page springing back up
+   * while you are trying to read the bottom of it.
+   */
+  it('runs at the top, where a change below the fold moves nothing', () => {
+    expect(shouldHold(0)).toBe(false);
+  });
+
+  /**
+   * Not zero: a trackpad resting against a page reports a pixel or two that
+   * nobody intended, and a console that stopped updating because someone
+   * breathed on it would be worse than the jump.
+   */
+  it('tolerates the pixel or two a resting trackpad reports', () => {
+    expect(shouldHold(1)).toBe(false);
+    expect(shouldHold(8)).toBe(false);
+  });
+
+  it('holds once the reader has actually scrolled', () => {
+    expect(shouldHold(9)).toBe(true);
+    expect(shouldHold(2_000)).toBe(true);
+  });
+});
+
+describe('tick — holding is not skipping', () => {
+  const idle = { inFlight: false, requested: false, startedAt: null };
+
+  it('does not fire while the reader is scrolled away', () => {
+    expect(tick(idle, 1000, false, true).act).toBe('hold');
+  });
+
+  /**
+   * A SKIP records itself so the settle can re-arm it (property 3) — it was
+   * beaten to the database and something is owed a follow-up. A HOLD owes
+   * nothing: the operator is reading. Re-arming here would fire a refresh,
+   * and move the page, the moment they scrolled back to the top.
+   */
+  it('leaves the state untouched, so nothing is owed a follow-up', () => {
+    const held = tick(idle, 1000, false, true);
+    expect(held.state).toEqual(idle);
+    expect(held.state.requested).toBe(false);
+    expect(held.state.startedAt).toBeNull();
+  });
+
+  it('still refreshes at the top, and still skips a tick that lands mid-flight', () => {
+    expect(tick(idle, 1000, false, false).act).toBe('refresh');
+    expect(tick(idle, 1000, true, false).act).toBe('skip');
+  });
+
+  /** The hold outranks the flight: neither one should reach the database. */
+  it('holds rather than skips when both would stop it', () => {
+    expect(tick(idle, 1000, true, true).act).toBe('hold');
   });
 });
 

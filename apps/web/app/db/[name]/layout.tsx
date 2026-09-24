@@ -61,12 +61,20 @@ export default async function DbLayout({
   // nothing lined up with anything. 1344px still fills a 1440 display and
   // still holds the queries table without scrolling.
   //
-  // `pb-24`, not `pb-6`. At 24px the last table row ended flush against the
-  // window edge, so a page that HAD reached its end looked like one that had
-  // stopped scrolling — the operator kept pushing at a page that was already
-  // finished. An empty band is the terminator.
+  // `pb-40`, up from `pb-24`, up from `pb-6`. At 24px the last table row
+  // ended flush against the window edge, so a page that HAD reached its end
+  // looked like one that had stopped scrolling.
+  //
+  // 96px did not fix it either, and the reason is that AN EMPTY BAND IS NOT A
+  // TERMINATOR. Below the last row sat 96px of the same background colour the
+  // page is painted in, under a table whose rows are separated by hairline
+  // rules — so the eye reads "the rows continue past the fold", which is the
+  // exact belief the band was added to remove. Measured on /queries: the
+  // wheel reaches scrollY 1888 of a possible 1888 at four viewports, with
+  // zero drift while parked. The mechanics were already right; the page just
+  // never said it had ended. The rule below is what says it.
   return (
-    <main className="mx-auto w-full max-w-[84rem] px-6 pb-24">
+    <main className="mx-auto w-full max-w-[84rem] px-6 pb-40">
       {/* STICKY, and it is the identity guard that makes it so rather than
           fashion. The name below is "the only thing standing between an
           operator with three tabs open and acting on the wrong database" —
@@ -100,6 +108,14 @@ export default async function DbLayout({
         <Nav name={name} />
       </div>
       {children}
+      {/* THE FULL STOP. A hairline the width of the content, and nothing
+          under it — the same vocabulary the tables already use for closing a
+          row, at the width that closes the page. `aria-hidden` because it
+          carries no fact a screen reader needs: the end of `<main>` is
+          already the end of the document for anyone reading it that way, and
+          this exists purely for the eye that cannot tell 96px of background
+          from more page below. */}
+      <div aria-hidden className="mt-12 border-t" />
     </main>
   );
 }

@@ -1,14 +1,16 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { CHECKS, SERIES } from '@pgops/checks';
-import type { GrowthPoint } from '@pgops/checks';
+import type { GrowthPoint, StoredTotal } from '@pgops/checks';
 import { runCheckFor, runSeriesFor } from '@/lib/check';
+import { SPACE_DAYS, databaseSpaceFor } from '@/lib/load';
+import { LineChart } from '@/components/line-chart';
 import { cacheChecks } from '@/lib/hygiene';
 import { CheckPanel } from '@/components/check-panel';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { FoldNote } from '@/components/fold-note';
 import { foldFrom, foldOurs, type Fold } from '@/lib/fold';
-import { formatBytes, formatCount, formatDelta, formatDuration } from '@/lib/format';
+import { formatBytes, formatCount, formatDelta, formatDuration, plural } from '@/lib/format';
 
 export async function generateMetadata({
   params,
@@ -53,6 +55,11 @@ export default async function Space({
       { databaseName: name }),
   ]);
 
+  // Read after the checks rather than beside them: this one is history, it
+  // cannot fail the page, and its window is thirty days where the growth
+  // column's is seven.
+  const total = await databaseSpaceFor(name);
+
   // The same readings, written where the triage page can see them. The page
   // is unchanged — it ran these checks just now, on visit — and this is what
   // stops the triage line reporting a finding this page has already
@@ -72,6 +79,7 @@ export default async function Space({
 
   return (
     <div className="grid gap-4">
+      <Total points={total} />
       <CheckPanel title="Database size" result={size}>
         {(d) => (
           <p className="text-sm">
@@ -215,6 +223,76 @@ function Growth({ point }: { point: GrowthPoint | undefined }) {
  * does, and reporting its count as the store's would understate the history
  * every other row was measured against.
  */
+/**
+ * Every captured table's size, added up, over thirty days.
+ *
+ * THE PAGE'S LARGEST QUESTION, and the only one it could not answer. Every
+ * other reading here is a single instant — the live total at the top, the
+ * largest relations beneath it — or a single relation's history behind a
+ * link. "Is this growing, and how fast" is what an operator opens a space
+ * page to find out, and answering it meant clicking into relations one at a
+ * time and adding up the slopes by eye.
+ *
+ * NOT "DATABASE SIZE", and the distinction is not pedantry — it is a number
+ * that would contradict the one eight lines below it. `space_stats` holds
+ * `pg_total_relation_size` for `relkind IN ('r','m','p')` outside
+ * `pg_catalog`, `information_schema` and `pgops` (see capture.ts's
+ * SPACE_SQL): user TABLES, each already carrying its own indexes and TOAST,
+ * and nothing else. On the demo that is 116 MB against a live database size
+ * of 124 MB, the difference being the catalogs and pgops's own storage. A
+ * chart titled "Database size" sitting above a "Database size" panel that
+ * disagrees with it by 8 MB is exactly the kind of quiet wrongness this
+ * console exists not to print.
+ *
+ * Silent below two captures, like every other chart, and silent with no
+ * store at all: `databaseSpaceFor` returns `[]` for both, and the growth
+ * column below already says which of the two it is.
+ */
+function Total({ points }: { points: readonly StoredTotal[] }) {
+  if (points.length < 2) return null;
+  return (
+    <div>
+      <h2 className="mb-2 border-b pb-2 font-medium">Total table size over {SPACE_DAYS} days</h2>
+      <LineChart
+        points={points.map((p) => ({ at: p.capturedAt, value: p.sizeBytes }))}
+        label={`total size of every captured table, with indexes and TOAST, over ${SPACE_DAYS} days`}
+        format={formatBytes}
+      />
+      <p className="mt-1 text-sm text-muted-foreground">{populationNote(points)}</p>
+    </div>
+  );
+}
+
+/**
+ * What the line was summed across, and why that matters.
+ *
+ * THE SUM ALONE CAN LIE. It totals the tables pgops MEASURED, so a capture
+ * that could not read every table sums fewer of them and draws as the
+ * database shrinking — indistinguishable, from the line alone, from a table
+ * being dropped. `readDatabaseSpace` carries the count back for exactly this
+ * sentence: a steady count means every dip is real, and a count that moved
+ * is the one case where a dip might not be.
+ *
+ * It also names the population, because "5 tables" on a page listing 37
+ * relations otherwise reads as most of them having been left out. They are
+ * not: the other 32 are indexes, and `pg_total_relation_size` has already
+ * counted each one inside its table.
+ */
+function populationNote(points: readonly StoredTotal[]): string {
+  const counts = points.map((p) => p.relations);
+  const lo = Math.min(...counts);
+  const hi = Math.max(...counts);
+  const tail = ' Indexes and TOAST are counted inside their table; system catalogs'
+    + " and pgops's own schema are not counted at all, so this sits below the"
+    + ' database size above.';
+  if (lo === hi) {
+    return `Summed across ${plural(hi, 'table')}, the same at every capture.${tail}`;
+  }
+  return `Summed across ${formatCount(lo)}–${formatCount(hi)} tables — the count moved within `
+    + 'the window, so a fall here may be a table dropped or one pgops could not measure.'
+    + tail;
+}
+
 function growthNote(points: readonly GrowthPoint[]): string {
   const captures = points.reduce((most, p) => Math.max(most, p.points), 0);
   if (captures >= 2) return `Growth over 7 days · ${formatCount(captures)} captures`;

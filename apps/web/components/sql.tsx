@@ -42,8 +42,18 @@ export function Sql({ children }: { children: string | null | undefined }) {
   // it. Inside a table the row also stays one height whatever it holds, and
   // `ui/table` still scrolls the table sideways as ONE piece, which is the
   // single horizontal scroller this console ever wanted.
+  // `whitespace-normal` is load-bearing and was missing. `ui/table`'s
+  // TableCell carries `whitespace-nowrap` — right for a column of numbers,
+  // fatal here: it inherits into this element, so the statement never wrapped,
+  // `line-clamp-2` had no second line to clamp to, and the text ran under
+  // line-clamp's own `overflow: hidden`. Measured on /queries at 1440: the
+  // code box is 907px, the statement inside it is not, and the remainder was
+  // CLIPPED MID-TOKEN with no ellipsis to admit it — `…ON d.id = l.dat`. A
+  // console that shows a fragment of SQL shaped exactly like whole SQL is
+  // worse than one that shows none. The comment below described wrapping this
+  // element had never done.
   return (
-    <code className="line-clamp-2 max-w-full font-mono text-xs break-words">
+    <code className="line-clamp-2 max-w-full font-mono text-xs break-words whitespace-normal">
       {redactSecrets(oneLine)}
     </code>
   );

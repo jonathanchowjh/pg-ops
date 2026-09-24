@@ -5,7 +5,7 @@ import type { Interval } from '@pgops/checks';
 import { runSeriesFor } from '@/lib/check';
 import { queryTextFor } from '@/lib/load';
 import { Sql } from '@/components/sql';
-import { LineChart } from '@/components/line-chart';
+import { LineChart, type ChartPoint } from '@/components/line-chart';
 import { formatCount, formatMillis } from '@/lib/format';
 
 /** Twenty-four hours, and the snapshot count that covers it at 5-minute capture. */
@@ -112,44 +112,64 @@ function History({
 
   const latest = points[points.length - 1]!;
 
-  // THREE SERIES, READ TOGETHER. Each answers a different question about the
+  // FOUR SERIES, READ TOGETHER. Each answers a different question about the
   // same shape and none of them answers it alone: calls is how often it ran,
-  // total time is what that cost, and rows is how much work each run did.
-  // Time up with calls flat and rows flat is a plan that got worse; time up
-  // with rows up is a table that grew under a query that was always going to
-  // scan it. `rows` was captured, stored and differenced into `Interval` from
-  // the start and appeared only as the "Latest rows" scalar below — the shape
-  // of it was thrown away on every render.
+  // total time is what that cost, rows is how much work each run did, and
+  // blocks read is how much of that work missed memory. Time up with calls
+  // flat and rows flat is a plan that got worse; time up with rows up is a
+  // table that grew under a query that was always going to scan it; time up
+  // with blocks read up is a shape that outgrew the cache. All four were
+  // captured, stored and differenced into `Interval` from the start, and
+  // three of them were discarded on every render.
   return (
     <div className="grid gap-4">
       <div className="grid gap-x-8 gap-y-4 lg:grid-cols-2">
-        <div>
-          <h2 className="mb-2 border-b pb-2 font-medium">Calls per interval</h2>
-          {/* An interval is plotted at the instant it ENDED. Its work happened
-              across the five minutes before that, and the end is the only one
-              of the two moments the reading is true of. */}
-          <LineChart
-            points={points.map((p) => ({ at: p.to, value: p.calls }))}
-            label={`calls per interval over ${HOURS} hours`}
-            format={formatCount}
-          />
-        </div>
-        <div>
-          <h2 className="mb-2 border-b pb-2 font-medium">Total time per interval</h2>
-          <LineChart
-            points={points.map((p) => ({ at: p.to, value: p.totalExecTime }))}
-            label={`total execution time per interval over ${HOURS} hours`}
-            format={formatMillis}
-          />
-        </div>
-        <div>
-          <h2 className="mb-2 border-b pb-2 font-medium">Rows per interval</h2>
-          <LineChart
-            points={points.map((p) => ({ at: p.to, value: p.rows }))}
-            label={`rows returned per interval over ${HOURS} hours`}
-            format={formatCount}
-          />
-        </div>
+        {/* An interval is plotted at the instant it ENDED. Its work happened
+            across the five minutes before that, and the end is the only one
+            of the two moments the reading is true of. */}
+        <Chart
+          title="Calls per interval"
+          points={points.map((p) => ({ at: p.to, value: p.calls }))}
+          label={`calls per interval over ${HOURS} hours`}
+          format={formatCount}
+        />
+        <Chart
+          title="Total time per interval"
+          points={points.map((p) => ({ at: p.to, value: p.totalExecTime }))}
+          label={`total execution time per interval over ${HOURS} hours`}
+          format={formatMillis}
+        />
+        <Chart
+          title="Rows per interval"
+          points={points.map((p) => ({ at: p.to, value: p.rows }))}
+          label={`rows returned per interval over ${HOURS} hours`}
+          format={formatCount}
+        />
+        {/* BLOCKS, NOT A HIT-RATE PERCENTAGE, and the choice is the whole
+            reason this chart took a second look.
+            
+            A ratio has two failures here that a count does not. Its
+            denominator can be zero — an interval where the shape ran but
+            touched no shared buffers has no hit rate, and this console does
+            not answer 0% or 100% to a question it could not measure
+            (tables.ts makes the same refusal, where pgHero collapses it with
+            `CASE WHEN ... THEN 0`). And a hit rate lives in the last
+            fraction of a percent: 99.9% to 99.1% is eight times the disk
+            reads, and the chart's own 2% floor — correct everywhere else —
+            would flatten exactly that drop into a straight line.
+            
+            The count has neither problem. Zero is a real reading ("it all
+            came from memory"), the axis scales to whatever the shape
+            actually does, and the calls chart beside it is what normalises
+            the number when traffic changes. Blocks rather than bytes because
+            block size is a compile-time setting pgops cannot see from
+            here. */}
+        <Chart
+          title="Blocks read from disk per interval"
+          points={points.map((p) => ({ at: p.to, value: p.sharedBlksRead }))}
+          label={`shared blocks read from disk per interval over ${HOURS} hours`}
+          format={formatCount}
+        />
       </div>
       {/* The charts carry their own axes now; this is the exact latest
           reading, which an axis rounded to two bounds cannot give. */}
@@ -159,6 +179,29 @@ function History({
         <Fact label="Latest rows" value={formatCount(latest.rows)} />
         <Fact label="Intervals" value={formatCount(points.length)} />
       </dl>
+    </div>
+  );
+}
+
+/**
+ * A titled chart, or nothing at all.
+ *
+ * The guard is here rather than at each call site because `LineChart` itself
+ * renders nothing below two points — so a heading written beside it would
+ * survive its chart and stand over blank page. One capture is exactly that
+ * case, and it is an ordinary state on a console whose history starts empty.
+ */
+function Chart({ title, points, label, format }: {
+  title: string;
+  points: readonly ChartPoint[];
+  label: string;
+  format: (v: number) => string;
+}) {
+  if (points.length < 2) return null;
+  return (
+    <div>
+      <h2 className="mb-2 border-b pb-2 font-medium">{title}</h2>
+      <LineChart points={points} label={label} format={format} />
     </div>
   );
 }

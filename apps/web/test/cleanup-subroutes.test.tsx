@@ -6,9 +6,17 @@ import Sequences from '@/app/db/[name]/cleanup/sequences/page';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const { overrides, seriesOverrides } = vi.hoisted(() => ({
+const { overrides, seriesOverrides, spaceTotal } = vi.hoisted(() => ({
   overrides: new Map<string, unknown>(),
   seriesOverrides: new Map<string, unknown>(),
+  spaceTotal: { points: [] as { capturedAt: Date; sizeBytes: number; relations: number }[] },
+}));
+
+// The space page's only other Postgres-touching call, faked the way
+// queries-page.test.tsx fakes `queryLoadFor`.
+vi.mock('@/lib/load', () => ({
+  SPACE_DAYS: 30,
+  databaseSpaceFor: vi.fn(async () => spaceTotal.points),
 }));
 
 const ok = (data: unknown, verdict: unknown = null) => ({ ok: true, data, verdict, measuredAt: 0 });
@@ -44,6 +52,7 @@ let rendered: Rendered | undefined;
 afterEach(() => {
   rendered = undefined;
   overrides.clear();
+  spaceTotal.points = [];
   seriesOverrides.clear();
   vi.clearAllMocks();
 });
@@ -195,6 +204,55 @@ describe('/cleanup/space', () => {
    * blank growth column reads as "this relation has not grown" when it means
    * "we never looked" — and this page must still render everything else.
    */
+  /**
+   * "Is this database growing, and how fast" is what an operator opens a
+   * space page to find out, and before this it could only be answered by
+   * clicking into relations one at a time and adding up the slopes by eye.
+   */
+  it('charts the whole database size over the window', async () => {
+    const at = (d: number) => new Date(Date.UTC(2026, 8, d));
+    spaceTotal.points = [
+      { capturedAt: at(1), sizeBytes: 100 * 1024 * 1024, relations: 12 },
+      { capturedAt: at(2), sizeBytes: 140 * 1024 * 1024, relations: 12 },
+      { capturedAt: at(3), sizeBytes: 180 * 1024 * 1024, relations: 12 },
+    ];
+    const r = await show(Space);
+    expect(r.text()).toContain('Total table size over 30 days');
+    expect(r.container.querySelector('polyline')).not.toBeNull();
+    expect(r.text()).toContain('Summed across 12 tables, the same at every capture.');
+    // The title must not claim the database's size: this sums user TABLES
+    // only, excluding the catalogs and pgops's own schema, so it sits below
+    // the live Database size panel on the same page.
+    expect(r.text()).toContain('sits below the database size above');
+  });
+
+  /**
+   * THE SUM ALONE CAN LIE: it totals the relations pgops MEASURED, so a
+   * capture that could not read every relation sums fewer of them and draws
+   * as the database shrinking — indistinguishable, from the line alone, from
+   * a dropped table. The count is carried back for exactly this sentence.
+   */
+  it('says when the relation count moved, because then a fall may not be real', async () => {
+    const at = (d: number) => new Date(Date.UTC(2026, 8, d));
+    spaceTotal.points = [
+      { capturedAt: at(1), sizeBytes: 180 * 1024 * 1024, relations: 12 },
+      { capturedAt: at(2), sizeBytes: 100 * 1024 * 1024, relations: 9 },
+    ];
+    const r = await show(Space);
+    expect(r.text()).toContain('Summed across 9–12 tables');
+    expect(r.text()).toContain('may be a table dropped or one pgops could not measure');
+  });
+
+  /** One capture is not a series; the chart and its sentence both go. */
+  it('draws no size chart from a single capture', async () => {
+    spaceTotal.points = [
+      { capturedAt: new Date(Date.UTC(2026, 8, 1)), sizeBytes: 100, relations: 3 },
+    ];
+    const r = await show(Space);
+    expect(r.text()).not.toContain('Total table size over 30 days');
+    expect(r.text()).not.toContain('Summed across');
+  });
+
   it('omits the growth column entirely when no store is configured', async () => {
     overrides.set('relationSizes', ok({
       relations: [{ name: 'public.events', type: 'table', sizeBytes: 3_221_225_472 }],

@@ -14,6 +14,39 @@ export interface TickState {
 export type TickDecision = { act: 'skip' } | { act: 'refresh' };
 
 /**
+ * How far the reader may scroll before the poll holds.
+ *
+ * Not zero: a trackpad resting against a page reports one or two pixels of
+ * travel that nobody intended, and holding the poll for that would be a
+ * console that stops updating because someone breathed on it.
+ */
+export const HOLD_ABOVE_PX = 8;
+
+/**
+ * Whether a tick should HOLD because the operator has scrolled away from the
+ * top of the page.
+ *
+ * THE POLL MOVES THE PAGE UNDER THE READER, and that is what this is for.
+ * Every five seconds the server re-renders, and the height of these pages is
+ * the height of their content by design — sessions come and go, and a check
+ * that flips `ok` to `warn` grows from a one-line row into a full card (see
+ * check-panel.tsx). When the document shrinks below `scrollY + innerHeight`
+ * the browser clamps the scroll position, which reads exactly as the page
+ * springing back up while you are trying to read the bottom of it.
+ *
+ * At the TOP there is nothing to lose: content changing below the fold moves
+ * nothing the reader is looking at, so the poll runs. Once they have scrolled
+ * to read, nothing should move under them at all.
+ *
+ * The answer is NOT to pin the heights. Content decides how tall it is —
+ * reserving space for rows that may not exist would put dead air on every
+ * page to protect a poll from itself.
+ */
+export function shouldHold(scrollY: number): boolean {
+  return scrollY > HOLD_ABOVE_PX;
+}
+
+/**
  * The three properties this carries forward from the TUI's usePoll.ts:
  *
  *  1. A tick that lands while one is in flight is SKIPPED, not queued — so the
@@ -90,7 +123,14 @@ export function tick(
   state: TickState,
   now: number,
   inFlight: boolean,
-): { state: TickState; act: 'skip' | 'refresh' } {
+  holding = false,
+): { state: TickState; act: 'skip' | 'refresh' | 'hold' } {
+  // A HELD TICK IS NOT A MISSED ONE, so the state does not move. `skip`
+  // records itself (property 3) because it was beaten to the database by a
+  // flight and something is owed a follow-up; a hold is the operator
+  // reading, and owes nothing. Re-arming here would fire a refresh — and
+  // move the page — the moment they scrolled back to the top.
+  if (holding) return { state, act: 'hold' };
   const before: TickState = { ...state, inFlight };
   return { state: onTick(before, now), act: nextTick(before, now).act };
 }
@@ -124,6 +164,10 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
   // the value `isPending` had on the render that started it.
   const pending = useRef(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
+  // Read in the interval callback, which is created once — a piece of state
+  // would be the value it had on the render that started the interval.
+  const scrollY = useRef(0);
+  const [holding, setHolding] = useState(false);
   // The displayed age has to advance on its own. It was computed as
   // `Date.now() - startedAt` during render, and this component only renders
   // when a refresh starts or settles — so between polls the number was
@@ -144,9 +188,12 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
   // One transition, whether it came from the interval or from the operator.
   // Both go through `tick`, so both obey property 1 (skip, never queue) and
   // both record property 3's re-arm on a collision.
-  const request = useCallback(() => {
-    const t = tick(state.current, Date.now(), pending.current);
+  const request = useCallback((force = false) => {
+    const t = tick(state.current, Date.now(), pending.current,
+      !force && shouldHold(scrollY.current));
     state.current = t.state;
+    if (t.act === 'hold') { setHolding(true); return; }
+    setHolding(false);
     if (t.act === 'skip') return;
 
     setStartedAt(t.state.startedAt);
@@ -154,8 +201,17 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
     startTransition(() => { router.refresh(); });
   }, [router]);
 
+  // Passive, and it only writes a ref: this fires on every frame of a scroll,
+  // and re-rendering the whole page from it would be its own jank.
   useEffect(() => {
-    const id = setInterval(request, intervalMs);
+    const onScroll = () => { scrollY.current = window.scrollY; };
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => request(), intervalMs);
     return () => clearInterval(id);
   }, [intervalMs, request]);
 
@@ -182,18 +238,25 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
 
   return (
     <span className="flex items-center gap-3 text-sm text-muted-foreground">
+      {/* A HELD POLL SAYS SO. The age keeps climbing either way — it is the
+          one number that must never lie — and the clause beside it is the
+          difference between a console that is stale and one that is stale
+          ON PURPOSE. Without it, holding the poll would look exactly like
+          the poll being broken. */}
       <span suppressHydrationWarning>
         {isPending
           ? 'refreshing…'
           : age === null
             // Before the first tick there is no age to state. "live" is a
             // claim about the poll being armed, which is all that is true yet.
-            ? 'live'
-            : `updated ${age}s ago`}
+            ? (holding ? 'holding while you read' : 'live')
+            : `updated ${age}s ago${holding ? ' · holding while you read' : ''}`}
       </span>
       <button
         type="button"
-        onClick={request}
+        // FORCES THROUGH A HOLD. The hold exists so the page does not move
+        // under a reader who did not ask for it; pressing this IS asking.
+        onClick={() => request(true)}
         // NOT disabled while pending. A press during a flight is exactly the
         // case property 3 handles — it re-arms one follow-up rather than
         // being dropped — and disabling the control would delete the only

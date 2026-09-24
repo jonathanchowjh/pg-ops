@@ -240,6 +240,57 @@ export async function readRelationSpace(
  * the pass that wrote it, so an area whose members disagree about their age
  * reports the OLDEST — which is the honest one.
  */
+export interface StoredTotal {
+  capturedAt: Date;
+  sizeBytes: number;
+  /** How many relations that total was summed across. */
+  relations: number;
+}
+
+/**
+ * The whole database's captured size over a window, one point per capture.
+ *
+ * SUMMED IN POSTGRES, not in the console. `space_stats` holds one row per
+ * relation per capture, so thirty days of a 400-relation database is 3.4
+ * million rows — the same arithmetic that made `query_load` a table written
+ * at capture time (migration 004). The difference is that this one collapses
+ * to one row per capture inside a single indexed aggregate over
+ * `space_stats_captured_at_idx`, on a page that does not poll, so it needs
+ * no fourth table to stay cheap.
+ *
+ * `relations` RIDES ALONG because the sum alone can lie. It is the total of
+ * what pgops MEASURED, and a capture that could not read every relation
+ * sums fewer of them — which would draw as the database shrinking. The count
+ * is what lets the surface tell a dropped table (real) from a capture that
+ * saw less of the database than its neighbours (not real), and it is why
+ * this returns two numbers rather than the one the chart plots.
+ */
+export async function readDatabaseSpace(
+  store: Pool | PoolClient,
+  databaseName: string,
+  from: Date,
+  to: Date,
+): Promise<StoredTotal[]> {
+  const { rows } = await store.query<{
+    captured_at: Date; size_bytes: string; relations: string;
+  }>(
+    `SELECT s.captured_at,
+            sum(s.size_bytes)::text AS size_bytes,
+            count(*)::text          AS relations
+       FROM pgops.space_stats s
+       JOIN pgops.databases d ON d.id = s.database_id
+      WHERE d.name = $1 AND s.captured_at >= $2 AND s.captured_at <= $3
+      GROUP BY s.captured_at
+      ORDER BY s.captured_at ASC`,
+    [databaseName, from, to],
+  );
+  return rows.map((r) => ({
+    capturedAt: r.captured_at,
+    sizeBytes: Number(r.size_bytes),
+    relations: Number(r.relations),
+  }));
+}
+
 export interface StoredCheckResult {
   checkId: string;
   ok: boolean;

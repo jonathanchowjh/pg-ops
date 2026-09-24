@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { describe, expect, inject, it } from 'vitest';
 import { captureOnce } from '../src/capture.js';
-import { readQueryText } from '../src/store/read.js';
+import { readDatabaseSpace, readQueryText } from '../src/store/read.js';
 import { migrate } from '../src/store/schema.js';
 import { withPostgres } from './harness.js';
 
@@ -447,6 +447,52 @@ describe('readQueryText', () => {
       expect(await readQueryText(pool, 'prod', '1234567890123456789')).toBeNull();
       // And scoped to the database it was asked about, not to the cluster.
       expect(await readQueryText(pool, 'no-such-db', '1')).toBeNull();
+    });
+  });
+});
+
+describe('readDatabaseSpace', () => {
+  /**
+   * One row per CAPTURE out of a table that holds one row per relation per
+   * capture. Summing in the console would mean thirty days of a 400-relation
+   * database — 3.4 million rows — crossing the wire to be added up in JS.
+   */
+  it('collapses every relation to one total per capture', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await migrate(pool);
+      await pool.query('CREATE TABLE widgets (id int)');
+      await pool.query('CREATE TABLE gadgets (id int)');
+      await captureOnce({ ...ctx, store: pool }, 'prod');
+
+      const from = new Date(Date.now() - 3_600_000);
+      const to = new Date(Date.now() + 3_600_000);
+      const totals = await readDatabaseSpace(pool, 'prod', from, to);
+      expect(totals).toHaveLength(1);
+
+      // The total is the sum of what was stored, and the count is the
+      // population it was summed over — the pair the surface needs to tell a
+      // dropped relation from a capture that saw less of the database.
+      const { rows } = await pool.query<{ n: string; total: string }>(
+        `SELECT count(*)::text AS n, sum(size_bytes)::text AS total
+           FROM pgops.space_stats`,
+      );
+      expect(totals[0]!.relations).toBe(Number(rows[0]!.n));
+      expect(totals[0]!.sizeBytes).toBe(Number(rows[0]!.total));
+      expect(totals[0]!.relations).toBeGreaterThan(1);
+    });
+  });
+
+  /** Scoped to one database and one window, like every other read here. */
+  it('answers nothing for another database or a window with no captures', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await migrate(pool);
+      await pool.query('CREATE TABLE widgets (id int)');
+      await captureOnce({ ...ctx, store: pool }, 'prod');
+
+      const wide = { from: new Date(Date.now() - 3_600_000), to: new Date(Date.now() + 3_600_000) };
+      expect(await readDatabaseSpace(pool, 'other', wide.from, wide.to)).toEqual([]);
+      const past = new Date(Date.now() - 86_400_000);
+      expect(await readDatabaseSpace(pool, 'prod', past, new Date(Date.now() - 82_800_000))).toEqual([]);
     });
   });
 });

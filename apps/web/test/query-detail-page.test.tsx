@@ -49,6 +49,27 @@ describe('/queries/[queryid]', () => {
    * not confirm they had clicked the row they meant — and on a shape with no
    * comparable history, the page said nothing about the query at all.
    */
+  /**
+   * `LineChart` draws nothing below two points, so a heading written beside
+   * it would outlive its chart and stand over blank page. One capture is an
+   * ordinary state on a console whose history starts empty.
+   */
+  it('writes no chart heading over a chart it cannot draw', async () => {
+    series.set('queryShapeHistory', {
+      ok: true, readAt: 0,
+      points: [{
+        from: new Date('2026-09-23T00:00:00Z'), to: new Date('2026-09-23T00:05:00Z'),
+        calls: 20, totalExecTime: 300, rows: 20, sharedBlksHit: 0, sharedBlksRead: 0,
+      }],
+    });
+    const r = await show('1234567890');
+    expect(r.container.querySelectorAll('polyline')).toHaveLength(0);
+    expect(r.text()).not.toContain('Calls per interval');
+    expect(r.text()).not.toContain('Blocks read from disk per interval');
+    // The exact readings are still stated: one interval is one interval.
+    expect(r.text()).toContain('Intervals');
+  });
+
   it('names the statement, not just the id it is keyed on', async () => {
     sqlState.text = 'SELECT * FROM orders WHERE customer_id = $1';
     const r = await show('-4065672920244396678');
@@ -81,11 +102,12 @@ describe('/queries/[queryid]', () => {
     });
     const r = await show('1234567890');
     expect(r.text()).toContain('1234567890');
-    // Three series, three charts: calls, total exec time and rows. None of
-    // the three answers "why did this shape get worse" on its own — see the
-    // page. `rows` was captured and differenced from the start and appeared
-    // only as a scalar until now.
-    expect(r.container.querySelectorAll('polyline')).toHaveLength(3);
+    // Four series, four charts: calls, total exec time, rows and blocks read
+    // from disk. None answers "why did this shape get worse" on its own —
+    // see the page. Three of the four were captured and differenced from the
+    // start and drawn nowhere.
+    expect(r.container.querySelectorAll('polyline')).toHaveLength(4);
+    expect(r.text()).toContain('Blocks read from disk per interval');
     // The latest interval stated as a fact, not only drawn.
     expect(r.text()).toContain('40');
   });

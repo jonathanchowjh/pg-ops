@@ -1,5 +1,5 @@
 import { connection } from 'next/server';
-import { readQueryLoad, readQueryText, type StoredLoad } from '@pgops/checks';
+import { readDatabaseSpace, readQueryLoad, readQueryText, type StoredLoad, type StoredTotal } from '@pgops/checks';
 import { isMissingRequestStore } from './check';
 import { storePool } from './store';
 
@@ -74,5 +74,35 @@ export async function queryTextFor(name: string, queryid: string): Promise<strin
     return await readQueryText(store, name, queryid);
   } catch {
     return null;
+  }
+}
+
+/** The window the Space page's total-size chart draws. */
+export const SPACE_DAYS = 30;
+
+/**
+ * The whole database's captured size over `SPACE_DAYS`, one point per capture.
+ *
+ * NEVER THROWS and returns `[]` on every failure, for the same reason
+ * `queryTextFor` returns null: the Space page already reports a store it
+ * could not read, once, through the growth column that reads the same store.
+ * A second report over a missing chart would be one failure stated twice.
+ */
+export async function databaseSpaceFor(name: string): Promise<StoredTotal[]> {
+  try {
+    await connection();
+  } catch (err) {
+    if (!isMissingRequestStore(err)) return [];
+  }
+
+  const store = storePool(process.env);
+  if (store === null) return [];
+
+  try {
+    const to = new Date();
+    const from = new Date(to.getTime() - SPACE_DAYS * 24 * 3_600_000);
+    return await readDatabaseSpace(store, name, from, to);
+  } catch {
+    return [];
   }
 }

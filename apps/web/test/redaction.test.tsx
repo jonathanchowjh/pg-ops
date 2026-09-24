@@ -44,4 +44,28 @@ describe('Sql', () => {
     const r = await render(<Sql>{'SELECT 1'}</Sql>);
     expect(r.text()).toBe('SELECT 1');
   });
+
+  /**
+   * A CLASS ASSERTION, and it is the weakest kind — but it is the only kind
+   * jsdom can carry, and the defect it guards shipped invisibly.
+   *
+   * `ui/table`'s TableCell sets `whitespace-nowrap`, which is right for a
+   * column of numbers and inherits into every statement rendered inside one.
+   * With it in force the statement cannot wrap, `line-clamp-2` has no second
+   * line to clamp to, and the text runs under line-clamp's own
+   * `overflow: hidden` — CLIPPED MID-TOKEN, no ellipsis, on the page whose
+   * whole job is showing operators what ran. Measured on /queries: the box
+   * is 907px and the statement is not.
+   *
+   * jsdom computes no layout, so the real property — "a long statement
+   * occupies two lines and ends in an ellipsis" — cannot be asserted here;
+   * it was verified in a browser. What this holds is the decision: this
+   * element declares its own wrapping and does not inherit the cell's.
+   */
+  it('does not let the table cell stop a statement wrapping', async () => {
+    const r = await render(<Sql>{'SELECT 1'}</Sql>);
+    const code = r.container.querySelector('code');
+    expect(code).not.toBeNull();
+    expect(code?.className).toContain('whitespace-normal');
+  });
 });
