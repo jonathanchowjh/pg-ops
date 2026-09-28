@@ -219,14 +219,32 @@ of two ways the project tried.
 ## Releasing
 
 1. Bump `version` in the root `package.json`, `packages/checks/package.json`
-   and `apps/web/package.json` together.
+   and `apps/web/package.json` together, and the README's `**Status:** vX.Y.Z`
+   line with them. That line is a fourth copy of the same fact and the one a
+   release forgets, because no build reads it. `boundaries.test.ts` fails while
+   the four disagree.
 2. Add the release to [CHANGELOG.md](CHANGELOG.md): what shipped, what was
    declined and why, what diverges from pgHero, and the parity counts read
    from `parityBacklog()`.
 3. Update the README's parity table and headline if the counts moved. The
    test suite fails until they agree. Remove anything the release fixed from
    the README's known issues.
-4. Tag `vX.Y.Z`.
+4. Gate on **every** supported Postgres version, not the default one:
+
+   ```sh
+   PGOPS_HOOK_PG_VERSIONS='14 16 17 18' npm run gate
+   ```
+
+   `npm run gate` alone runs 17, so a green default says nothing about 14 —
+   the floor the README promises, the permissions table assumes and the
+   integration matrix exists for. This is not hypothetical: v2.5.0 was cut
+   with a test that published its statistics through
+   `pg_stat_force_next_flush()`, which arrived in Postgres 15, so it had never
+   once passed on 14. Four gate runs on the default version had reported green.
+5. Tag `vX.Y.Z`, then push the branch and the tag. A tag is how a release is
+   found later, and pushing the branch does not carry it —
+   `git push origin main vX.Y.Z`. v2.3.1 and v2.4.0 sat tagged locally and
+   absent from the remote for days because this step said only "tag".
 
 Patch releases fix without changing meaning. Minor releases add routes or
 controls without removing any. A major release is reserved for the console

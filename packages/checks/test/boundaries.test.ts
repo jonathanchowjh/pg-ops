@@ -1,4 +1,6 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CHECKS } from '../src/registry.js';
@@ -325,6 +327,34 @@ describe('the package boundary', () => {
     expect(gate).toMatch(/^\s*\.\/scripts\/image-smoke\.sh\s*$/m);
   });
 
+  /**
+   * ONE VERSION, IN FOUR PLACES, HELD BY NOTHING UNTIL NOW. Step 1 of
+   * CONTRIBUTING's release procedure is to bump `version` in the root
+   * package.json, packages/checks' and apps/web's "together", and the README's
+   * status line is a fourth copy of the same fact — the one a release forgets,
+   * because it is prose rather than a manifest and no build reads it.
+   *
+   * Three of four is a silent state. The image reports one version, the
+   * package another, and the README a third; nothing throws, and the first
+   * person to notice is whoever is trying to work out which build they are
+   * running during an incident. Bumping four files by hand is the whole of
+   * the release's mechanical work, so it is the part that most wants a test
+   * rather than a checklist item.
+   */
+  it('names one version in every manifest and in the README', () => {
+    const version = (path: string): string =>
+      JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8')).version;
+    const root = version('../../../package.json');
+    expect(root, 'the root package.json must carry a version').toMatch(/^\d+\.\d+\.\d+$/);
+    expect(version('../package.json'), 'packages/checks disagrees with the root').toBe(root);
+    expect(version('../../../apps/web/package.json'), 'apps/web disagrees with the root').toBe(root);
+
+    const readme = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8');
+    const stated = /^- \*\*Status:\*\* v(\d+\.\d+\.\d+)\./m.exec(readme);
+    expect(stated, 'no "- **Status:** vX.Y.Z." line in the README').not.toBeNull();
+    expect(stated![1], "the README's status line disagrees with the manifests").toBe(root);
+  });
+
   /** A gate that does not record what it gated cannot be checked by the hook. */
   it('records the sha the gate passed on', () => {
     const gate = readFileSync(new URL('../../../scripts/gate.sh', import.meta.url), 'utf8');
@@ -346,5 +376,105 @@ describe('the package boundary', () => {
         .toMatch(new RegExp(`^\\./${outDir}/`));
     }
     expect(pkg.scripts.build).toContain('tsc -p tsconfig.json');
+  });
+});
+
+/**
+ * The pre-push hook, RUN rather than read. Every other assertion about it in
+ * this file greps its source, which is the right shape for "the slow steps are
+ * not in here" but cannot answer "does a push of X succeed" — and the bug
+ * below passed every source grep in the file.
+ *
+ * `git push origin v2.5.0` was refused for a commit that had just passed the
+ * full four-version gate. For refs/tags/* git feeds the hook the TAG OBJECT's
+ * sha; the receipt holds commits, so the comparison could never match, and no
+ * annotated tag was pushable. Step 4 of CONTRIBUTING's release procedure is
+ * "Tag vX.Y.Z", so the documented way to cut a release required the
+ * --no-verify this hook exists to make unnecessary.
+ *
+ * The fixture is a throwaway repository rather than this one: these assertions
+ * need a commit that is NOT gated and one that is already published, and
+ * manufacturing either here would mean writing to this repository's own
+ * receipt.
+ */
+describe('the pre-push hook, against a throwaway repository', () => {
+  const HOOK = new URL('../../../.githooks/pre-push', import.meta.url).pathname;
+  const ZERO = '0'.repeat(40);
+
+  const git = (cwd: string, ...args: string[]): string =>
+    execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+
+  /**
+   * Three commits: one already on the remote, one named by the receipt, one
+   * neither. `update-ref` rather than a second repository and a real push —
+   * `--remotes=origin` reads refs/remotes/origin/*, and that is the whole of
+   * what the hook asks about.
+   */
+  function fixture() {
+    const dir = mkdtempSync(join(tmpdir(), 'pgops-pre-push-'));
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 'test@example.invalid');
+    git(dir, 'config', 'user.name', 'Test');
+    const commit = (name: string): string => {
+      writeFileSync(join(dir, name), name);
+      git(dir, 'add', name);
+      git(dir, 'commit', '-qm', name);
+      return git(dir, 'rev-parse', 'HEAD');
+    };
+    const published = commit('a');
+    const gated = commit('b');
+    const ungated = commit('c');
+    git(dir, 'update-ref', 'refs/remotes/origin/main', published);
+    writeFileSync(join(dir, '.git', 'pgops-gate-receipt'), `${gated}\n`);
+    return { dir, published, gated, ungated };
+  }
+
+  /** One stdin line per ref, exactly as git writes them. */
+  const push = (dir: string, lines: string[]) =>
+    spawnSync('sh', [HOOK, 'origin', 'git@example.invalid:o/r.git'], {
+      cwd: dir,
+      input: lines.map((l) => `${l}\n`).join(''),
+      encoding: 'utf8',
+    });
+
+  it('accepts an annotated tag whose commit the receipt names', () => {
+    const { dir, gated } = fixture();
+    git(dir, 'tag', '-a', 'v1.0.0', '-m', 'v1.0.0', gated);
+    const tagObject = git(dir, 'rev-parse', 'v1.0.0');
+    // The bug, stated as a precondition: the sha git hands the hook is not
+    // the commit, so the receipt cannot contain it.
+    expect(tagObject).not.toBe(gated);
+
+    const r = push(dir, [`refs/tags/v1.0.0 ${tagObject} refs/tags/v1.0.0 ${ZERO}`]);
+    expect(r.stderr).not.toMatch(/refusing/);
+    expect(r.status).toBe(0);
+  });
+
+  it('accepts a tag whose commit predates the receipt but is already on the remote', () => {
+    const { dir, published } = fixture();
+    git(dir, 'tag', '-a', 'v0.9.0', '-m', 'v0.9.0', published);
+    const tagObject = git(dir, 'rev-parse', 'v0.9.0');
+    const r = push(dir, [`refs/tags/v0.9.0 ${tagObject} refs/tags/v0.9.0 ${ZERO}`]);
+    expect(r.stderr).not.toMatch(/refusing/);
+    expect(r.status).toBe(0);
+  });
+
+  /**
+   * The guarantee the hook exists for, and the half most at risk from the
+   * change above: a commit made after the gate ran is not published and not in
+   * the receipt, so it is still refused.
+   */
+  it('still refuses a commit that is neither gated nor already published', () => {
+    const { dir, ungated } = fixture();
+    const r = push(dir, [`refs/heads/main ${ungated} refs/heads/main ${ZERO}`]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/refusing/);
+    expect(r.stderr).toContain(ungated);
+  });
+
+  it('accepts a branch deletion, which publishes nothing', () => {
+    const { dir, ungated } = fixture();
+    const r = push(dir, [`(delete) ${ZERO} refs/heads/gone ${ungated}`]);
+    expect(r.status).toBe(0);
   });
 });

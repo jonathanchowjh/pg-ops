@@ -4,6 +4,89 @@ All notable changes to pgops are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **No annotated tag could be pushed, so the documented way to cut a release
+  was impossible.** For `refs/tags/*` git feeds the pre-push hook the TAG
+  OBJECT's sha, while `scripts/gate.sh` records `git rev-parse HEAD`, a
+  commit. The hook compared the two literally, so the match could never
+  succeed and `git push origin v2.5.0` was refused for a commit that had just
+  passed all four Postgres legs and the image smoke test. Step 4 of
+  CONTRIBUTING's release procedure is "Tag vX.Y.Z", which made the release
+  procedure reachable only through the `--no-verify` this hook exists to make
+  unnecessary — the same failure mode that produced the hook in the first
+  place, arriving by a different route. The hook now dereferences a ref to its
+  commit before consulting the receipt, which is a no-op on a commit and on a
+  lightweight tag.
+- **A tag for a release older than the receipt file could not be pushed
+  either.** v2.3.1 and v2.4.0 were tagged locally and never reached the
+  remote, and their commits predate the receipt mechanism entirely, so no
+  receipt will ever name them. The hook now also accepts a ref that introduces
+  no commit the remote does not already have: the push sends no code, only a
+  tag object pointing into published history. This is the same reasoning the
+  hook already applied to a branch deletion, and it weakens nothing, because an
+  unpushed commit still counts — commit after gating and the hook still refuses.
+
+### Changed
+
+- **The tab strip is data, in `apps/web/lib/tabs.ts`, not a local `const`
+  inside the component that renders it.** Each tab now declares two things the
+  compiler will not let a new one omit: `mode`, whether its page is live or
+  durable, and `gate`, which gate it goes deeper into or `null` for an object
+  page. Same reasoning as `gates.ts`, and the same sentence applies — a model
+  that is only written down drifts from the thing it describes, and the drift
+  is silent. `nav.test.tsx` carried a second copy of the gate-to-tab mapping
+  precisely because the model lived where no test could import it.
+
+  **The strip is deliberately NOT yet split into Now and Explore bands**, and
+  `tabs.ts` records why at length. Grouping today's six tabs on liveness gives
+  five in Now and one in Explore: Queries and Cleanup both poll, so both are
+  live, while everything underneath them — indexes, bloat, suggested indexes,
+  space, maintenance, sequences — runs on visit. A band labelled Explore
+  holding one tab, beside a band labelled Now whose largest tab is a doorway to
+  hygiene, is a label contradicting its contents, which is the defect the
+  triage bands already had once when they were named `Saturation` /
+  `Lock chains` / `Slow queries` / `Replication`. The prerequisite is moving
+  those hygiene children onto entity tabs of their own, a route restructure
+  with its own redirects and its own decision about the three pages v2.5.0
+  deliberately did not fold into `/tables`. `mode` is true today and the bands
+  can be rendered from it the day the routes sit either side of the line.
+
+### Tests
+
+- **The tab strip's model is held against the pages it describes.** A declared
+  `mode` that nothing checks is prose in a type's clothing: it reads as true
+  under any mutation. `tabs.test.ts` reads each tab's page off disk and asks
+  whether it renders `<Refresh>`, which is the same observable fact
+  `guards.test.ts`'s poll boundary ranges over from the page side — that file
+  asserts which pages poll, this one asserts the strip agrees. Both directions
+  are silent on their own: a live tab declared `explore` is a page that stops
+  updating mid-incident with nothing saying so, and a hygiene tab declared
+  `now` puts a catalog scan on a five-second timer. It also pins every gate to
+  exactly one tab against `GATE_ORDER` rather than against the strip's own
+  entries, which would pass under any mutation of those entries, and pins the
+  count of `explore` tabs at one so the argument above has to be re-made rather
+  than quietly expiring. Confirmed red by mislabelling Tables as live and by
+  removing the Locks tab's gate.
+- **One version, in four places, held by nothing until now.** Step 1 of the
+  release procedure bumps three manifests "together" and the README's
+  `**Status:** vX.Y.Z` line is a fourth copy — the one a release forgets,
+  because no build reads it. Three of four is silent: the image reports one
+  version, the package another, the README a third, and the first to notice is
+  whoever is working out which build they are running mid-incident. Confirmed
+  red for a stale manifest and for a stale README separately.
+- **The pre-push hook is now RUN, not only read.** Every existing assertion
+  about it greps its source, which suits "the slow steps are not in here" and
+  cannot answer "does a push of this ref succeed". The tag bug passed every one
+  of those greps. Four tests drive the hook as a subprocess against a throwaway
+  repository holding one published commit, one the receipt names and one that is
+  neither: the two acceptances above, the refusal that is the hook's whole
+  purpose, and a branch deletion. Both acceptance tests were confirmed red
+  against the previous hook, and both refusal tests green, so the change is
+  demonstrably targeted.
+
 ## [2.5.0] — 2026-09-28
 
 The Tables area: one list of every table, and a page about one of them.

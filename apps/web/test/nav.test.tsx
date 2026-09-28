@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from './render.js';
 import { Nav } from '@/components/nav';
 import { GATES, GATE_ORDER } from '@pgops/checks';
+import { TABS } from '@/lib/tabs';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -14,16 +15,24 @@ let rendered: Rendered | undefined;
 afterEach(() => { rendered?.unmount(); rendered = undefined; });
 
 /**
- * The gate -> tab segment map, declared here rather than derived from the
- * title. Two of the four titles are not their segment ("Replication &
- * cleanup" -> "cleanup"), so deriving it is what produced a test that could
- * not pass. If a gate is ever added, this map fails to compile.
+ * The gate -> tab href, read from the strip's own model in lib/tabs.ts.
+ *
+ * This was a second copy of that mapping, written out here because the model
+ * used to be a local const inside nav.tsx where no test could import it. Two
+ * of the four gate titles are not their segment ("Replication & cleanup" ->
+ * "cleanup"), so deriving the mapping from the TITLE is what produced a test
+ * that could not pass — which is why a copy was made rather than a derivation.
+ * Now each tab declares its gate, so this reads the declaration.
+ *
+ * The claim these tests make is still not circular: `GATE_ORDER` comes from
+ * @pgops/checks, so the loop below ranges over the gates the checks package
+ * defines, not over whatever the strip happens to contain. A gate with no tab
+ * throws here; tabs.test.ts asserts the same property against the data alone.
  */
-const GATE_TAB: Record<(typeof GATE_ORDER)[number], string> = {
-  connect: 'sessions',
-  wait: 'locks',
-  work: 'queries',
-  'keep-up': 'cleanup',
+const hrefFor = (gate: (typeof GATE_ORDER)[number]): string => {
+  const tab = TABS.find((t) => t.gate === gate);
+  if (tab === undefined) throw new Error(`no tab declares gate ${gate}`);
+  return `/db/prod${tab.href}`;
 };
 
 /**
@@ -53,11 +62,7 @@ describe('Nav', () => {
       .map((a) => a.getAttribute('href') ?? '');
     expect(GATE_ORDER).toHaveLength(4);
     for (const gate of GATE_ORDER) {
-      const segment = GATE_TAB[gate];
-      expect(
-        hrefs.some((h) => h === `/db/prod/${segment}` || (segment === '' && h === '/db/prod')),
-        `gate ${gate} (${GATES[gate].title}) has no tab`,
-      ).toBe(true);
+      expect(hrefs, `gate ${gate} (${GATES[gate].title}) has no tab`).toContain(hrefFor(gate));
     }
   });
 
@@ -74,7 +79,7 @@ describe('Nav', () => {
     rendered = await render(<Nav name="prod" />);
     const hrefs = [...rendered.container.querySelectorAll('a')]
       .map((a) => a.getAttribute('href') ?? '');
-    const gates = GATE_ORDER.map((g) => (GATE_TAB[g] === '' ? '/db/prod' : `/db/prod/${GATE_TAB[g]}`));
+    const gates = GATE_ORDER.map(hrefFor);
     expect(hrefs.filter((h) => !new Set([...gates, ...OBJECT_TABS]).has(h))).toEqual(['/db/prod']);
   });
 
