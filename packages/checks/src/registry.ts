@@ -182,6 +182,7 @@ import { sessionStates, sessions } from './checks/sessions.js';
 import { settings } from './checks/settings.js';
 import { slots } from './checks/slots.js';
 import { databaseSize, relationSizes, tableSizes } from './checks/space.js';
+import { tableList } from './checks/table-list.js';
 import { tableCaching, tableHitRate, tableStats, unusedTables } from './checks/tables.js';
 import { wraparound } from './checks/wraparound.js';
 import { historicalQueryStats, queryShapeHistory } from './series/query-stats.js';
@@ -218,6 +219,7 @@ export const CHECKS = {
   slots,
   tableCaching,
   tableHitRate,
+  tableList,
   tableSizes,
   tableStats,
   unusedIndexes,
@@ -656,7 +658,7 @@ export const PGHERO: Record<number, ParityEntry> = {
  *
  * This is the list `registry.test.ts` gates on: a capability still `planned`
  * for a phase named here fails the suite. Add a phase to this array only
- * when its branch has landed on master — the array is the claim, and the
+ * when its branch has landed on main — the array is the claim, and the
  * test is what makes the claim cost something.
  *
  * P1 covers both P1a ("the console renders") and P1b ("the console ships");

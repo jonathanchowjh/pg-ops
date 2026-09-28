@@ -482,6 +482,42 @@ describe('duplicateIndexes', () => {
       expect(pairsOf(r.data).some((p) => p.includes('ix_expr'))).toBe(false);
     });
   });
+
+  /**
+   * §5.2, and the last of the five relation-scoped checks to get coverage.
+   *
+   * Its own fixture rather than FIXTURE above, because the property needs
+   * TWO tables that each have a duplicate pair — the filter is only
+   * observable as the ABSENCE of the other table's finding, and a fixture
+   * with one table cannot show an absence.
+   *
+   * `limit: 1` with the wanted table sorted LAST is the shape that fails if
+   * the filter were applied to the returned page instead of inside the
+   * query. The outer sort is `bytes_num DESC`, so padding `loud` makes its
+   * redundant index the bigger one and the only row a `limit: 1` page would
+   * carry; asking for `quiet` must still answer about `quiet`. `total` is
+   * asserted for the same reason: `count(*) OVER ()` is evaluated inside
+   * `dups`, so a filter that ran anywhere later would report 2 here and
+   * claim a finding this page is not showing.
+   */
+  it('reports one table\'s duplicates however that table ranked', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await seed(pool, 'CREATE TABLE loud (c1 text, c2 int)');
+      await seed(pool, "INSERT INTO loud SELECT repeat('x', 200), 1 FROM generate_series(1, 20000)");
+      await seed(pool, 'CREATE INDEX ix_loud_c1    ON loud (c1)');
+      await seed(pool, 'CREATE INDEX ix_loud_c1_c2 ON loud (c1, c2)');
+      await seed(pool, 'CREATE TABLE quiet (c1 int, c2 int)');
+      await seed(pool, 'CREATE INDEX ix_quiet_c1    ON quiet (c1)');
+      await seed(pool, 'CREATE INDEX ix_quiet_c1_c2 ON quiet (c1, c2)');
+
+      const r = await runCheck(ctx, duplicateIndexes, { limit: 1, relation: 'public.quiet' });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(pairsOf(r.data)).toEqual(['ix_quiet_c1<=ix_quiet_c1_c2']);
+      expect(r.data.total).toBe(1);
+      expect(r.data.truncated).toBe(false);
+    });
+  });
 });
 
 describe('index usage', () => {
@@ -612,6 +648,46 @@ describe('index usage', () => {
       // Excluded by `idx_scan > 0`.
       expect(tables).not.toContain('public.cold');
       expect(result.verdict).toBeNull();
+    });
+  });
+});
+
+describe('the relation filter', () => {
+  /**
+   * §5.2. The filter must run in Postgres ahead of the LIMIT, so a table's
+   * indexes are findable however that table ranked. `limit: 1` with the
+   * wanted table sorted last is the shape that fails if the filter were
+   * applied to the returned page.
+   */
+  it('lists one table\'s indexes however that table ranked', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await seed(pool, 'CREATE TABLE zzz_big (v text)');
+      await seed(pool, "INSERT INTO zzz_big SELECT repeat('x', 200) FROM generate_series(1, 20000)");
+      await seed(pool, 'CREATE INDEX zzz_big_v_idx ON zzz_big (v)');
+      await seed(pool, 'CREATE TABLE aaa_small (v int)');
+      await seed(pool, 'CREATE INDEX aaa_small_v_idx ON aaa_small (v)');
+
+      const out = await runCheck(ctx, indexList, { limit: 1, relation: 'public.aaa_small' });
+      expect(out.ok).toBe(true);
+      if (!out.ok) return;
+      expect(out.data.indexes.map((i) => i.name)).toEqual(['public.aaa_small_v_idx']);
+      expect(out.data.total).toBe(1);
+      expect(out.data.truncated).toBe(false);
+    });
+  });
+
+  it('is unfiltered when no relation is given', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await seed(pool, 'CREATE TABLE a (v int)');
+      await seed(pool, 'CREATE INDEX a_v_idx ON a (v)');
+      await seed(pool, 'CREATE TABLE b (v int)');
+      await seed(pool, 'CREATE INDEX b_v_idx ON b (v)');
+
+      const out = await runCheck(ctx, indexList, {});
+      expect(out.ok).toBe(true);
+      if (!out.ok) return;
+      expect(out.data.indexes.map((i) => i.name).sort())
+        .toEqual(['public.a_v_idx', 'public.b_v_idx']);
     });
   });
 });

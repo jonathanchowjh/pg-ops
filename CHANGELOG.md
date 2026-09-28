@@ -4,7 +4,182 @@ All notable changes to pgops are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.5.0] — 2026-09-28
+
+The Tables area: one list of every table, and a page about one of them.
+
+**Minor, not major.** Two routes are added under a new tab and nothing
+changes meaning or goes away — `/queries/tables`, `/cleanup/space` and
+`/cleanup/maintenance` all stay exactly where they were.
+
+### Added
+
+- **Tables**, a fifth tab at `/db/<name>/tables` — every table in one list,
+  sorted, searched and capped in SQL rather than in the page: size, rows,
+  dead rows, cache hit and last vacuum. The sort happens before the cap, so
+  the ranking is the database's and not the ranking of whichever population
+  the first cap admitted. Presets for Biggest, Needs vacuum, Worst cache hit
+  and Unused are each one URL onto that list, so the one-click answer three
+  separate `ORDER BY` pages used to give survives with a single code path
+  drawing the rows.
+- **A page about one relation** at `/db/<name>/tables/<relation>` — 30 days
+  of its size, its indexes and the unused, duplicate and invalid ones among
+  them, its sequences, and its transaction ID age. Eight pages rendered a
+  relation name and none of them was about that relation; this is the one
+  that is. Its 404 fires only when a check *succeeded* and found nothing:
+  `ok: false` is "we could not look", and answering that with "no such
+  table" sends an operator to correct a name that was right.
+- **Five checks can be asked about one relation.** `indexList`,
+  `unusedIndexes`, `duplicateIndexes`, `invalidIndexes` and `sequences` take
+  a `relation` option, bound as a nullable parameter in the `WHERE` ahead of
+  the `LIMIT` — the construction `sessions.pid` already used. A filter
+  applied to an already-capped page cannot find what the server never sent,
+  and on an entity page that renders every fact as an em dash: this
+  console's display for "we could not look", shown for "we did not ask".
+  `sequences` filters on the *owned* table, because `orders_id_seq` is a
+  fact about `orders`.
+- `EntityLink` and `SortLink` — one way to link a relation and one way to
+  sort a column, with the URL-encoding contract stated in both directions.
+  A relation name is an arbitrary identifier: a slash routes somewhere else
+  entirely, and a percent is mangled by a second decode.
+- `npm run gate` — the integration matrix and the image smoke test, which
+  used to run inside the pre-push hook. See below.
+
+### Changed
+
+- `lib/sort.ts` is `lib/url.ts`, and `foldFrom` is one call to `withParam`
+  rather than a second copy of its loop. The file never held anything about
+  sorting, and the fold, the sort and the search all make the same promise:
+  changing one control carries the other two along.
+- **Dependencies.** `pg` 8.21 to 8.23 — the one runtime dependency
+  `packages/checks` is allowed — Next 16.3.3 to 16.3.6, React and React DOM
+  19.2 to 19.3, and the remaining minors. TypeScript 7.0 and `@types/node` 26
+  are available and deliberately untaken: a compiler major wants a change of
+  its own, where a new diagnostic reads as the point rather than as collateral.
+- **Two documentation lines stopped recommending `--no-verify`.** README and
+  CONTRIBUTING each closed the hook explanation by noting that the flag skips
+  either hook — one sentence after saying the pre-push hook is instant and the
+  gate is the slow part, which leaves "here is the way out if you are in a
+  hurry" as the only reading. There is no server-side check behind these hooks;
+  they are the whole of this repository's CI, so the flag does not skip a wait,
+  it skips the verification. The Tests table's Docker column also read
+  "On open" on three rows, which is the Pages table's Refresh vocabulary copied
+  one section down.
+
+### Fixed
+
+- **A materialized view's size was reported as zero.**
+  `pg_stat_user_tables` carries a row per `relkind IN ('r','t','m','p')`,
+  and the size CTE filtered to `'r'` before being `LEFT JOIN`ed back by
+  name — so a matview matched nothing and `coalesce(size_num, 0)` reported
+  a real, unmeasured size as a number indistinguishable from a genuinely
+  empty table, sorting to the bottom of the default ranking where nobody
+  would question it. The list now joins on `relid` and scopes to
+  `relkind IN ('r','p')`, whose own storage really is zero when empty.
+  `relationSizes` still reports matviews.
+- **A table with no indexes reported zero index scans.**
+  `pg_stat_user_tables.idx_scan` is `NULL`, not `0`, for a table that has
+  no index at all. It was typed `string` and mapped with a bare `Number()`,
+  which folded `null` to `0`, so the Table page said "Index scans: 0" for a
+  table that could never have had one. It now renders "no indexes."
+- **An underscore in the Tables search matched any character.** The term
+  was bound into `'%' || $4 || '%'` unescaped, so `order_item` matched
+  `orderXitem` and a `%` matched everything. `\`, `%` and `_` are now
+  escaped before binding.
+- **A table with no sequences earned a green OK badge.** `sequences`'
+  verdict has no third state, so "nothing readable to judge" returns `ok` —
+  the absence of a finding, not a claim the sequences are fine. The Table
+  page now suppresses only an `ok` verdict and lets a `warn` through with
+  its note and its remedy, which is the one piece of remediation text on
+  that page: the column overflows before the sequence does, and widening
+  the column is the fix.
+- **A clean index and an unreadable one read one dash apart.** The Table
+  page joined an index's flags with `|| '—'`, the same em dash this console
+  uses everywhere for "we could not look". A clean index now renders an
+  empty cell.
+- **The pre-push hook broke every push.** git opens the connection to the
+  remote *before* running `pre-push` — it must, because the hook is handed
+  each ref's remote SHA on stdin — so the fifteen minutes the hook spent on
+  the integration suite and a Docker image build were fifteen minutes of an
+  idle `git-receive-pack` session. The remote dropped it and git died
+  writing the pack to a closed pipe: exit 141, SIGPIPE, no output at all,
+  not even `Enumerating objects`. `--no-verify` was the only way through,
+  which made the gate worse than no gate: it trained the one reflex that
+  skips it. The slow steps move to `scripts/gate.sh`, which records the SHA
+  it passed on; the hook reads the ref lines off stdin and refuses any
+  commit without that record. Binding the receipt to a SHA rather than a
+  timestamp is what stops one gate run from blessing later work.
+
+### Tests
+
+- **The duplicate-index relation filter**, the last of the five
+  relation-scoped checks with no coverage. Its filter sits inside the CTE
+  both sides of the self-join read, so the effect is invisible on a
+  one-table fixture; the test uses two tables and `limit: 1` with the
+  wanted one sorted last, and was confirmed red by neutralising the
+  predicate to `($2::text IS NULL OR TRUE)` — keeping `$2` bound, so the
+  failure is wrong rows rather than a parameter-count error.
+- **Four of the Tables list's six sort keys had no integration coverage.**
+  `boundaries.test.ts`'s `::text`-alias guard only scans backtick blocks
+  containing a literal `SELECT`, and every `ORDER BY` entry here is a bare
+  fragment interpolated at run time. One test now seeds a table with no
+  heap I/O at all alongside two measured ones, so the cache clause's
+  `NULLS LAST` — which decides whether an unmeasured table ranks as the
+  worst cache hit in the database — has something to get wrong.
+- **`nav.test.tsx` asserts that every object tab is present**, not only
+  that no stray tab appears. The allowlist it had could not fail: deleting
+  the Tables entry from `TABS` left all 474 tests green.
+- Four guards in `boundaries.test.ts` pin both halves of the hook change —
+  that the slow steps are not in the hook, and that they are in the gate.
+- **The README's route table is held against the routes that exist**, in
+  both directions. A route with no row is undocumented capability, which is
+  what the two Tables routes were for six commits. A row with no route is a
+  promise the console does not keep, which sends an operator to a 404 during
+  an incident. `registry.test.ts` already reads the README's parity table
+  for the same reason.
+- **The redaction guard matches by position rather than by contents.** The
+  rule was "nothing naming `query` inside a brace span", but a brace span is
+  not a rendering — `{ pathname, query }` is Next's object href — so the
+  guard flagged hrefs, and `withParam` had to live in `lib/` because that
+  was the one directory the scan did not walk. A brace renders only after
+  `>`, `=`, `$` or `}`; asking where it sits is strictly more precise, and
+  now distinguishes `({ query }) => <Sql>{query}</Sql>` from
+  `({ query }) => <pre>{query}</pre>`, which the old rule could not, so it
+  banned both. The guarantee is unchanged and still lives where it did:
+  `routes.int.test.ts` seeds a real password into `pg_stat_activity` and
+  asserts it appears on no route.
+
+- **The integration harness resolves `next` instead of guessing where npm put
+  it.** `NEXT_BIN` was a path relative to the test file —
+  `../node_modules/next/dist/bin/next`, which is apps/web/node_modules — and
+  that is correct only while npm nests `next` under this workspace. The
+  dependency bump above hoisted it to the repo root, so every integration test
+  in apps/web died on `MODULE_NOT_FOUND` fifteen minutes into the gate, after a
+  Testcontainer and a production build, with a stack naming
+  `node:internal/modules/cjs/loader` and nothing in this repository.
+  `createRequire(import.meta.url).resolve()` walks the same chain
+  `import 'next'` would, so it holds under either layout. Spawning the binary
+  rather than `npm run start` is unchanged and still load-bearing: on Linux
+  `npm run` orphans the server that holds the port. This is the third
+  dependency to move here — the Dockerfile and the app's own vitest config are
+  the other two, and both docblocks already warned that the next one to move
+  would not announce itself. Neither warning was a test, so neither fired;
+  `harness.test.ts` now stats the path `withConsole` spawns, in the one-minute
+  pre-commit suite.
+
+- **A test that could only ever pass on Postgres 15 and newer.**
+  `table-list.int.test.ts` published the statistics its four sort assertions
+  read by calling `pg_stat_force_next_flush()`, which arrived in Postgres 15,
+  while this project declares, tests and documents 14 as its floor. Every 14
+  leg of the gate failed on `function pg_stat_force_next_flush() does not
+  exist`. It shipped because `npm run gate` runs one version by default and
+  the 14/16/17/18 matrix only when asked, so a green gate says nothing about
+  the floor. Two other integration files had already hit this and each polls
+  instead, each explaining in a docblock that the function is unusable because
+  the matrix runs 14 — in files this test's author had no reason to open. The
+  poll is now one exported helper in the harness every integration file
+  imports, and it waits for every fact the assertions rest on rather than only
+  the one the flush was reaching for.
 
 ## [2.4.0] — 2026-09-23
 

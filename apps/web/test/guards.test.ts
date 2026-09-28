@@ -225,12 +225,19 @@ describe('redaction', () => {
    *    every violation as a substring — and then NOTHING naming `query` may
    *    remain inside a JSX brace.
    *
-   * That makes destructuring `query` out of a row a violation even when the
-   * destructured value does reach `<Sql>`: the guard cannot tell that
+   * MATCHING BY POSITION is what makes that affordable. The rule used to be
+   * "nothing naming `query` inside any brace span", which could not tell
    * `({ query }) => <Sql>{query}</Sql>` from `({ query }) => <pre>{query}</pre>`
-   * once the `<Sql>` span is gone. Keep the field on its row and write
-   * `<Sql>{row.query}</Sql>`. `\b` is what keeps `queryid` and `queryAgeSecs`
-   * — both rendered raw, both harmless — out of it.
+   * and so banned both — and, worse, flagged `{ pathname, query }`, which is
+   * Next's object href and renders nothing. That false positive was not
+   * cosmetic: it is why `withParam` had to live in lib/ rather than beside
+   * `SortLink`, a test dictating module layout. A brace span renders only
+   * where JSX puts it — after `>`, after `=`, after `$`, after `}` — so the
+   * guard now asks where the span sits rather than what it contains. The safe
+   * destructure passes (its `<Sql>` span is deleted first, and nothing is
+   * left in a rendering position); the unsafe one still fails on `>{query}`.
+   * `\b` is what keeps `queryid` and `queryAgeSecs` — both rendered raw, both
+   * harmless — out of it.
    *
    * A source scan is a heuristic and cannot be the whole protection. The
    * end-to-end proof is routes.int.test.ts's "no page leaks a password caught
@@ -249,6 +256,12 @@ describe('redaction', () => {
    * of other shapes nobody has thought of. That is the nature of grepping for
    * a violation: the space of spellings is open.
    *
+   * Matching by position adds one edge of its own: `prop = {row.query}`, with
+   * a space either side of the `=`, is legal JSX that nothing in this
+   * codebase writes and no formatter produces, and the `=` branch requires
+   * the brace to be adjacent because `const href = { pathname, query }` is
+   * otherwise indistinguishable from it.
+   *
    * This guard is an AUTHORING AID -- it fails fast, in the fast CI job, on
    * the shapes people actually write. The GUARANTEE lives in
    * routes.int.test.ts's "leaks no password on any route that can render a
@@ -262,14 +275,12 @@ describe('redaction', () => {
     for (const file of [...sources(APP), ...sources(COMPONENTS)]) {
       if (file === SQL_COMPONENT) continue;
       const code = strip(readFileSync(file, 'utf8')).replace(/<Sql>[\s\S]*?<\/Sql>/g, '');
-      const direct = (code.match(/\{[^{}]*\bquery\b[^{}]*\}/g) ?? []).filter(
-        // A TYPE literal, not a JSX interpolation: `{ pid: number; query:
-        // string | null }` names `query` and renders nothing. Flagging it made
-        // a correct component with a query-bearing props type fail this guard,
-        // which is how a guard gets deleted by the next person it annoys. A
-        // JSX interpolation does not contain a semicolon.
-        (span) => !span.includes(';'),
-      );
+      // MATCHED BY POSITION, not by contents. A brace span RENDERS only where
+      // JSX puts it: after `>` (a child), after `=` (a prop value), after `$`
+      // (a template substitution) or after `}` (a second child in a row).
+      // Everywhere else a brace is an object literal, a type literal or a
+      // destructuring pattern, and it renders nothing at all.
+      const direct = code.match(/(?:>\s*|[=$}])\{[^{}]*\bquery\b[^{}]*\}/g) ?? [];
       if (direct.length > 0) offenders.push(`${file}: ${direct.join(', ')}`);
     }
     expect(offenders).toEqual([]);
@@ -632,5 +643,71 @@ describe('the tab sub-navs', () => {
     for (const tab of ['queries', 'cleanup']) {
       expect(readFileSync(join(APP, 'db', '[name]', tab, 'layout.tsx'), 'utf8')).toMatch(/<SubNav\b/);
     }
+  });
+});
+
+/**
+ * The README's route table, held against the routes that actually exist.
+ *
+ * `/db/<name>/tables` and `/db/<name>/tables/<relation>` shipped, were
+ * linked from a tab, were covered by tests, and went undocumented for six
+ * commits. Nothing could have noticed: the table is prose, and prose has no
+ * compiler. `registry.test.ts` already reads the README's parity table for
+ * exactly this reason — "a phase that finishes without the README noticing"
+ * — and this is the same failure one directory over.
+ *
+ * BOTH DIRECTIONS, because the two failures are different and only one of
+ * them is the one that just happened. A route with no row is undocumented
+ * capability, which is what shipped. A row with no route is a promise the
+ * console does not keep, which is worse: it sends an operator to a 404
+ * during an incident.
+ *
+ * Pages only. API routes are documented by tier in the operations section,
+ * against a different property (what each one is allowed to do), and folding
+ * them in here would make one test answer two questions.
+ */
+describe('the README route table', () => {
+  const README = readFileSync(fileURLToPath(new URL('../../../README.md', import.meta.url)), 'utf8');
+
+  /**
+   * Scoped to the `## Pages` section. The README backticks a route in plenty
+   * of prose elsewhere, and a guard that swept the whole file would read
+   * those as table rows and then fail for reasons that have nothing to do
+   * with the routes.
+   */
+  function documentedRoutes(): string[] {
+    const section = /\n## Pages\n([\s\S]*?)\n## /.exec(README);
+    if (section === null) throw new Error('no "## Pages" section in the README');
+    // `!` on both: group 1 is not optional in either pattern, so a match
+    // always carries it. Same idiom the space and queryid pages use for an
+    // index they have already proved is there.
+    return [...section[1]!.matchAll(/^\|\s*`([^`]+)`\s*\|/gm)].map((m) => m[1]!);
+  }
+
+  /**
+   * A directory whose name is parenthesised is a route GROUP: Next uses it to
+   * scope a layout and leaves it out of the URL. There are none today, and
+   * that is precisely why it is handled here rather than later — the first
+   * one added would otherwise fail this test for a spelling reason, which is
+   * how a guard gets deleted by the next person it annoys.
+   */
+  function actualRoutes(): string[] {
+    return sources(APP)
+      .filter((f) => /[/\\]page\.(tsx|ts|jsx|js)$/.test(f))
+      .map((f) => f.slice(APP.length).split(/[/\\]/).slice(1, -1)
+        .filter((seg) => !seg.startsWith('('))
+        .map((seg) => seg.replace(/^\[(?:\.\.\.)?(.+)\]$/, '<$1>'))
+        .join('/'))
+      .map((r) => `/${r}`.replace(/\/$/, '') || '/');
+  }
+
+  it('names every page the app serves', () => {
+    const documented = new Set(documentedRoutes());
+    expect(actualRoutes().filter((r) => !documented.has(r)).sort()).toEqual([]);
+  });
+
+  it('names no page the app does not serve', () => {
+    const actual = new Set(actualRoutes());
+    expect(documentedRoutes().filter((r) => !actual.has(r)).sort()).toEqual([]);
   });
 });

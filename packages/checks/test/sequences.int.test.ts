@@ -248,4 +248,16 @@ describe('sequences against a real server', () => {
       expect(r.verdict).toEqual({ level: 'ok' });
     });
   });
+
+  it('asks about one table\'s sequences, by the table that owns them', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await seed(pool, 'CREATE TABLE orders (id bigserial PRIMARY KEY)');
+      await seed(pool, 'CREATE TABLE customers (id bigserial PRIMARY KEY)');
+
+      const out = await runCheck(ctx, sequences, { relation: 'public.orders' });
+      expect(out.ok).toBe(true);
+      if (!out.ok) return;
+      expect(out.data.sequences.map((s) => s.name)).toEqual(['public.orders_id_seq']);
+    });
+  });
 });

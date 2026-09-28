@@ -35,6 +35,7 @@ removes it.
 | `npm test` | Unit tests in `packages/checks`: pure logic and the source guards | No |
 | `npm run test:web` | The console's component and route tests | No |
 | `npm run test:int` | Integration tests against a real Postgres, one container for the whole run | Yes |
+| `npm run gate` | `test:int` and the image smoke test, then records the commit as pushable | Yes |
 | `npm run typecheck:test` | Types across the repo, including test files | No |
 | `npm run --workspace @pgops/checks typecheck` | The checks package as it is built for `dist/` | No |
 | `npm run --workspace @pgops/web typecheck` | The console | No |
@@ -43,9 +44,28 @@ removes it.
 Git hooks run these for you, so the `core.hooksPath` line in
 [Setup](#setup) is what makes them happen. [.githooks/pre-commit](.githooks/pre-commit)
 runs the fast ones — typechecks, unit and component tests, about a minute.
-[.githooks/pre-push](.githooks/pre-push) runs the integration suite and the
-image smoke test, which need Docker and about fifteen minutes. Both files'
-comments explain why each step is there; `--no-verify` skips either one.
+
+The slow ones are a script you run yourself: `npm run gate`
+([scripts/gate.sh](scripts/gate.sh)) runs the integration suite and the image
+smoke test, needs Docker and takes about fifteen minutes. It records the
+commit it passed on, and [.githooks/pre-push](.githooks/pre-push) — which is
+instant — refuses to push any commit without that record. Commit again after
+gating and the record no longer covers you, so you re-gate.
+
+It reads as a detour until you try the obvious thing. `git push` opens the
+connection to the remote *before* running pre-push, because the hook is fed
+each ref's remote SHA on stdin and git can only learn that by asking. A hook
+that works for fifteen minutes does so while an idle `git-receive-pack`
+session is held open; the remote drops it, and git dies writing the pack to a
+closed pipe — exit 141, SIGPIPE, no output at all. That is what this repo did
+until 2026-09-25, and `--no-verify` was the only way to push, which made the
+gate worse than no gate. Every file's comments explain why each step is
+there.
+
+Unlearn the reflex that period trained. `--no-verify` was the only way to push
+while the hook was broken; the hook is fixed, and these two hooks are the whole
+of this repository's CI. Skipping them no longer routes around a broken hook,
+it pushes something nothing verified.
 
 Two things the hooks do not do, which a server-side CI used to:
 
@@ -56,7 +76,7 @@ Two things the hooks do not do, which a server-side CI used to:
   one passed locally.
 - **They run one Postgres version, not four in parallel.** The default is 17.
   Before anything you would have let CI gate, run the real matrix:
-  `PGOPS_HOOK_PG_VERSIONS='14 16 17 18' git push`.
+  `PGOPS_HOOK_PG_VERSIONS='14 16 17 18' npm run gate`.
 
 Two things about the test setup catch people:
 
@@ -102,7 +122,7 @@ apps/web/                 The Next.js console. Renders what packages/checks retu
   proxy.ts                Basic auth, and the 404 gate over the action routes
   test/                   Component tests, route tests, and guards.test.ts
 
-scripts/                  dev-db.sh, the lock-chain seeder, the image smoke test
+scripts/                  dev-db.sh, the lock-chain seeder, the image smoke test, gate.sh
 ```
 
 The line between the two packages is the most important fact about the

@@ -47,7 +47,7 @@ const MEMBERS = [
     label: 'Tables',
     href: 'queries/tables',
     band: 'work',
-    members: ['tableHitRate', 'tableCaching', 'unusedTables', 'tableStats'],
+    members: ['tableHitRate', 'tableCaching', 'unusedTables', 'tableStats', 'tableList'],
   },
   {
     id: 'space',

@@ -10,7 +10,7 @@ pgops is audited capability by capability against
 are shipped and 5 are declined with a stated reason, and a test fails if that
 count drifts from the code. See [Parity with pgHero](#parity-with-pghero).
 
-- **Status:** v2.4.0. Tested against Postgres 14, 16, 17 and 18. No published
+- **Status:** v2.5.0. Tested against Postgres 14, 16, 17 and 18. No published
   image yet; build it from a clone.
 - **License:** Apache-2.0.
 
@@ -79,7 +79,12 @@ Design constraints that shaped the tool:
 
 - Indexes: hit rate, missing, unused, duplicate and invalid indexes, index
   bloat, suggested indexes with the exact `CREATE INDEX` statement.
-- Tables: hit rate, unused tables, per-table statistics.
+- Tables: every table in one list, sorted and filtered in SQL — size, rows,
+  dead rows, cache hit and last vacuum — with presets for the biggest, the
+  ones needing vacuum, the worst cache hit and the unused. A table's name
+  opens the page about that one relation: 30 days of its size, its indexes
+  and the unused, duplicate and invalid ones among them, its sequences, and
+  its transaction ID age.
 - Space: database and relation sizes, largest relations, growth over time.
 - Maintenance: running vacuums with progress, last vacuum and analyze per
   table, transaction ID age by relation.
@@ -190,6 +195,8 @@ requirement.
 | `/db/<name>/queries/indexes/bloat` | Index bloat estimate. Separate route because the estimate is expensive. | On open |
 | `/db/<name>/queries/indexes/suggested` | Suggested indexes for the busiest shapes, with the statement to run. | On open |
 | `/db/<name>/queries/tables` | Table hit rate, unused tables, per-table statistics. | On open |
+| `/db/<name>/tables` | Every table in one list, sorted, searched and capped in SQL: size, rows, dead rows, cache hit, last vacuum. Presets for biggest, needs vacuum, worst cache hit and unused. | On open |
+| `/db/<name>/tables/<relation>` | One relation: 30 days of its size, its indexes and the unused, duplicate and invalid ones among them, its sequences, its transaction ID age. | On open |
 | `/db/<name>/cleanup` | Wraparound horizon, replication role and lag, slots, server settings. | Every 5 s |
 | `/db/<name>/cleanup/space` | Database size, size over 30 days, largest relations, 7-day growth. | On open |
 | `/db/<name>/cleanup/space/<relation>` | One relation's size over 30 days. | On open |
@@ -414,16 +421,16 @@ Locks and Triage pages have something to show. `npm run db:psql` opens
 
 | Command | Runs | Docker |
 |---|---|---|
-| `npm test` | Unit tests in `packages/checks`: pure logic and the source guards | On open |
-| `npm run test:web` | Component and route tests for the console | On open |
+| `npm test` | Unit tests in `packages/checks`: pure logic and the source guards | No |
+| `npm run test:web` | Component and route tests for the console | No |
 | `npm run test:int` | Integration tests against a real Postgres in a Testcontainer | Yes |
-| `npm run typecheck:test` | TypeScript across the repository, including tests | On open |
+| `npm run typecheck:test` | TypeScript across the repository, including tests | No |
 | `./scripts/image-smoke.sh` | Builds the image with one `DATABASE_URL`, runs it with another, asserts the second is used | Yes |
+| `npm run gate` | The two above, then records the commit as pushable | Yes |
 
 The suite is over 1,000 tests. Integration tests run against
 Postgres 14, 16, 17 and 18; set `PGOPS_TEST_PG_VERSION` to choose one, or
-`PGOPS_HOOK_PG_VERSIONS='14 16 17 18' git push` to run the full matrix from
-the pre-push hook.
+`PGOPS_HOOK_PG_VERSIONS='14 16 17 18' npm run gate` to run the full matrix.
 
 Several repository invariants are held by tests rather than by convention:
 
@@ -439,8 +446,12 @@ Several repository invariants are held by tests rather than by convention:
   server.
 
 The pre-commit hook runs typechecks, unit and component tests in about a
-minute. The pre-push hook runs the integration suite and the image smoke test
-in about fifteen minutes. `--no-verify` skips either.
+minute. The pre-push hook is instant: it refuses any commit that has not
+passed `npm run gate`, which runs the integration suite and the image smoke
+test in about fifteen minutes. Run the gate, then push.
+
+These two hooks are the whole of this repository's CI. There is no server-side
+check behind them, so a push that skips them is a push nothing verified.
 
 ### Stack
 

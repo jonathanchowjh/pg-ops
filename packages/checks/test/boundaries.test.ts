@@ -267,6 +267,71 @@ describe('the package boundary', () => {
   });
 
   /**
+   * THE PRE-PUSH HOOK MUST BE FAST, and this is a correctness rule rather
+   * than a comfort one.
+   *
+   * `git push` opens the connection to the remote BEFORE it runs pre-push —
+   * it has to, because the hook is handed each ref's remote SHA on stdin,
+   * which git can only know by asking. Traced on 2026-09-25:
+   *
+   *     run_command: 'ssh -v' git@github.com 'git-receive-pack ...'
+   *     debug1: Sending command: git-receive-pack
+   *     pre-push: integration tests against Postgres 17     <- AFTER
+   *
+   * So everything the hook does happens while an idle `git-receive-pack`
+   * session is held open. When the hook ran the integration suite and a
+   * Docker image build — about fifteen minutes — the remote dropped that
+   * session, and git died writing the pack to a closed pipe: exit 141,
+   * SIGPIPE, with no output at all, not even `Enumerating objects`. Every
+   * push failed, and the only way through was the `--no-verify` the gate
+   * exists to prevent.
+   *
+   * No edit to the hook's BODY can fix that; only making the hook fast can.
+   * The slow steps moved to `scripts/gate.sh`, and the tests below pin both
+   * halves — that they left here, and that they arrived there.
+   */
+  it('does not run the slow gates from pre-push — git holds the connection open while it runs', () => {
+    const hook = readFileSync(new URL('../../../.githooks/pre-push', import.meta.url), 'utf8');
+    // Anchored to real command lines for the same reason as the assertions
+    // above: this hook carries prose naming both steps, and an unanchored
+    // search cannot tell a live command from the comment explaining why it
+    // is no longer here.
+    expect(hook).not.toMatch(/^\s*(PGOPS_TEST_PG_VERSION=\S+ )?npm run test:int\s*$/m);
+    expect(hook).not.toMatch(/^\s*\.\/scripts\/gate\.sh\s*$/m);
+    expect(hook).not.toMatch(/^\s*\.\/scripts\/image-smoke\.sh\s*$/m);
+  });
+
+  /**
+   * The other half: a fast hook is only a gate if it still refuses an
+   * ungated push. It reads the ref lines git writes to its stdin and
+   * requires a receipt for each SHA being pushed — so the gate binds to the
+   * exact commit, and committing after gating invalidates it.
+   */
+  it('verifies every pushed sha against a gate receipt', () => {
+    const hook = readFileSync(new URL('../../../.githooks/pre-push', import.meta.url), 'utf8');
+    expect(hook).toMatch(/while read/);
+    expect(hook).toMatch(/pgops-gate-receipt/);
+  });
+
+  /**
+   * The steps MOVED; they were not dropped. Without this, deleting the
+   * integration suite outright would satisfy the "pre-push is fast" test
+   * above and lose the gate entirely — the exact shape of vacuous test the
+   * pre-commit assertions above are anchored against.
+   */
+  it('runs the integration suite and the image smoke test from the gate script', () => {
+    const gate = readFileSync(new URL('../../../scripts/gate.sh', import.meta.url), 'utf8');
+    expect(gate).toMatch(/^\s*PGOPS_TEST_PG_VERSION="\$v" npm run test:int\s*$/m);
+    expect(gate).toMatch(/^\s*\.\/scripts\/image-smoke\.sh\s*$/m);
+  });
+
+  /** A gate that does not record what it gated cannot be checked by the hook. */
+  it('records the sha the gate passed on', () => {
+    const gate = readFileSync(new URL('../../../scripts/gate.sh', import.meta.url), 'utf8');
+    expect(gate).toMatch(/pgops-gate-receipt/);
+  });
+
+  /**
    * The other half of M1: the build step is only worth having if the paths
    * it produces are the paths package.json advertises. A `build` script
    * whose `outDir` drifts from `main`/`exports` would leave the same hole

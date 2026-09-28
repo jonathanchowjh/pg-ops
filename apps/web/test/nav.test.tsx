@@ -26,6 +26,14 @@ const GATE_TAB: Record<(typeof GATE_ORDER)[number], string> = {
   'keep-up': 'cleanup',
 };
 
+/**
+ * The object layer's tabs — the ones on the strip that are deliberately NOT
+ * a gate. Hoisted out of the allowlist test below so the two tests that
+ * care about this list, the one that widens it and the one that requires
+ * it, read from the same array and cannot drift apart from each other.
+ */
+const OBJECT_TABS = ['/db/prod/tables'];
+
 describe('Nav', () => {
   it('links the cleanup tab', async () => {
     rendered = await render(<Nav name="prod" />);
@@ -54,18 +62,37 @@ describe('Nav', () => {
   });
 
   /**
-   * The tab strip carries exactly the gates and nothing else. Without this,
-   * a stray tab — a hygiene route promoted to the top level by mistake —
-   * satisfies "every gate has a tab" while quietly breaking the claim
-   * gates.ts actually makes, which is that the four tabs ARE the four gates.
+   * REWRITTEN, NOT DELETED. The old form asserted that the tab strip carried
+   * the four gates and nothing else, which was gates.ts's claim and stopped
+   * being true on purpose — see the design of 2026-09-23 §4, which names this
+   * as the consequence to accept. What survives is the property that actually
+   * protects the strip: nothing appears on it by accident. Every tab is
+   * either a gate or a named member of the object layer, and a route promoted
+   * to the top level by mistake is neither.
    */
-  it('carries no tab that is not a gate', async () => {
+  it('carries only gates and the object pages named here', async () => {
     rendered = await render(<Nav name="prod" />);
     const hrefs = [...rendered.container.querySelectorAll('a')]
       .map((a) => a.getAttribute('href') ?? '');
-    const allowed = new Set(
-      GATE_ORDER.map((g) => (GATE_TAB[g] === '' ? '/db/prod' : `/db/prod/${GATE_TAB[g]}`)),
-    );
-    expect(hrefs.filter((h) => !allowed.has(h))).toEqual(['/db/prod']);
+    const gates = GATE_ORDER.map((g) => (GATE_TAB[g] === '' ? '/db/prod' : `/db/prod/${GATE_TAB[g]}`));
+    expect(hrefs.filter((h) => !new Set([...gates, ...OBJECT_TABS]).has(h))).toEqual(['/db/prod']);
+  });
+
+  /**
+   * The allowlist test above only ever WIDENS when a tab is named in
+   * OBJECT_TABS — it has nothing to say about whether that tab is actually
+   * on the page. Delete the Tables entry from TABS and the allowlist test
+   * keeps passing, because an allowlist with one fewer thing to match
+   * against is not a shorter list of hrefs, it just has one item that never
+   * gets used. This is the other half: it fails the moment an object tab
+   * this file names stops being rendered.
+   */
+  it('gives the object layer a tab of its own', async () => {
+    rendered = await render(<Nav name="prod" />);
+    const hrefs = [...rendered.container.querySelectorAll('a')]
+      .map((a) => a.getAttribute('href') ?? '');
+    for (const href of OBJECT_TABS) {
+      expect(hrefs, `object tab ${href} is missing`).toContain(href);
+    }
   });
 });

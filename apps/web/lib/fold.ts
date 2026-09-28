@@ -28,6 +28,8 @@
  * the rest.
  */
 
+import { withParam } from '@/lib/url';
+
 /** The store's schema, and the only prefix this folds on. */
 const OURS = 'pgops.';
 
@@ -46,19 +48,17 @@ export interface Fold {
  * and a client toggle would take those three away to add nothing.
  *
  * Every OTHER parameter is carried through, so flipping the fold on a page
- * that was reached with a limit or a sort does not silently reset it.
+ * that was reached with a limit or a sort does not silently reset it. That
+ * is `withParam`'s whole promise and this is one call to it, rather than a
+ * second copy of the loop that keeps it: the fold is `?pgops=show` present
+ * or absent, so flipping it is setting that one parameter or removing it.
  */
 export function foldFrom(
   pathname: string,
   params: Record<string, string | undefined>,
 ): Fold {
   const show = params.pgops === 'show';
-  const query: Record<string, string> = {};
-  for (const [k, v] of Object.entries(params)) {
-    if (k !== 'pgops' && v !== undefined && v !== '') query[k] = v;
-  }
-  if (!show) query.pgops = 'show';
-  return { show, href: { pathname, query } };
+  return { show, href: withParam(pathname, params, 'pgops', show ? undefined : 'show') };
 }
 
 /** Whether this schema-qualified name belongs to pgops's own store. */

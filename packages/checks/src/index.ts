@@ -65,6 +65,9 @@ export type * from './tools/explain.js';
 export type * from './tools/advice.js';
 export type * from './tools/suggested-indexes.js';
 
+export { TABLE_SORTS } from './checks/table-list.js';
+export type * from './checks/table-list.js';
+
 // slowQueries and SLOW_QUERY_DEFAULTS are VALUES, not types — `export type *`
 // above carries interfaces only, so without this apps/web cannot import them
 // and the queries page fails to compile.

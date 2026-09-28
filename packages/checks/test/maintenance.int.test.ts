@@ -227,4 +227,17 @@ describe('maintenance against a real server', () => {
       expect(result.data.truncated).toBe(true);
     });
   });
+
+  it('reports transaction age for one relation', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await seed(pool, 'CREATE TABLE a (v int)');
+      await seed(pool, 'CREATE TABLE b (v int)');
+
+      const out = await runCheck(ctx, autovacuumDanger, { relation: 'public.a' });
+      expect(out.ok).toBe(true);
+      if (!out.ok) return;
+      expect(out.data.relations.map((r) => r.relation)).toEqual(['public.a']);
+      expect(out.data.total).toBe(1);
+    });
+  });
 });

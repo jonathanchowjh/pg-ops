@@ -1,35 +1,56 @@
 #!/bin/sh
-# What the `integration` and `image` CI jobs used to run. These need Docker and
-# take about fifteen minutes, so they run on the push, not on every commit.
+# Refuse a push whose commits have not passed `./scripts/gate.sh`.
 #
-# TWO THINGS THE WORKFLOW DID THAT THIS CANNOT:
+# THIS HOOK MUST STAY FAST, and that is a correctness rule rather than a
+# comfort one. `git push` opens the connection to the remote BEFORE running
+# this hook — it must, because git feeds us each ref's remote SHA on stdin,
+# which it can only learn by asking. Everything done here therefore happens
+# while an idle `git-receive-pack` session is held open.
 #
-# 1. Linux. These hooks run on the developer's machine, and the last bug this
-#    repo shipped to CI was invisible on macOS: `npm run` interposes sh between
-#    the harness and `next`, and on Linux a SIGTERM to npm orphans the server
-#    still holding the port, so every later test silently ran against it. macOS
-#    sh execs its last command, so the orphan never appeared. Every leg failed
-#    in CI; every leg passed locally. Nothing below would have caught it.
-# 2. The 14/16/17/18 matrix in parallel. Here the versions run one after
-#    another, so the default is the single version below. Run the real matrix
-#    before anything you would have let CI gate:
+# This hook used to run the integration suite and a Docker image build
+# inline, about fifteen minutes, and so every push failed: the remote dropped
+# the idle session, and git died writing the pack to a closed pipe with exit
+# 141 and no output whatsoever — not even `Enumerating objects`. It looked
+# like a broken pipe bug anywhere but here. `--no-verify` was the only way to
+# push at all, which made the gate worse than no gate: it trained the one
+# reflex that skips it.
 #
-#      PGOPS_HOOK_PG_VERSIONS='14 16 17 18' git push
+# So the work moved to scripts/gate.sh and this reads its receipt instead.
+# boundaries.test.ts pins both halves — that the slow steps are not here, and
+# that they are there.
 #
 # `git push --no-verify` skips this hook.
 set -e
 
-versions=${PGOPS_HOOK_PG_VERSIONS:-17}
+receipt="$(git rev-parse --git-dir)/pgops-gate-receipt"
+zero=0000000000000000000000000000000000000000
+missing=''
 
-for v in $versions; do
-  echo "pre-push: integration tests against Postgres $v"
-  PGOPS_TEST_PG_VERSION="$v" npm run test:int
+# git writes one line per ref: <local ref> <local sha> <remote ref> <remote
+# sha>. Reading it is not optional bookkeeping — an unread stdin is its own
+# class of hook bug — and it is what lets the gate bind to the exact commits
+# this push would publish rather than to whatever HEAD happens to be now.
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  # A deletion publishes no code, so there is nothing for a gate to have
+  # checked. Refusing these would make `git push origin --delete` impossible
+  # without --no-verify, for no gain.
+  if [ "$local_sha" = "$zero" ]; then
+    continue
+  fi
+  # -x so a SHA must match a whole line, -F so it is never read as a
+  # pattern. A missing receipt file is simply no match, which is the right
+  # answer for a clone that has never gated.
+  if ! grep -qxF "$local_sha" "$receipt" 2>/dev/null; then
+    missing="$missing  $local_sha  $local_ref
+"
+  fi
 done
 
-# The source-level half of this rule is apps/web/test/guards.test.ts (every
-# page is dynamic, nothing opts back into static rendering); this is the half
-# that builds an actual image on a machine with the wrong DATABASE_URL and runs
-# it with the right one. Neither substitutes for the other: the guard cannot
-# see a build, and a build cannot see an import.
-echo "pre-push: image smoke test"
-./scripts/image-smoke.sh
+if [ -n "$missing" ]; then
+  echo "pre-push: refusing — no green gate for:" >&2
+  printf '%s' "$missing" >&2
+  echo "Run ./scripts/gate.sh (needs Docker, about fifteen minutes), then push." >&2
+  exit 1
+fi
+
+echo "pre-push: every pushed commit has a green gate."

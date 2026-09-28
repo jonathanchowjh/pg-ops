@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { Client } from 'pg';
@@ -32,8 +33,24 @@ export interface Console {
  * that worker then hit EADDRINUSE and silently tested the orphan instead
  * (CI run 35677090028: 23 failures, all "expected 404"). macOS's sh execs
  * its last command, so the orphan never appeared locally.
+ *
+ * RESOLVED, NOT SPELLED OUT, and that distinction has already cost a gate
+ * run. This was `new URL('../node_modules/next/dist/bin/next')` — which is
+ * apps/web/node_modules, true only while npm chose to nest `next` under this
+ * workspace. A dependency bump hoisted it to the repo root, the path stopped
+ * existing, and every integration test in apps/web died on MODULE_NOT_FOUND
+ * fifteen minutes into the gate. Hoisting is npm's decision and it changes
+ * with the tree; asking Node to resolve the specifier walks the same
+ * node_modules chain `import 'next'` would, so it is right either way.
+ * `next` publishes no `exports` field, so the subpath resolves directly.
+ *
+ * This is the third dependency to move here. The Dockerfile installs into one
+ * stage rather than copying apps/web/node_modules, and this app keeps its own
+ * vitest config because Vite resolves bare specifiers from the config's
+ * directory; both docblocks end by warning that the next one to move will not
+ * announce itself either. harness.test.ts is that warning as a test.
  */
-const NEXT_BIN = fileURLToPath(new URL('../node_modules/next/dist/bin/next', import.meta.url));
+export const NEXT_BIN = createRequire(import.meta.url).resolve('next/dist/bin/next');
 const WEB_DIR = fileURLToPath(new URL('..', import.meta.url));
 
 async function waitForPort(url: string, server: ChildProcess, timeoutMs = 60_000): Promise<void> {

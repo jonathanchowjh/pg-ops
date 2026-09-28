@@ -186,7 +186,18 @@ describe('/db/[name]/queries', () => {
 describe('the two properties, end to end', () => {
   /** Distinctive enough that a match cannot be coincidence. */
   const SENTINEL = 'hunter2sentinel';
-  const ROUTES = ['', '/db/primary', '/db/primary/sessions', '/db/primary/locks', '/db/primary/queries'];
+  const ROUTES = [
+    '', '/db/primary', '/db/primary/sessions', '/db/primary/locks', '/db/primary/queries',
+    // Neither new P2 route (Tables list, Table page) had ANY integration
+    // coverage until now — both were exercised only by unit tests with a
+    // wholesale-mocked `@/lib/check`. The Table page is deliberately left
+    // out: it needs a real relation name to fetch, which this block's fixed
+    // ROUTES array has no way to seed, and richer seeded assertions for it
+    // are deferred work, not something to invent a new pattern for here. The
+    // list route needs no relation, so it costs nothing to add: it gets
+    // fetched and checked for a leaked password exactly like its siblings.
+    '/db/primary/tables',
+  ];
 
   /**
    * The redaction guard in guards.test.ts is a source scan, and a source scan

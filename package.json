@@ -1,6 +1,6 @@
 {
   "name": "pgops",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
   "description": "Postgres on-call console. Run it during the incident.",
   "type": "module",
@@ -15,6 +15,7 @@
   "scripts": {
     "test": "vitest run --project unit",
     "test:int": "npm run --workspace @pgops/checks build && vitest run --project integration",
+    "gate": "./scripts/gate.sh",
     "test:web": "npm run --workspace @pgops/checks build && vitest run --project web",
     "test:watch": "vitest",
     "typecheck:test": "tsc -p tsconfig.test.json --noEmit",

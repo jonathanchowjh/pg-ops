@@ -1,39 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { runCheck } from '../src/run.js';
 import { tableCaching, tableHitRate, tableStats, unusedTables } from '../src/checks/tables.js';
-import { withPostgres, seed } from './harness.js';
-
-/**
- * Polls until the server has PUBLISHED a statistic, which is a fixture
- * precondition and never the thing under test.
- *
- * Since PostgreSQL 15 a backend accumulates statistics locally and flushes
- * them to shared memory at transaction end, and only once PGSTAT_MIN_INTERVAL
- * has elapsed — so a pool spreading work across four backends publishes
- * nothing for seconds. Every one of these fixtures was written without a poll
- * first and failed: a real table hit rate read null, `seq_scan` after
- * CREATE INDEX read 0, and `n_dead_tup` after deleting 400 rows read 0. The
- * same commands run through `psql` publish immediately, because each psql
- * invocation disconnects and a disconnecting backend flushes.
- *
- * `pg_stat_force_next_flush()` would remove the wait outright but does not
- * exist before 15, and the CI matrix runs 14. So: poll, with a ceiling that
- * fails loudly rather than hanging the suite.
- */
-async function awaitPublished(
-  pool: import('pg').Pool,
-  what: string,
-  sql: string,
-  values: unknown[] = [],
-): Promise<void> {
-  const deadline = Date.now() + 20_000;
-  for (;;) {
-    const { rows } = await pool.query<{ ready: boolean | null }>(sql, values);
-    if (rows[0]?.ready === true) return;
-    if (Date.now() > deadline) throw new Error(`${what} not published within 20s`);
-    await new Promise((r) => setTimeout(r, 250));
-  }
-}
+import { withPostgres, seed, awaitPublished } from './harness.js';
 
 describe('tables against a real server', () => {
   it('reads a null table hit rate on a database with no heap I/O', async () => {

@@ -1,5 +1,5 @@
 import type { Check } from '../types.js';
-import { DEFAULT_LIMIT, visibleSchemas, type ListOpts } from './indexes.js';
+import { DEFAULT_LIMIT, visibleSchemas, type RelationOpts } from './indexes.js';
 import { HARD_LIMIT } from './wraparound.js';
 
 /**
@@ -84,6 +84,7 @@ CROSS JOIN LATERAL (
 ) a
 WHERE c.relkind IN ('r', 'm')
   AND ${visibleSchemas('n.nspname')}
+  AND ($2::text IS NULL OR n.nspname || '.' || c.relname = $2)
 ORDER BY a.xact_age DESC, relation
 LIMIT $1`;
 
@@ -100,13 +101,13 @@ export function toAutovacuumDanger(rows: AutovacuumDangerRow[]): AutovacuumDange
   };
 }
 
-export const autovacuumDanger: Check<AutovacuumDangerRow, AutovacuumDangerData, ListOpts> = {
+export const autovacuumDanger: Check<AutovacuumDangerRow, AutovacuumDangerData, RelationOpts> = {
   id: 'autovacuumDanger',
   title: 'Transaction ID age by relation',
   gate: 'keep-up',
   class: 'hygiene',
   timeoutMs: 10_000,
-  sql: (o) => ({ text: AUTOVACUUM_DANGER_SQL, values: [o.limit ?? DEFAULT_LIMIT] }),
+  sql: (o) => ({ text: AUTOVACUUM_DANGER_SQL, values: [o.limit ?? DEFAULT_LIMIT, o.relation ?? null] }),
   map: toAutovacuumDanger,
   /**
    * No verdict, and this one is a ruling rather than §2.2's default.

@@ -10,6 +10,23 @@ import type { Check, Verdict, Threshold } from '../types.js';
 export interface ListOpts { limit?: number }
 
 /**
+ * A list check that can be asked about ONE relation.
+ *
+ * Every field optional, because capture.ts runs every hygiene check as
+ * `runCheck(ctx, check, {})`. The filter is bound as a nullable parameter
+ * and applied in the WHERE, so it runs ahead of the LIMIT — the same
+ * construction as `sessions.pid`, and for the same reason stated there: a
+ * filter applied to an already-capped page cannot find what the server never
+ * sent.
+ *
+ * Compared against the concatenated `nspname || '.' || relname` rather than
+ * a cast. `::regclass::text` and `::regnamespace` both parse identifier
+ * syntax and break on a schema named "Weird Schema" — see the docblocks on
+ * `visibleSchemas` and in sequences.ts.
+ */
+export interface RelationOpts extends ListOpts { relation?: string }
+
+/**
  * The ratio arrives as TEXT. `sum(...) / nullif(sum(...), 0)` is numeric
  * division, and node-postgres returns numeric as a string to avoid a float64
  * round trip — the same text->number split `locks.ts` documents for
@@ -149,6 +166,7 @@ JOIN pg_class c ON c.oid = i.indexrelid
 JOIN pg_class t ON t.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE ${visibleSchemas('n.nspname')}
+  AND ($2::text IS NULL OR n.nspname || '.' || t.relname = $2)
 ORDER BY pg_relation_size(i.indexrelid) DESC, c.relname
 LIMIT $1`;
 
@@ -171,13 +189,13 @@ export function toIndexList(rows: IndexListRow[]): IndexListData {
   };
 }
 
-export const indexList: Check<IndexListRow, IndexListData, ListOpts> = {
+export const indexList: Check<IndexListRow, IndexListData, RelationOpts> = {
   id: 'indexList',
   title: 'Indexes',
   gate: 'work',
   class: 'hygiene',
   timeoutMs: 10_000,
-  sql: (o) => ({ text: INDEX_LIST_SQL, values: [o.limit ?? DEFAULT_LIMIT] }),
+  sql: (o) => ({ text: INDEX_LIST_SQL, values: [o.limit ?? DEFAULT_LIMIT, o.relation ?? null] }),
   map: toIndexList,
   // No verdict: §2.2. An inventory is a table an operator reads, and
   // `runCheck` yields `verdict: null`, which renders no badge.
@@ -303,6 +321,7 @@ JOIN pg_class t ON t.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE NOT i.indisvalid
   AND ${visibleSchemas('n.nspname')}
+  AND ($2::text IS NULL OR n.nspname || '.' || t.relname = $2)
 ORDER BY c.relname
 LIMIT $1`;
 
@@ -327,13 +346,13 @@ function findingVerdict(noun: string) {
   };
 }
 
-export const invalidIndexes: Check<IndexFindingRow, IndexFindingData, ListOpts> = {
+export const invalidIndexes: Check<IndexFindingRow, IndexFindingData, RelationOpts> = {
   id: 'invalidIndexes',
   title: 'Invalid indexes',
   gate: 'work',
   class: 'hygiene',
   timeoutMs: 10_000,
-  sql: (o) => ({ text: INVALID_INDEXES_SQL, values: [o.limit ?? DEFAULT_LIMIT] }),
+  sql: (o) => ({ text: INVALID_INDEXES_SQL, values: [o.limit ?? DEFAULT_LIMIT, o.relation ?? null] }),
   map: toFindings,
   thresholds: [
     { level: 'warn', value: 1, unit: 'count',
@@ -393,10 +412,11 @@ WHERE s.idx_scan = 0
   AND NOT i.indisunique
   AND pg_relation_size(i.indexrelid) >= $1
   AND ${visibleSchemas('n.nspname')}
+  AND ($3::text IS NULL OR n.nspname || '.' || t.relname = $3)
 ORDER BY pg_relation_size(i.indexrelid) DESC, c.relname
 LIMIT $2`;
 
-export const unusedIndexes: Check<IndexFindingRow, IndexFindingData, ListOpts> = {
+export const unusedIndexes: Check<IndexFindingRow, IndexFindingData, RelationOpts> = {
   id: 'unusedIndexes',
   title: 'Unused indexes',
   gate: 'work',
@@ -404,7 +424,7 @@ export const unusedIndexes: Check<IndexFindingRow, IndexFindingData, ListOpts> =
   timeoutMs: 10_000,
   sql: (o) => ({
     text: UNUSED_INDEXES_SQL,
-    values: [UNUSED_INDEX_FLOOR_BYTES, o.limit ?? DEFAULT_LIMIT],
+    values: [UNUSED_INDEX_FLOOR_BYTES, o.limit ?? DEFAULT_LIMIT, o.relation ?? null],
   }),
   map: toFindings,
   thresholds: [
@@ -538,6 +558,7 @@ WITH ix AS (
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE i.indexprs IS NULL
     AND i.indisvalid
+    AND ($2::text IS NULL OR n.nspname || '.' || t.relname = $2)
     AND ${visibleSchemas('n.nspname')}
 ), dups AS (
   -- The ::text cast is declared HERE, above this CTE's own ORDER BY, and the
@@ -573,13 +594,13 @@ FROM dups d
 ORDER BY d.bytes_num DESC, d.name
 LIMIT $1`;
 
-export const duplicateIndexes: Check<DuplicateRow, DuplicateData, ListOpts> = {
+export const duplicateIndexes: Check<DuplicateRow, DuplicateData, RelationOpts> = {
   id: 'duplicateIndexes',
   title: 'Duplicate indexes',
   gate: 'work',
   class: 'hygiene',
   timeoutMs: 10_000,
-  sql: (o) => ({ text: DUPLICATE_INDEXES_SQL, values: [o.limit ?? DEFAULT_LIMIT] }),
+  sql: (o) => ({ text: DUPLICATE_INDEXES_SQL, values: [o.limit ?? DEFAULT_LIMIT, o.relation ?? null] }),
   map: toDuplicates,
   // No verdict, and §2.2 is only half the reason. A duplicate index is
   // sometimes deliberate — kept during a migration, or held for a rebuild —

@@ -13,6 +13,7 @@ const TABS = [
   { segment: 'sessions', href: '/sessions', label: 'Sessions' },
   { segment: 'locks', href: '/locks', label: 'Locks' },
   { segment: 'queries', href: '/queries', label: 'Queries' },
+  { segment: 'tables', href: '/tables', label: 'Tables' },
   // Labelled `Cleanup`, not `Replication & cleanup`. The gate's title is the
   // sentence a band on the triage page uses; a tab is a word on a strip, and
   // the ampersand is where this row starts wrapping. test/nav.test.tsx holds
@@ -31,6 +32,17 @@ const TABS = [
  * `aria-current="page"` carries the same fact to a screen reader, and the
  * underline carries it to anyone who cannot see the colour change — the
  * active tab is never distinguished by colour alone.
+ *
+ * THE TAB STRIP IS NO LONGER THE FOUR GATES, and that is a decision rather
+ * than drift. The design of 2026-09-23 §4 splits the console on LIVENESS:
+ * the gates are what is wrong right now, and they survive as the bands on
+ * the triage page. Tables is an object — it carries history, it does not
+ * poll, and it feeds three READINGS across two gates at once (work's
+ * unused-table reading, keep-up's space and vacuum readings), which is
+ * exactly why no single gate could own it and why it had no tab of its own
+ * until now. test/nav.test.tsx holds the half of the old "tabs are exactly
+ * the gates" property that is still true — every gate keeps a tab — and
+ * names Tables as the one entry on the strip that is not one.
  */
 export function Nav({ name }: { name: string }) {
   const segment = useSelectedLayoutSegment();

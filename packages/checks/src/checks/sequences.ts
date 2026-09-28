@@ -1,5 +1,5 @@
 import type { Check, Threshold, Verdict } from '../types.js';
-import { DEFAULT_LIMIT, visibleSchemas, type ListOpts } from './indexes.js';
+import { DEFAULT_LIMIT, visibleSchemas, type RelationOpts } from './indexes.js';
 
 export interface SequenceRow {
   name: string;
@@ -39,7 +39,13 @@ export interface SequenceData {
   sequences: SequenceEntry[];
   total: number;
   truncated: boolean;
-  /** #54. A database-wide count, not a count of the page — see the docblock. */
+  /**
+   * #54. A window aggregate over every sequence that survived the WHERE, not
+   * a count of the page — see the docblock. That was a database-wide count
+   * before this file grew a `relation` filter; under one, it counts THAT
+   * TABLE's unreadable sequences, exactly as `worstPctUsed` below does, and
+   * the SQL comment above the `WHERE` covers both, not just `worst_pct`.
+   */
   unreadable: number;
   /** The highest usage across EVERY readable sequence, cap or no cap. */
   worstPctUsed: number | null;
@@ -186,16 +192,25 @@ CROSS JOIN LATERAL (
     END AS ceiling,
     CASE WHEN s.readable THEN coalesce(ps.last_value, ps.start_value)::numeric END AS val
 ) v
+-- \`unreadable\` and \`worst_pct\` above are window functions computed AFTER
+-- this WHERE, so a relation-scoped call's \`unreadable\` count and
+-- \`worst_pct\` are both THAT TABLE's — one unreadable-sequence count and
+-- one worst reading, not the database's. That is correct, and more
+-- actionable, for a Table page asking about one relation: the 90% threshold
+-- below is PER SEQUENCE, so a per-table \`worst_pct\` crossing it is as real
+-- a finding as a database-wide one, and the Table page's own comment on
+-- \`seqsForDisplay\` explains what it does and does not withhold.
+WHERE ($2::text IS NULL OR o.table_name = $2)
 ORDER BY (v.val / v.ceiling) DESC NULLS LAST, s.name
 LIMIT $1`;
 
-export const sequences: Check<SequenceRow, SequenceData, ListOpts> = {
+export const sequences: Check<SequenceRow, SequenceData, RelationOpts> = {
   id: 'sequences',
   title: 'Sequence exhaustion',
   gate: 'keep-up',
   class: 'hygiene',
   timeoutMs: 10_000,
-  sql: (o) => ({ text: SEQUENCES_SQL, values: [o.limit ?? DEFAULT_LIMIT] }),
+  sql: (o) => ({ text: SEQUENCES_SQL, values: [o.limit ?? DEFAULT_LIMIT, o.relation ?? null] }),
   map: toSequences,
   thresholds: [
     { level: 'warn', value: 90, unit: 'percent',
