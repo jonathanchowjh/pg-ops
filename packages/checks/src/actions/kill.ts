@@ -1,4 +1,5 @@
 import type { ActionMeta, CheckContext } from '../types.js';
+import { ownSql } from '../run.js';
 import { writeAudit } from './audit.js';
 
 /**
@@ -66,13 +67,12 @@ export type KillMeta = ActionMeta;
  * which a boolean cannot — an operator told "terminated" when nothing died
  * would go on to trust a session is gone that never was.
  */
-const KILL_SQL = `
-SELECT CASE WHEN backend_start = $2::timestamptz
+const KILL_SQL = ownSql(`SELECT CASE WHEN backend_start = $2::timestamptz
             AND backend_type = 'client backend'
             THEN pg_terminate_backend(pid)
             ELSE NULL END AS terminated
 FROM pg_stat_activity
-WHERE pid = $1`;
+WHERE pid = $1`);
 
 export async function killBackend(ctx: CheckContext, target: KillTarget, meta: KillMeta): Promise<KillOutcome> {
   let outcome: KillOutcome = 'gone';

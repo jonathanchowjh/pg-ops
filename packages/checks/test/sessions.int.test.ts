@@ -91,11 +91,68 @@ describe('sessions', () => {
     });
   }, 120_000);
 
+  it('reports the transaction age of an open transaction, and none for a session outside one', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE TABLE s_t (id int primary key)');
+      await pool.query('INSERT INTO s_t VALUES (1)');
+      const holder = await pool.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query('UPDATE s_t SET id = id WHERE id = 1');
+        await new Promise((r) => setTimeout(r, 300));
+
+        const res = await runCheck(ctx, sessions, {});
+        if (!res.ok) throw new Error(res.message);
+        const open = res.data.sessions.find((s) => s.state === 'idle in transaction');
+        expect(open).toBeDefined();
+        expect(open!.xactAgeSecs).not.toBeNull();
+        expect(open!.xactAgeSecs!).toBeGreaterThanOrEqual(0);
+        const idle = res.data.sessions.find((s) => s.state === 'idle');
+        if (idle) expect(idle.xactAgeSecs).toBeNull();
+      } finally {
+        await holder.query('ROLLBACK');
+        holder.release();
+      }
+    });
+  }, 120_000);
+
   it('censuses states', async () => {
     await withPostgres(async (ctx) => {
       const r = await runCheck(ctx, sessionStates);
       if (!r.ok) throw new Error(r.message);
       expect(r.data.byState.length).toBeGreaterThan(0);
+    });
+  }, 120_000);
+
+  /**
+   * B12. The unit tests pin what `map` does with an `oldest` row; only a real
+   * server proves the second branch of the statement produces one, that its
+   * LIMIT 1 is scoped to that branch rather than to the whole UNION (which
+   * would return a one-row census), and that the pid it names is really
+   * idle in transaction.
+   */
+  it('names the oldest idle-in-transaction session, without truncating the census', async () => {
+    await withPostgres(async (ctx, pool) => {
+      const uri = (pool as unknown as { options: { connectionString: string } }).options.connectionString;
+      const holder = new pg.Client({ connectionString: uri, application_name: 'states-holder' });
+      holder.on('error', () => {});
+      try {
+        await holder.connect();
+        await holder.query('BEGIN');
+        await holder.query('SELECT 1');
+        const { rows } = await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+
+        const r = await runCheck(ctx, sessionStates);
+        if (!r.ok) throw new Error(r.message);
+        // The census survives the UNION: a LIMIT that escaped its own branch
+        // would clip this to one row.
+        expect(r.data.byState.length).toBeGreaterThan(0);
+        expect(r.data.oldestIdleInTxnPid).toBe(rows[0]!.pid);
+        expect(r.data.oldestIdleInTxnApp).toBe('states-holder');
+        expect(r.data.oldestIdleInTxnSecs).not.toBeNull();
+      } finally {
+        await holder.end().catch(() => {});
+      }
     });
   }, 120_000);
 });

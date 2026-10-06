@@ -2,6 +2,7 @@ import type { SqlQuery, Tool } from '../types.js';
 import { queryStats, type QueryStatRow, type QueryStatsOpts } from '../checks/query-stats.js';
 import { MAX_STATEMENT_LENGTH, planStatements } from './explain.js';
 import { adviseOn, type IndexAdvice, type IndexSuggestion } from './advice.js';
+import { ownSql } from '../run.js';
 
 /**
  * pgHero's dashboard thresholds (`home_controller.rb`, v4.0.1:
@@ -76,7 +77,11 @@ export const suggestedIndexes: Tool<SuggestedIndexOpts, SuggestedIndexes> = {
     const o = { ...SUGGESTION_DEFAULTS, ...opts };
     const sql = queryStats.sql as (x: QueryStatsOpts) => SqlQuery;
     const { text, values } = sql({ sort: 'total', limit: o.limit });
-    const { rows } = await ctx.target.query(text, values);
+    // Reusing `queryStats`'s own sql() runs it OUTSIDE runCheck, so it never
+    // passes through toQuery — the one place that calls `ownSql`. Without
+    // this, this recurring pg_stat_statements read would rank on the Queries
+    // page as if it were an operator's own query.
+    const { rows } = await ctx.target.query(ownSql(text), values);
     const stats = queryStats.map(rows as QueryStatRow[]);
 
     const shapes = stats.rows.filter((r) => !r.redacted && r.query !== null

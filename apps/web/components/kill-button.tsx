@@ -140,8 +140,29 @@ export function KillButton({
   // edge that is always on screen (the table's right edge is the container's),
   // and the table's width no longer changes at all when this opens, so no
   // other row moves under the reader either.
+  //
+  // The PHONE half of that same fix, measured at 390px on 2026-10-01: on one
+  // line this panel is 477px wide, so 104px of it — including the `reason
+  // required` hint below, the only thing that says why Confirm is disabled —
+  // sat off the right edge of the screen. Wrapping brings it to 186px, fully
+  // on screen, hint included.
+  //
+  // WRAPPING IS SCOPED TO NARROW VIEWPORTS (`sm:flex-nowrap`, and the cap
+  // released by `sm:max-w-none`) because it is NOT free above them. This span
+  // is absolutely positioned, so its shrink-to-fit width is bounded by its
+  // containing block — the ~190px action cell. `whitespace-nowrap` plus a
+  // non-wrapping flex is precisely what made it ignore that bound and lay out
+  // at its 477px content width. Allow wrapping unconditionally and it wraps at
+  // the CELL's width on every screen: measured at 1280px, the tidy single row
+  // this control was deliberately tuned into became a 186px four-line stack.
+  // The breakpoint is what keeps the desktop layout the paragraph above
+  // describes intact while fixing the phone.
+  //
+  // `whitespace-nowrap` stays: it keeps each item's own text on one line, and
+  // does not stop flex items wrapping — `white-space` and `flex-wrap` are
+  // independent.
   return (
-    <span className="absolute top-1/2 right-2 z-10 flex -translate-y-1/2 items-center gap-1 rounded-md border bg-background p-1.5 whitespace-nowrap shadow-lg">
+    <span className="absolute top-1/2 right-2 z-10 flex max-w-[calc(100vw-2rem)] -translate-y-1/2 flex-wrap items-center gap-1 rounded-md border bg-background p-1.5 whitespace-nowrap shadow-lg sm:max-w-none sm:flex-nowrap">
       <label className="sr-only" htmlFor={`reason-${pid}`}>Reason</label>
       <input
         id={`reason-${pid}`}

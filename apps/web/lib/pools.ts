@@ -24,6 +24,50 @@ export class UnknownDatabaseError extends Error {
 const POOLS = new Map<string, Pool>();
 const VERSIONS = new Map<string, number>();
 
+/**
+ * B11: statements this process has issued against each database since the
+ * count was last read, keyed by connection URL.
+ *
+ * Counted HERE, at the pool, because this is where a statement actually
+ * leaves the process — not in `runCheckFor`, which would miss the version
+ * probe below and anything a page runs outside a check, and so would
+ * under-report the console's own share. Under-reporting it is the one error
+ * this count exists to prevent: the number is on screen precisely so an
+ * operator does not read pgops's polling as the application's load.
+ *
+ * Keyed by URL, as POOLS is, and NOT by name as rates.ts's own Map is: a
+ * commit counter is a fact about a database, so two names pointing at one
+ * database share the count the same way they share the pool and share the
+ * `pg_stat_database` row these numbers are compared against.
+ *
+ * Per process, like every other rate here. A second replica's polling is
+ * invisible to this one, which is exactly why `Throughput` STATES this
+ * number beside the rate instead of subtracting it from it.
+ */
+const OWN = new Map<string, number>();
+
+/**
+ * How many statements this process has issued against `name` since the last
+ * call, resetting the count. Read once per sample by `ratesFor`, so the
+ * count always covers the same window as the rate it is divided into.
+ *
+ * Never throws. It resolves a name through the environment, which can fail
+ * on a misconfigured deployment, and a throughput line is not worth taking a
+ * page down for — an unresolvable name has issued nothing.
+ */
+export function ownStatementsSince(name: string): number {
+  let url: string | undefined;
+  try {
+    url = configured().find((d) => d.name === name)?.url;
+  } catch {
+    return 0;
+  }
+  if (url === undefined) return 0;
+  const n = OWN.get(url) ?? 0;
+  OWN.set(url, 0);
+  return n;
+}
+
 
 function configured(): DatabaseConfig[] {
   return readDatabases(process.env);
@@ -65,6 +109,20 @@ function poolFor(db: DatabaseConfig): Pool {
   // terminates the Node process. A console that dies because an idle backend
   // was terminated server-side is worse than one that renders a failed check.
   pool.on('error', () => {});
+  // B11. `pg` emits no per-query event, so the count is taken by wrapping
+  // `query` once, here, at the moment the pool is created — every check's
+  // statement goes through it (run.ts reaches for `ctx.target.query`), as
+  // does the version probe below.
+  //
+  // A client checked out with `pool.connect()` is deliberately NOT counted:
+  // that path is explain and terminate, which an operator ran on purpose and
+  // which happen once, where this number exists to explain a rate that
+  // repeats every five seconds.
+  const inner = pool.query.bind(pool) as (...args: unknown[]) => unknown;
+  pool.query = function wrapped(...args: unknown[]) {
+    OWN.set(db.url, (OWN.get(db.url) ?? 0) + 1);
+    return inner(...args);
+  } as typeof pool.query;
   POOLS.set(db.url, pool);
   return pool;
 }

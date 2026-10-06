@@ -178,3 +178,69 @@ describe('hygieneAreas', () => {
     expect(areas.every((a) => a.ageMs === null)).toBe(true);
   });
 });
+
+/**
+ * A7, the rollup half. The area line ranged over JUDGED members only, so a
+ * count written by an unjudged one reached the cache and stopped there.
+ */
+describe('hygieneAreas — counts from members that judge nothing', () => {
+  it('carries a count while the level stays ok', () => {
+    const rows = allHealthy();
+    rows.find((r) => r.checkId === 'duplicateIndexes')!.note = '1 duplicate index';
+    const line = byId(hygieneAreas(rows, opts), 'indexes');
+    expect(line.level).toBe('ok');
+    expect(line.note).toBe('1 duplicate index');
+  });
+
+  it('puts an escalated note before a count', () => {
+    const rows = allHealthy();
+    const hit = rows.find((r) => r.checkId === 'indexHitRate')!;
+    hit.level = 'warn';
+    hit.note = 'hit rate 80%';
+    rows.find((r) => r.checkId === 'unusedIndexes')!.note = '2 unused indexes';
+    expect(byId(hygieneAreas(rows, opts), 'indexes').note).toBe('hit rate 80% · 2 unused indexes');
+  });
+
+  /**
+   * A count must not survive a member that could not be read. The area is
+   * already `unknown` in that case, and appending "1 duplicate index" to
+   * "we could not look" would read as a finding from a reading nobody took.
+   */
+  it('says only that it could not look when a member failed', () => {
+    const rows = allHealthy();
+    rows.find((r) => r.checkId === 'duplicateIndexes')!.note = '1 duplicate index';
+    const failed = rows.find((r) => r.checkId === 'indexHitRate')!;
+    failed.ok = false;
+    failed.message = 'permission denied';
+    const line = byId(hygieneAreas(rows, opts), 'indexes');
+    expect(line.level).toBe('unknown');
+    expect(line.note).toBe('permission denied');
+  });
+});
+
+/**
+ * A7, the sharp edge. `present` is the JUDGING members only — `judges =
+ * area.members.filter(canJudge)` — so the first attempt at the count rollup
+ * filtered a list an unjudged check is never in by construction, and did
+ * nothing at all while looking correct. This is the test that would have
+ * caught it immediately.
+ */
+describe('hygieneAreas — where the counts are read from', () => {
+  it('reads a count from a member that cannot judge at all', () => {
+    const rows = allHealthy();
+    const dup = rows.find((r) => r.checkId === 'duplicateIndexes')!;
+    expect(CHECKS.duplicateIndexes.verdict).toBeUndefined();
+    expect(dup.level).toBeNull();
+    dup.note = '4 duplicate indexes';
+    expect(byId(hygieneAreas(rows, opts), 'indexes').note).toBe('4 duplicate indexes');
+  });
+
+  it('ignores a count from a member that could not be read', () => {
+    const rows = allHealthy();
+    const dup = rows.find((r) => r.checkId === 'duplicateIndexes')!;
+    dup.ok = false;
+    dup.message = 'permission denied';
+    dup.note = '4 duplicate indexes';
+    expect(byId(hygieneAreas(rows, opts), 'indexes').note).toBeNull();
+  });
+});

@@ -1,4 +1,5 @@
 import type { Check } from '../types.js';
+import { OWN_SQL_MARKER } from '../run.js';
 
 /**
  * A4: the shipped TUI's `TOP_SQL` was `ORDER BY total_exec_time DESC LIMIT
@@ -24,6 +25,14 @@ export type QuerySort = 'total' | 'mean' | 'calls' | 'cache';
 export interface QueryStatsOpts {
   sort: QuerySort;
   limit?: number;
+  /**
+   * Show pgops's own marked statements alongside everyone else's. Default
+   * false: this package's own catalog reads otherwise rank among the top
+   * statement shapes on the very page meant to show what the DATABASE is
+   * doing (task 8's finding). See the SQL comment on `own_shapes` for how
+   * the fold is applied without dropping the row from `totalShapes`.
+   */
+  showOurs?: boolean;
 }
 
 export interface QueryStatRow {
@@ -60,6 +69,13 @@ export interface QueryStatRow {
    * `SQL` for the full reasoning.
    */
   total_shapes: number;
+  /**
+   * How many of `total_shapes` carry pgops's own OWN_SQL_MARKER suffix — see
+   * the SQL comment above `own_shapes` in the query. Counted regardless of
+   * `showOurs`, so the fold's "N of pgops's own shapes hidden" sentence can
+   * say how many even while they are folded out of `rows`.
+   */
+  own_shapes: number;
   /** timestamptz cast to text — when these counters were last cleared, or null if never/unreadable. */
   stats_reset: string | null;
   /**
@@ -108,6 +124,11 @@ export interface QueryStatsData {
    * truncated is useful; one they believe is complete is worse than nothing.
    */
   totalShapes: number;
+  /**
+   * How many of `totalShapes` are pgops's own marked statements — counted
+   * whether or not `showOurs` folded them into `rows`. See `QueryStatsOpts`.
+   */
+  ownShapes: number;
   sort: QuerySort;
   /** When `pg_stat_statements_reset()` last ran, or null if never (in this server's uptime) or unreadable. */
   statsResetAt: string | null;
@@ -250,6 +271,31 @@ function isQuerySort(x: string): x is QuerySort {
  * second `count(*) OVER ()` window column, which would carry the count on
  * every projected row of the (also-materialized) window input rather than
  * computing it once.
+ *
+ * TASK 8: pgops's own catalog reads are themselves pg_stat_statements rows,
+ * and every one of them ranked in the top statement shapes on the very page
+ * that exists to show what the DATABASE is doing. `run.ts`'s `toQuery` ends
+ * every statement this package runs with `OWN_SQL_MARKER` (`/* pgops *\/`)
+ * on its own line — so `query LIKE '%' || OWN_SQL_MARKER`, i.e. ENDS WITH the
+ * marker, identifies exactly pgops's own rows. The marker is a suffix and not
+ * a prefix because PostgreSQL 18 drops a leading comment from the text
+ * pg_stat_statements stores; run.ts's own comment on OWN_SQL_MARKER has the
+ * measurement. Matching a prefix here is therefore not a stylistic choice to
+ * revert: on 18 it matches nothing at all, and this fold silently stops
+ * folding. Filtered out of `rows` by default (`showOurs` shows them again,
+ * for an operator who wants to see pgops's own load), but `own_shapes` is
+ * still counted against the UNFILTERED `toplevel_stats` CTE regardless of
+ * `showOurs` — the fold has to say how many it hid, not just hide them.
+ * `total_shapes` is left counting everything for the same reason the doc
+ * comment on `QueryStatRow.total_shapes` gives: "N statement shapes" must
+ * stay true of the database, not of what this role chose to display.
+ *
+ * `v.query IS NULL OR` in the WHERE clause: a row Postgres has redacted
+ * (see the fix-round-1 comment above on `<insufficient privilege>`) has a
+ * null `query`, and `NULL LIKE '...'` is NULL, not false — the row would be
+ * silently dropped by the filter rather than kept and left unable to judge.
+ * A row this check cannot IDENTIFY as pgops's own must still be shown; only
+ * a match it can actually name is folded.
  */
 const SQL = (o: QueryStatsOpts) => ({
   text: `
@@ -268,12 +314,14 @@ const SQL = (o: QueryStatsOpts) => ({
            v.rows::text,
            v.shared_blks_hit::text, v.shared_blks_read::text,
            (SELECT count(*) FROM toplevel_stats)::int AS total_shapes,
+           (SELECT count(*) FROM toplevel_stats t WHERE t.query LIKE '%' || $3::text)::int AS own_shapes,
            (SELECT stats_reset::text FROM pg_stat_statements_info) AS stats_reset,
            $2::text AS requested_sort
     FROM toplevel_stats v
+    WHERE ($4::bool OR v.query IS NULL OR v.query NOT LIKE '%' || $3::text)
     ORDER BY ${ORDER[o.sort]}
     LIMIT $1`,
-  values: [o.limit ?? 100, o.sort],
+  values: [o.limit ?? 100, o.sort, OWN_SQL_MARKER, o.showOurs ?? false],
 });
 
 export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
@@ -302,6 +350,7 @@ export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
     const requested = rows[0]?.requested_sort ?? 'total';
     return {
       totalShapes: rows[0]?.total_shapes ?? 0,
+      ownShapes: rows[0]?.own_shapes ?? 0,
       statsResetAt: rows[0]?.stats_reset ?? null,
       sort: isQuerySort(requested) ? requested : 'total',
       rows: rows.map((r) => {

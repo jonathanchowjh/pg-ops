@@ -94,6 +94,21 @@ export interface Check<Row, Data, Opts = void> {
   verdict?: (data: Data, thresholds: Threshold[]) => Verdict;
   thresholds?: Threshold[];
   requires?: Requirement[];
+  /**
+   * A7: for a check that FINDS things and judges nothing — the sentence
+   * saying how many, or null when none.
+   *
+   * Written to the hygiene cache as the note, so a duplicate index reaches
+   * the triage page and the overview without a verdict being invented for
+   * it. Inventing one is the alternative this exists to avoid: it would make
+   * `duplicateIndexes` able to worsen a database's overall level, which is a
+   * different and wrong claim — a duplicate index is worth doing something
+   * about and is not a reason to call a database unwell.
+   *
+   * A check with a `verdict` has already said the more important thing, so
+   * `checkResultRow` prefers the verdict's note over this.
+   */
+  found?: (data: Data) => string | null;
 }
 
 export type FailureReason =

@@ -1,5 +1,5 @@
 import type { ActionMeta, CheckContext } from '../types.js';
-import { guardClient } from '../run.js';
+import { guardClient, ownSql } from '../run.js';
 import { visibleSchemas } from '../checks/indexes.js';
 import { writeAudit } from './audit.js';
 
@@ -70,15 +70,14 @@ export interface AnalyzeOpts {
  * samples the heap anyway. It is NOT a size to report to anyone; nothing here
  * does.
  */
-const TABLES_SQL = `
-SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) AS qualified
+const TABLES_SQL = ownSql(`SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) AS qualified
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind = 'r'
   AND ${visibleSchemas('n.nspname')}
   AND c.relpages::bigint * current_setting('block_size')::bigint >= $1
 ORDER BY c.relpages DESC, n.nspname, c.relname
-LIMIT $2`;
+LIMIT $2`);
 
 /**
  * Milliseconds, coerced.

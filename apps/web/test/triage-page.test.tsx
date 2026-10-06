@@ -7,7 +7,7 @@ import { GATES, GATE_ORDER } from '@pgops/checks';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const state = vi.hoisted(() => ({
-  mode: 'ok' as 'ok' | 'all-alike' | 'all-different' | 'one-critical' | 'lock-incident' | 'mixed-slow',
+  mode: 'ok' as 'ok' | 'all-alike' | 'all-different' | 'one-critical' | 'lock-incident' | 'mixed-slow' | 'locks-fail' | 'multi-wait' | 'one-incident' | 'one-incident-blind' | 'chain-quiet' | 'states-blind' | 'standbys-blind',
 }));
 
 // Same shim the other page tests use: <Refresh> calls useRouter() on its
@@ -53,21 +53,156 @@ vi.mock('@/lib/check', () => ({
           { state: 'active', sessions: 6, longestInStateSecs: 377 },
           { state: 'idle in transaction', sessions: 1, longestInStateSecs: 377 },
         ],
-        oldestIdleInTxnSecs: null,
+        oldestIdleInTxnSecs: null, oldestIdleInTxnPid: null, oldestIdleInTxnApp: null,
       },
-      blocked: { count: 0, longestQueryAgeSecs: null, suspectPid: null },
+      blocked: { count: 0, longestQueryAgeSecs: null, longestWaitSecs: null, suspectPid: null },
+      activity: { active: 3, waits: [{ type: 'running', event: null, sessions: 3, longestSecs: 0.1 }], shapes: [], waitsTruncated: false, shapesTruncated: false, restricted: false },
       longRunning: { queries: [] },
       locks: { roots: [], truncated: false },
       wraparound: { worst: [] },
+      horizon: { holders: [], truncated: false },
       slots: { slots: [] },
       queryStats: { rows: [], totalShapes: 0, sort: 'total', statsResetAt: null },
-      replicationLag: { inRecovery: false, lagSeconds: null, standbys: 0 },
+      replicationLag: { inRecovery: false, lagSeconds: null, standbys: 0, receiving: null },
+      standbys: { standbys: [] },
+      // Task 2: deliberately no `sampledAt` here, so the real `ratesFor`
+      // (not mocked in this file) refuses to store or read anything for it —
+      // see lib/rates.ts's own guard. That keeps this page's Throughput
+      // panel at "rates after the next refresh" regardless of test order,
+      // which is the only state these tests need from it.
+      databaseActivity: {
+        xactCommit: 0, xactRollback: 0, deadlocks: 0, conflicts: 0, tempFiles: 0, tempBytes: 0,
+        blksRead: 0, blksHit: 0, tupReturned: 0, tupFetched: 0, tupInserted: 0, tupUpdated: 0, tupDeleted: 0,
+        statsResetAt: null, sampledAt: '',
+      },
     };
+    /**
+     * B10. Four buckets the SQL really can return at once: `activity`
+     * groups by (wait_event_type, wait_event), so one TYPE routinely spans
+     * several events. Three of these are Lock, which is also what makes the
+     * old `.slice(0, 3)` visible — slicing the raw list keeps the three
+     * Locks and drops IO entirely.
+     */
+    if (state.mode === 'multi-wait' && check.id === 'activity') {
+      return {
+        ok: true,
+        data: {
+          active: 7,
+          waits: [
+            { type: 'Lock', event: 'tuple', sessions: 1, longestSecs: 252 },
+            { type: 'Lock', event: 'transactionid', sessions: 1, longestSecs: 252 },
+            { type: 'Lock', event: 'relation', sessions: 3, longestSecs: 4 },
+            { type: 'IO', event: 'DataFileRead', sessions: 2, longestSecs: 0.3 },
+          ],
+          shapes: [], waitsTruncated: false, shapesTruncated: false, restricted: false,
+        },
+        verdict: null,
+        measuredAt: 0,
+      };
+    }
+    /**
+     * A17. ONE incident, seen by five checks across three bands: 102 is idle
+     * in transaction holding the chain, 103 and 104 are queued behind it,
+     * and 104 also pins the xmin horizon. Every reading is correct and none
+     * of them says it is the same session.
+     *
+     * `one-incident-blind` is the same incident with the lock graph
+     * unreadable, which must fold nothing.
+     */
+    if (state.mode === 'one-incident' || state.mode === 'one-incident-blind'
+      || state.mode === 'chain-quiet' || state.mode === 'states-blind') {
+      if (check.id === 'sessionStates' && state.mode === 'states-blind') {
+        return { ok: false, reason: 'privilege', message: 'permission denied for pg_stat_activity' };
+      }
+      if (check.id === 'locks') {
+        if (state.mode === 'one-incident-blind') {
+          return { ok: false, reason: 'privilege', message: 'permission denied for table pg_locks' };
+        }
+        const leaf = {
+          pid: 104, user: 'postgres', app: 'cron-cleanup', state: 'active',
+          query: 'DELETE FROM users WHERE id = 1',
+          waitingMode: 'ExclusiveLock', waitingOn: 'tuple', xactAgeSecs: 300,
+          waitSecs: 300, cycle: false, waiters: [],
+        };
+        return {
+          ok: true,
+          data: {
+            roots: [{
+              pid: 102, user: 'postgres', app: 'batch-worker', state: 'idle in transaction',
+              query: 'UPDATE users SET n = n + 1 WHERE id = 1',
+              waitingMode: null, waitingOn: null, xactAgeSecs: 300, waitSecs: null,
+              totalWaiters: 2,
+              waiters: [{ ...leaf, pid: 103, app: 'web-api', waiters: [leaf] }],
+            }],
+            truncated: false,
+          },
+          // `chain-quiet`: a real chain whose waits are below the
+          // threshold, so the page spends no card on it.
+          verdict: state.mode === 'chain-quiet'
+            ? { level: 'ok' }
+            : { level: 'critical', note: '2 sessions blocked' },
+          crossed: state.mode === 'chain-quiet' ? undefined : {
+            level: 'critical', value: 60, unit: 'seconds',
+            because: 'a minute of blocking outlives most application timeouts',
+            remedy: 'Terminate the ROOT blocker, not a waiter.',
+          },
+          measuredAt: 0,
+        };
+      }
+      if (check.id === 'sessionStates') {
+        return {
+          ok: true,
+          data: {
+            byState: [{ state: 'idle in transaction', sessions: 1, longestInStateSecs: 300 }],
+            oldestIdleInTxnSecs: 300, oldestIdleInTxnPid: 102, oldestIdleInTxnApp: 'batch-worker',
+          },
+          verdict: { level: 'critical', note: 'idle in transaction for 300s · pid 102 batch-worker' },
+          crossed: {
+            level: 'critical', value: 300, unit: 'seconds',
+            because: 'five minutes of idle-in-transaction blocks autovacuum',
+            remedy: 'Terminate it.',
+          },
+          measuredAt: 0,
+        };
+      }
+      if (check.id === 'longRunning') {
+        return {
+          ok: true,
+          data: {
+            queries: [
+              { pid: 103, runningSecs: 300, query: 'UPDATE users SET n = n + 1 WHERE id = 1', backendStart: null },
+              { pid: 104, runningSecs: 300, query: 'DELETE FROM users WHERE id = 1', backendStart: null },
+            ],
+            truncated: false,
+          },
+          verdict: { level: 'warn', note: 'pid 103 running 300s' },
+          crossed: {
+            level: 'warn', value: 60, unit: 'seconds',
+            because: 'a query past a minute is usually a missing index',
+            remedy: 'Terminate it.',
+          },
+          measuredAt: 0,
+        };
+      }
+      if (check.id === 'horizon') {
+        return {
+          ok: true,
+          data: { holders: [{ kind: 'backend', who: '104', xminAge: 5000, ageSecs: 300 }], truncated: false },
+          verdict: { level: 'warn', note: 'oldest snapshot 5000 transactions' },
+          crossed: {
+            level: 'warn', value: 1000, unit: 'count',
+            because: 'vacuum cannot reclaim anything newer than the oldest snapshot',
+            remedy: 'Close it.',
+          },
+          measuredAt: 0,
+        };
+      }
+    }
     if (state.mode === 'one-critical' && check.id === 'sessionStates') {
       return {
         ok: true,
-        data: data.sessionStates,
-        verdict: { level: 'warn', note: 'idle in transaction for 377s' },
+        data: { ...data.sessionStates, oldestIdleInTxnSecs: 377, oldestIdleInTxnPid: 18705, oldestIdleInTxnApp: 'batch-worker' },
+        verdict: { level: 'warn', note: 'idle in transaction for 377s · pid 18705 batch-worker' },
         crossed: {
           level: 'warn', value: 60, unit: 'seconds',
           because: 'a transaction idle for a minute is holding row locks',
@@ -82,7 +217,7 @@ vi.mock('@/lib/check', () => ({
       if (check.id === 'blocked') {
         return {
           ok: true,
-          data: { count: 2, longestQueryAgeSecs: 1115, suspectPid: 9403 },
+          data: { count: 2, longestQueryAgeSecs: 1115, longestWaitSecs: 1115, suspectPid: 9403 },
           verdict: { level: 'critical', note: '2 sessions blocked' },
           crossed: {
             level: 'critical', value: 60, unit: 'seconds',
@@ -146,12 +281,42 @@ vi.mock('@/lib/check', () => ({
         };
       }
     }
+    // Task 16: the lock check itself failed (a role without SELECT on
+    // pg_locks), so `stuckFrom` cannot join `longRunning` against a wait
+    // graph it never got. `longRunning` still answers normally — the two
+    // checks fail independently — which is the case that leaves rows with no
+    // "blocked by" mark and nothing on the page saying why, unless the
+    // Long-running panel says so itself.
+    /*
+     * Stage 4's re-plan overlap, the one case that decides how it is cut.
+     * `standbys` declares `requires: pg_monitor`; `replicationLag` declares
+     * nothing. So a restricted role gets an UNAVAILABLE Standbys panel and
+     * a working Role and lag — which is why the duplicated "N streaming"
+     * clause is withheld rather than deleted.
+     */
+    if (state.mode === 'standbys-blind' && check.id === 'standbys') {
+      return { ok: false, reason: 'privilege', message: 'permission denied for pg_stat_replication' };
+    }
+
+    if (state.mode === 'locks-fail') {
+      if (check.id === 'locks') {
+        return { ok: false, reason: 'privilege', message: 'permission denied for pg_locks' };
+      }
+      if (check.id === 'longRunning') {
+        return {
+          ok: true,
+          data: { queries: [{ pid: 77, runningSecs: 300, query: 'SELECT slow()' }], truncated: false },
+          verdict: { level: 'warn', note: 'pid 77 running 300s' },
+          measuredAt: 0,
+        };
+      }
+    }
     // One check in trouble, the rest fine — the ordinary incident, and the
     // shape the band ranking exists for.
     if (state.mode === 'one-critical' && check.id === 'blocked') {
       return {
         ok: true,
-        data: { count: 2, longestQueryAgeSecs: 2542, suspectPid: 2318 },
+        data: { count: 2, longestQueryAgeSecs: 2542, longestWaitSecs: 2542, suspectPid: 2318 },
         verdict: { level: 'critical', note: '2 sessions blocked' },
         crossed: {
           level: 'critical', value: 60, unit: 'seconds',
@@ -229,7 +394,8 @@ describe('Triage — the document outline matches the visual grouping', () => {
     expect(levels.length).toBeGreaterThan(4);
     // Four bands, and every panel one level below one of them.
     expect(levels.filter((l) => l === 2)).toHaveLength(4);
-    expect(levels.filter((l) => l === 3)).toHaveLength(9);
+    // B4 added the Standbys panel to the keep-up band — thirteen now.
+    expect(levels.filter((l) => l === 3)).toHaveLength(13);
     // No heading is more than one level deeper than the one before it.
     const jumps = levels.filter((l, i) => i > 0 && l > levels[i - 1]! + 1);
     expect(jumps).toEqual([]);
@@ -385,17 +551,35 @@ describe('Triage — a waiter is not a slow query', () => {
    * and, one band below, offered those exact two waiters with "terminating
    * this backend usually frees work nobody is waiting for".
    */
-  it('names the blocker on a long-running query that is only waiting', async () => {
+  /**
+   * REWRITTEN for A17. When every row is a waiter this panel now FOLDS: the
+   * chain above it already names the root, the waiters and the remedy, and
+   * spending a second full card on the same incident is the defect A17
+   * removes. So the per-row markers and the "Not slow — waiting" paragraph
+   * are no longer on this page in this state — the five-word folded link
+   * carries it, and the paragraph still renders on the Sessions page, where
+   * there is no wait graph on screen to point at.
+   *
+   * What must survive here is the claim the join exists for, which does not
+   * depend on where it is rendered: this page never offers the slow-query
+   * remedy for a session that is merely waiting. The per-row "blocked by"
+   * markers are asserted by the mixed test below, which is the case they
+   * were built for and which does not fold.
+   */
+  it('never offers the slow-query remedy for a session that is only waiting', async () => {
     state.mode = 'lock-incident';
     rendered = await draw();
 
     const text = rendered.text();
-    // Both waiters point at the ROOT of the chain, not at their immediate
-    // blocker: 9402 waits on 9403, but the session to act on is 9401.
-    expect(text.match(/blocked by 9401/g)).toHaveLength(2);
-    expect(text).toContain('Not slow — waiting');
-    // The remedy that was wrong of every row it sat beside.
     expect(text).not.toContain('terminating this backend usually frees work nobody is waiting for');
+    // One card for the incident, and it is the chain.
+    expect([...rendered.container.querySelectorAll('[data-loud]')].map((c) => c.getAttribute('data-loud')))
+      .toEqual(['Lock wait graph']);
+    // Task 3: the root pid's link carries the fragment that lands the
+    // operator on its row on the Sessions page, not the top of the table.
+    expect(rendered.container.innerHTML).toContain('/db/prod/sessions#pid-9401');
+    // And the panel says why it is small rather than looking healthy.
+    expect(text).toContain('in this chain');
   });
 
   /**
@@ -412,8 +596,44 @@ describe('Triage — a waiter is not a slow query', () => {
     expect(text).toContain('terminating this backend usually frees work nobody is waiting for');
     expect(text).not.toContain('Not slow — waiting');
     // Still marked individually, which is what tells the operator the remedy
-    // above applies to 7777 and not to these two.
+    // above applies to 7777 and not to these two. Both waiters point at the
+    // ROOT of the chain, not at their immediate blocker: 9402 waits on 9403,
+    // but the session to act on is 9401.
     expect(text.match(/blocked by 9401/g)).toHaveLength(2);
+    // A17: a mixed list is NOT explained by the chain, so this panel keeps
+    // its own card and its full body.
+    expect([...rendered.container.querySelectorAll('[data-loud]')].map((c) => c.getAttribute('data-loud')))
+      .toContain('Long-running');
+  });
+});
+
+/**
+ * Task 16, second surface. `stuckFrom` drops `locksUnavailable` on this page
+ * too, and this page's Long-running panel loses its "blocked by" marks with
+ * nothing in that panel connecting the absence to the failure elsewhere —
+ * even though the Lock wait graph panel above it does render UNAVAILABLE
+ * loudly, an operator reading only the Queries band would not see it.
+ */
+describe('Triage — the panel that offers the kill says when it cannot see the wait graph', () => {
+  it('warns inside the Long-running panel when the lock check failed', async () => {
+    state.mode = 'locks-fail';
+    rendered = await draw();
+
+    const text = rendered.text();
+    expect(text).toContain('Cannot tell which of these are waiting');
+
+    // Inside the Queries band's Long-running panel specifically, not merely
+    // somewhere on the page.
+    const sections = Array.from(rendered.container.querySelectorAll('section'));
+    const longRunningSection = sections.find((el) =>
+      Array.from(el.querySelectorAll('h3')).some((h) => h.textContent === 'Long-running'));
+    expect(longRunningSection?.textContent).toContain('Cannot tell which of these are waiting');
+  });
+
+  it('says nothing in the Long-running panel when the lock graph read fine', async () => {
+    state.mode = 'ok';
+    rendered = await draw();
+    expect(rendered.text()).not.toContain('Cannot tell which of these are waiting');
   });
 });
 
@@ -470,6 +690,53 @@ describe('Triage — the page is derived from the tree', () => {
     expect(bandOf('Lock wait graph')).toBe(GATES.wait.title);
     expect(bandOf('Long-running')).toBe(GATES.work.title);
     expect(bandOf('Wraparound')).toBe(GATES['keep-up'].title);
+  });
+
+  /**
+   * Task 1: "Active now" answers what the server is doing before Long-running
+   * says how long it has been doing it — so it lands in the same gate,
+   * ahead of it, and a healthy reading collapses to the one-line summary
+   * every other quiet panel in this band uses.
+   */
+  it('gives the Queries band a live read on what is executing right now', async () => {
+    state.mode = 'ok';
+    rendered = await draw();
+
+    expect(rendered.text()).toContain('3 active · 3 running');
+  });
+
+  /**
+   * B10. The check groups wait buckets by (type, event); this line printed
+   * only the type. Three Lock buckets rendered as "1 Lock · 1 Lock · 3 Lock"
+   * — the same word three times with three different numbers, which reads
+   * as a rendering fault rather than as a reading, on the line an operator
+   * scans to decide whether the server is stuck or busy. Driving the console
+   * against the seeded chain showed it as "2 active · 1 Lock · 1 Lock".
+   *
+   * One row per event is right for the Sessions page, which has the vertical
+   * room to name each one. This is a summary, so the summary's unit is the
+   * type.
+   */
+  it('counts sessions per wait type, not once per wait event', async () => {
+    state.mode = 'multi-wait';
+    rendered = await draw();
+    const t = rendered.text();
+
+    expect(t).toContain('7 active · 5 Lock · 2 IO');
+    expect(t).not.toMatch(/1 Lock · 1 Lock/);
+  });
+
+  /**
+   * The cap is applied to the folded list, not the raw one. Slicing first
+   * kept this fixture's three Lock buckets and dropped IO altogether, so the
+   * line lost a whole wait type to make room for two repetitions of one it
+   * had already named — the same defect as above, one layer up.
+   */
+  it('caps the line after folding, so a whole wait type is not displaced by a repeat', async () => {
+    state.mode = 'multi-wait';
+    rendered = await draw();
+
+    expect(rendered.text()).toContain('2 IO');
   });
 });
 
@@ -573,5 +840,151 @@ describe('the triage page — hygiene lines', () => {
 
     for (const gate of GATE_ORDER) expect(r.text()).toContain(GATES[gate].title);
     r.unmount();
+  });
+
+});
+
+/**
+ * B12. The verdict names the session; the panel makes it reachable. Before
+ * this, the remedy told an operator to go to the Sessions page and look for
+ * the application_name of a session the check had already identified.
+ */
+describe('Triage — the idle-in-transaction verdict names its session', () => {
+  let rendered: Rendered | undefined;
+  afterEach(() => { rendered?.unmount(); rendered = undefined; state.mode = 'ok'; });
+
+  it('links the pid it judged to that session row', async () => {
+    state.mode = 'one-critical';
+    rendered = await draw();
+
+    const href = [...rendered.container.querySelectorAll('a')]
+      .map((a) => a.getAttribute('href'))
+      .find((h) => h?.includes('#pid-18705'));
+    expect(href).toBe('/db/prod/sessions#pid-18705');
+    expect(rendered.text()).toContain('batch-worker');
+  });
+
+  it('says nothing about a session when none is idle in transaction', async () => {
+    state.mode = 'ok';
+    rendered = await draw();
+    expect(rendered.text()).not.toContain('oldest idle in transaction');
+  });
+});
+
+/**
+ * A17. The defect this stage exists for. With the seeded chain open, triage
+ * escalated Sessions by state, the Lock wait graph, Blocked and Long-running,
+ * and named the chain again under Oldest snapshot. Every reading correct, and
+ * nothing on the page saying they were one event.
+ *
+ * `secondaryTo` already handled Blocked, because the two sit in one band.
+ * Three of the echoes are in OTHER bands, which that rule cannot reach.
+ */
+describe('Triage — one incident, one card, across bands', () => {
+  let rendered: Rendered | undefined;
+  afterEach(() => { rendered?.unmount(); rendered = undefined; state.mode = 'ok'; });
+
+  it('spends one card on the chain and folds every panel about a pid inside it', async () => {
+    state.mode = 'one-incident';
+    rendered = await draw();
+
+    const cards = [...rendered.container.querySelectorAll('[data-loud]')];
+    expect(cards.map((c) => c.getAttribute('data-loud'))).toEqual(['Lock wait graph']);
+    expect(rendered.text().match(/in this chain/g) ?? []).toHaveLength(3);
+  });
+
+  it('points each folded line at the card that explains it', async () => {
+    state.mode = 'one-incident';
+    rendered = await draw();
+
+    const href = [...rendered.container.querySelectorAll('a')]
+      .map((a) => a.getAttribute('href'))
+      .filter((h) => h === '#lock-wait-graph');
+    expect(href).toHaveLength(3);
+    expect(rendered.container.querySelector('#lock-wait-graph')).not.toBeNull();
+  });
+
+  /**
+   * The rule that keeps the fold honest. With the lock graph unreadable
+   * there is no chain to fold under, so every verdict stands on its own —
+   * the alternative is demoting four real findings on the strength of a
+   * graph nobody saw.
+   */
+  it('folds nothing when the lock graph could not be read', async () => {
+    state.mode = 'one-incident-blind';
+    rendered = await draw();
+
+    const cards = [...rendered.container.querySelectorAll('[data-loud]')].map((c) => c.getAttribute('data-loud'));
+    expect(cards).toContain('Sessions by state');
+    expect(cards).toContain('Long-running');
+    expect(cards).toContain('Oldest snapshot');
+    expect(rendered.text()).not.toContain('in this chain');
+  });
+});
+
+/**
+ * A17's two safety rules. Both were written down in the code and neither was
+ * tested: mutating the fold to ignore each of them left the suite green.
+ */
+describe('Triage — the fold only happens when there is a card to fold under', () => {
+  let rendered: Rendered | undefined;
+  afterEach(() => { rendered?.unmount(); rendered = undefined; state.mode = 'ok'; });
+
+  /**
+   * A chain exists but its waits are under the threshold, so the page spends
+   * no card on it. There is nothing for a folded line to link to, and
+   * demoting a critical verdict under an invisible chain would hide it.
+   */
+  it('keeps a verdict loud when the chain itself is quiet', async () => {
+    state.mode = 'chain-quiet';
+    rendered = await draw();
+
+    const cards = [...rendered.container.querySelectorAll('[data-loud]')].map((c) => c.getAttribute('data-loud'));
+    expect(cards).toContain('Sessions by state');
+    expect(rendered.text()).not.toContain('in this chain');
+  });
+
+  /**
+   * The panel's OWN check failed while the chain is loud. "We could not
+   * look" is never a supporting detail of anything — it is the state this
+   * console exists to keep distinct from a reading — and a compact panel
+   * drops the message naming what Postgres refused.
+   */
+  it('keeps a failed check loud even when its band is explained by the chain', async () => {
+    state.mode = 'states-blind';
+    rendered = await draw();
+
+    const cards = [...rendered.container.querySelectorAll('[data-loud]')].map((c) => c.getAttribute('data-loud'));
+    expect(cards).toContain('Sessions by state');
+    expect(cards).toContain('Lock wait graph');
+    expect(rendered.text()).toContain('permission denied for pg_stat_activity');
+  });
+});
+/**
+ * Stage 4's re-plan overlap, on the band B4 added its panel to. Driving the
+ * closed stage at 390px, the keep-up band read:
+ *
+ *   Standbys        no standbys        OK
+ *   Role and lag    primary · 0 streaming
+ *
+ * One fact in two consecutive lines, one of which B4 had just added.
+ *
+ * Withheld rather than deleted, because the two checks have different
+ * privilege requirements: see the `standbys-blind` branch of this file's
+ * mock, and the matching tests on the cleanup page.
+ */
+describe('triage — the standby count has one owner', () => {
+  it('leaves the count to the Standbys panel when that panel can speak', async () => {
+    state.mode = 'ok';
+    rendered = await draw();
+    const t = rendered.text();
+    expect(t).toContain('primary');
+    expect(t).not.toContain('0 streaming');
+  });
+
+  it('reports the count itself when the Standbys panel could not be read', async () => {
+    state.mode = 'standbys-blind';
+    rendered = await draw();
+    expect(rendered.text()).toContain('0 streaming');
   });
 });

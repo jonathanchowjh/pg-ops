@@ -21,3 +21,20 @@ describe('replicationLag', () => {
     });
   }, 120_000);
 });
+
+/**
+ * B4, standby side. The rig is a primary, so `receiving` must be NULL here —
+ * a primary has no walreceiver to report on, which is a different fact from
+ * having a dead one. That distinction is the whole point of the column, and
+ * this is the only assertion a single-node rig can make about it.
+ */
+describe('replicationLag — the walreceiver column', () => {
+  it('reports no walreceiver state at all on a primary', async () => {
+    await withPostgres(async (ctx) => {
+      const res = await runCheck(ctx, replicationLag);
+      if (!res.ok) throw new Error(res.message);
+      expect(res.data.inRecovery).toBe(false);
+      expect(res.data.receiving).toBeNull();
+    });
+  }, 120_000);
+});

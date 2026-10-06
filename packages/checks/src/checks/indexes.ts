@@ -348,6 +348,10 @@ function findingVerdict(noun: string) {
 
 export const invalidIndexes: Check<IndexFindingRow, IndexFindingData, RelationOpts> = {
   id: 'invalidIndexes',
+  // A7: the count reaches the hygiene cache and so the triage page and the
+  // overview, without a verdict being invented for a finding that is worth
+  // doing something about and is not a reason to call a database unwell.
+  found: (d) => (d.total === 0 ? null : `${d.total} ${d.total === 1 ? 'invalid index' : 'invalid indexes'}`),
   title: 'Invalid indexes',
   gate: 'work',
   class: 'hygiene',
@@ -418,6 +422,10 @@ LIMIT $2`;
 
 export const unusedIndexes: Check<IndexFindingRow, IndexFindingData, RelationOpts> = {
   id: 'unusedIndexes',
+  // A7: the count reaches the hygiene cache and so the triage page and the
+  // overview, without a verdict being invented for a finding that is worth
+  // doing something about and is not a reason to call a database unwell.
+  found: (d) => (d.total === 0 ? null : `${d.total} ${d.total === 1 ? 'unused index' : 'unused indexes'}`),
   title: 'Unused indexes',
   gate: 'work',
   class: 'hygiene',
@@ -596,6 +604,10 @@ LIMIT $1`;
 
 export const duplicateIndexes: Check<DuplicateRow, DuplicateData, RelationOpts> = {
   id: 'duplicateIndexes',
+  // A7: the count reaches the hygiene cache and so the triage page and the
+  // overview, without a verdict being invented for a finding that is worth
+  // doing something about and is not a reason to call a database unwell.
+  found: (d) => (d.total === 0 ? null : `${d.total} ${d.total === 1 ? 'duplicate index' : 'duplicate indexes'}`),
   title: 'Duplicate indexes',
   gate: 'work',
   class: 'hygiene',
@@ -727,6 +739,10 @@ LIMIT $1`;
 
 export const missingIndexes: Check<TableUsageRow, TableUsageData, ListOpts> = {
   id: 'missingIndexes',
+  // A7: the count reaches the hygiene cache and so the triage page and the
+  // overview, without a verdict being invented for a finding that is worth
+  // doing something about and is not a reason to call a database unwell.
+  found: (d) => (d.total === 0 ? null : `${d.total} ${d.total === 1 ? 'table that may need an index' : 'tables that may need an index'}`),
   title: 'Tables that may want an index',
   gate: 'work',
   class: 'hygiene',

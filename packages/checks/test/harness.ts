@@ -47,7 +47,20 @@ export async function withPostgres(
 
   const uri = new URL(baseUri);
   uri.pathname = `/${dbName}`;
-  const pool = new Pool({ connectionString: uri.toString(), max: 4, application_name: 'pgops-test' });
+  // NO application_name: this one pool plays BOTH roles a real deployment
+  // keeps on two separate pools — it is `ctx.target` (the thing running
+  // checks) for some calls and the fixture connection standing in for "the
+  // monitored application" for others (`pool.query(...)`, `pool.connect()`).
+  // Task 8's activity/horizon checks exclude a backend whose
+  // application_name shares the checking connection's own prefix — correct
+  // against two distinct pools, but naming this single shared pool
+  // 'pgops-test' would make every fixture connection indistinguishable from
+  // the checking connection itself, and the checks would exclude the very
+  // load the tests exist to observe. Empty leaves current_setting's
+  // empty-string guard in control, which is exactly the pre-Task-8 behavior
+  // (only pid <> pg_backend_pid() excludes the checking backend) for every
+  // test that does not explicitly SET application_name of its own.
+  const pool = new Pool({ connectionString: uri.toString(), max: 4 });
 
   let hadError = false;
   let testError: unknown;

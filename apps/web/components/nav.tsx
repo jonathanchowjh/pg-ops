@@ -34,7 +34,7 @@ export function Nav({ name }: { name: string }) {
   const segment = useSelectedLayoutSegment();
 
   return (
-    <nav className="mb-4 flex gap-1 border-b text-sm">
+    <nav className="mb-4 flex flex-wrap gap-1 border-b text-sm">
       {TABS.map((t) => {
         const active = t.segment === segment;
         return (

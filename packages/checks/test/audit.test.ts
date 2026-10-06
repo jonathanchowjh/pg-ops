@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { writeAudit } from '../src/actions/audit.js';
+import { readRecentAudit, writeAudit } from '../src/actions/audit.js';
 
 /**
  * Pure unit coverage for `writeAudit` — no Postgres involved, same reasoning
@@ -157,5 +157,55 @@ describe('writeAudit', () => {
     expect((parsed.target as Record<string, unknown>).pid).toBe(9);
     expect((parsed.target as Record<string, unknown>).self).toBe('[Circular]');
     expect((parsed.target as Record<string, unknown>).big).toBe('10n');
+  });
+
+  describe('readRecentAudit', () => {
+    it('returns the newest records for one database, skipping a corrupt line', async () => {
+      const path = join(dir, 'audit.log');
+      await writeAudit({ action: 'kill', subcommand: 'web/sessions', target: { database: 'prod', pid: 1 }, reason: 'a', result: 'terminated', timestamp: '2026-01-01T00:00:00Z' }, path);
+      await writeAudit({ action: 'kill', subcommand: 'web/sessions', target: { database: 'staging', pid: 2 }, reason: 'b', result: 'terminated', timestamp: '2026-01-01T00:00:01Z' }, path);
+      await appendFile(path, 'not json\n');
+      await writeAudit({ action: 'kill', subcommand: 'web/sessions', target: { database: 'prod', pid: 3 }, reason: 'c', result: 'gone', timestamp: '2026-01-01T00:00:02Z' }, path);
+      const out = await readRecentAudit({ database: 'prod', path });
+      expect(out.records.map((r) => r.target.pid)).toEqual([3, 1]);
+      expect(out.unreadable).toBeNull();
+    });
+
+    it('returns an empty, readable history when the file does not exist', async () => {
+      expect(await readRecentAudit({ database: 'prod', path: join(dir, 'missing.log') }))
+        .toEqual({ records: [], unreadable: null });
+    });
+
+    /**
+     * Critical review finding: a missing file (ENOENT, above) is a
+     * legitimately empty history and must render nothing; anything else
+     * that keeps the file from being read — here, a directory sitting where
+     * the audit log is expected — must be SAID, because this is this
+     * console's only record of who terminated what, and silence here reads
+     * to an operator as "nothing was done" rather than "the record is gone".
+     */
+    it('reports unreadable, not an empty history, when the file cannot be read for a reason other than being absent', async () => {
+      const path = join(dir, 'a-directory');
+      await mkdir(path);
+      const out = await readRecentAudit({ database: 'prod', path });
+      expect(out.records).toEqual([]);
+      expect(out.unreadable).not.toBeNull();
+      expect(out.unreadable).toBe('EISDIR');
+    });
+
+    /**
+     * Strengthened past a bare `toHaveLength(2)`: that assertion alone
+     * cannot tell newest-first from oldest-first — a mutation that sliced
+     * from the wrong end would return the two OLDEST records and still pass
+     * it. Asserting WHICH two pids come back pins the direction.
+     */
+    it('honours the limit, keeping the newest records rather than the oldest', async () => {
+      const path = join(dir, 'limit.log');
+      for (let i = 0; i < 5; i++) {
+        await writeAudit({ action: 'kill', subcommand: 's', target: { database: 'prod', pid: i }, reason: 'r', result: 'terminated' }, path);
+      }
+      const out = await readRecentAudit({ database: 'prod', path, limit: 2 });
+      expect(out.records.map((r) => r.target.pid)).toEqual([4, 3]);
+    });
   });
 });

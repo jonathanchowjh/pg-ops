@@ -185,6 +185,159 @@ of two ways the project tried.
 | Sub-navigation is rendered by a layout, never by a page | `guards.test.ts` |
 | Every threshold is tested one unit either side of its line | Each check's `*.int.test.ts` |
 
+## Design record
+
+Why pgops is shaped the way it is. This lived in the README until it was
+2,800 words of rationale in front of the one instruction most readers came
+for; it belongs here, with the people it is written for. Each item is also
+documented at the code that implements it — this is the index, not the
+authority.
+
+### Four design constraints
+
+- **One container, no agent.** It connects with credentials you give it. It
+  runs no DDL against a monitored database, installs no extensions and
+  creates no roles. The only schema it owns is in the store you give it.
+- **Configuration is read at request time.** The same image runs against any
+  database. A smoke test builds an image with one `DATABASE_URL` baked in,
+  runs it with another, and asserts the container uses the second.
+- **Actions are opt-in and audited.** Without the flag, the action routes do
+  not exist. With it, every kill is confirmed, pinned to a session identity
+  rather than a pid, and written to an audit log.
+- **The console never becomes the problem.** Polls that land while one is in
+  flight are skipped, not queued. Explain runs in a read-only transaction
+  that is always rolled back. pgops's own sessions and statements are
+  counted, not hidden.
+
+### The four gates
+
+Every check belongs to one of four gates. A request has to clear them in
+order, and the triage page renders them in that order.
+
+```
+1 connect   can it get in?          connections, sessions, sources
+2 wait      can it get its locks?   blocked sessions, the wait graph
+3 work      can it do the work?     long-running queries, statement statistics
+4 keep-up   can the server keep up? replication, vacuum, space
+```
+
+The order matters for two reasons. Causes run down it and **symptoms run up
+it**: vacuum falls behind at gate 4, tables bloat, queries slow at gate 3,
+connections pile up at gate 1. And a failure at one gate disguises itself as
+the next: a session blocked at gate 2 is `active` in `pg_stat_activity`, so a
+naive tool lists it as a long-running query at gate 3 and offers to terminate
+it. pgops marks such a session with the root blocker it is queued behind and
+withholds the terminate advice, because killing a waiter frees nothing.
+
+The gate tree is data, in
+[packages/checks/src/gates.ts](packages/checks/src/gates.ts). Every check
+declares its gate, and a test fails if any capability is added without one.
+
+### Why two packages
+
+`packages/checks` contains every SQL statement, threshold, verdict, action
+and redaction rule. It has no React, no HTTP and no knowledge of display. A
+test fails if it gains a second runtime dependency or imports from
+`apps/web`.
+
+`apps/web` never constructs its own connection pool for a check, never writes
+SQL and never calls `pg_terminate_backend`. Every page runs its checks through
+one seam, `runCheckFor`, and renders the result. This is what makes the checks
+testable against a real Postgres without a browser, and the pages testable
+without a database.
+
+### Checks, verdicts and thresholds
+
+A check is one SQL query, a pure function from rows to a result, and a
+verdict function that returns `ok`, `warn` or `critical`. Thresholds are
+data, not constants in a comparison. Each carries its unit, why the number
+matters, and what action it calls for. A threshold with no single safe action
+carries no advice.
+
+A check that cannot run returns a failure with the reason: a missing
+extension, an insufficient privilege, a server version below what it needs.
+The page renders it as `UNKNOWN`, never as green.
+
+### History
+
+With `PGOPS_STORE_URL` set, pgops creates a `pgops` schema in that database
+on boot, under an advisory lock so several replicas starting together migrate
+once. Every 5 minutes it captures every statement shape and every relation
+size, then runs the hygiene checks and caches their findings. Four
+properties, each held by a test:
+
+- **It never resets shared counters.** pgHero calls
+  `pg_stat_statements_reset()` after each capture, which zeroes the view for
+  every other tool. pgops stores cumulative values and differences them at
+  read time.
+- **A gap is drawn as a gap.** An interval spanning a counter reset is
+  dropped from the chart, not clamped to zero or interpolated.
+- **A capture that lands while one is running is skipped.**
+- **Timestamps come from the store, not the process**, so replicas with
+  skewed clocks cannot fabricate discontinuities.
+
+Without the variable there is no scheduler and no DDL anywhere. History
+reports itself as unavailable.
+
+### The five declines
+
+pgHero is the benchmark, and five of its 65 capabilities are declined rather
+than owed. The README carries the parity count; these are the reasons.
+
+| pgHero capability | Reason |
+|---|---|
+| `kill_all` | An action with no diagnosis. No incident calls for terminating every session unreviewed. |
+| `enable_query_stats`, `disable_query_stats` | Both are DDL against a monitored database. pgops diagnoses the missing extension and prints the statement to run through your own migration tooling. |
+| `autoindex` | Builds an index on a monitored database unreviewed. Every pgops suggestion prints the exact statement instead. |
+| `system_stats` | CPU, IOPS and disk from cloud monitoring APIs. Per-cloud credentials and an SDK for one panel that is blank for anyone self-hosting. |
+
+### Deliberate differences from pgHero
+
+Each is documented at the code that implements it.
+
+- **Capture never resets `pg_stat_statements`.** Cumulative values are stored
+  and differenced at read time.
+- **`replication_lag` is `null` on a primary, not `0`.** Zero is a claim
+  about replication made about a server that is not replicating.
+- **SSL state reads `pg_stat_ssl`**, a core catalog, not the `sslinfo`
+  extension. A read failure renders as `Unknown`, never as `No SSL`.
+- **Sizes are bytes, not pretty strings.** Formatting happens at the page,
+  so sizes can be thresholded, summed and charted.
+- **A reading that could not be taken is `null`, never a sentinel string.**
+  pgHero renders an index with no I/O yet as `"Insufficient data"` in a
+  column of percentages, which sorts to the top of a page ranked by severity.
+- **Settings are one round trip, not fifteen**, and each value is the `SHOW`
+  form: `shared_buffers` reads `128MB`, not `16384` with a separate unit.
+- **Sequence danger is measured against the column's type.** A bigint
+  sequence feeding an `integer` column overflows at 2,147,483,647. Measured
+  against its own maximum it reads as effectively unused on the day it fails.
+- **Space growth is measured between two stored captures**, not between a
+  capture and a live size, so the number is stable between page loads and
+  the window is stated beside it.
+- **The load chart is written at capture time.** Summing a day of per-shape
+  deltas at read time is over a million rows on a large database, on a page
+  that polls every 5 seconds. The capture computes one row per interval;
+  a day's chart reads 288 rows.
+- **Index suggestions read the planner's output, not a parse tree.** pgHero
+  parses statements with a native `pg_query` binding and declines any join.
+  pgops asks Postgres to plan the statement and advises on every sequential
+  scan in the plan, with no added dependency.
+- **pgops folds its own relations out of lists and out of nothing else.**
+  Pointed at a database that is also its store, the lists hide the console's
+  own tables and say how many were hidden. Sizes, hit rates and verdicts
+  count them. Its own statements are marked and excluded from the statement
+  ranking the same way, and the count of what was hidden is always stated.
+
+### Stack
+
+| Layer | Choice |
+|---|---|
+| Language | TypeScript 5, ESM, Node 22 |
+| Database client | `pg` (node-postgres) |
+| Console | Next.js 16, React 19, Tailwind CSS 4 |
+| Tests | Vitest 4 with jsdom, Testcontainers for Postgres |
+| Packaging | Multi-stage Docker image on `node:22-alpine`, Next.js standalone output |
+
 ## Conventions
 
 - **Comments say why.** Nearly every non-obvious line in this repo has a

@@ -11,6 +11,11 @@ export interface ReplicationRow {
    */
   lag_seconds: number | null;
   standbys: number;
+  /**
+   * B4: whether a walreceiver process exists, or NULL on a primary, which
+   * has none to report on. See `ReplicationData.receiving`.
+   */
+  receiving: boolean | null;
 }
 
 export interface ReplicationData {
@@ -39,6 +44,22 @@ export interface ReplicationData {
    * checking the connecting role's privileges.
    */
   standbys: number | null;
+  /**
+   * B4: is a walreceiver actually running? `null` on a primary, which has
+   * none, and `null` when the row could not be read at all.
+   *
+   * `lagSeconds` is 0 when this standby has replayed everything it
+   * RECEIVED, which is the right caught-up test for a healthy standby and
+   * is also precisely what a dead walreceiver looks like: nothing arriving,
+   * nothing left to replay. A standby that lost the primary hours ago
+   * therefore reads 0 seconds behind.
+   *
+   * No threshold and no verdict here — `standbys` carries the judgement,
+   * from the primary side. This is the one word that stops a broken standby
+   * rendering as a perfect one on the gate that asks whether the server can
+   * keep up.
+   */
+  receiving: boolean | null;
 }
 
 /**
@@ -56,6 +77,10 @@ export interface ReplicationData {
 const SQL = `
 SELECT pg_is_in_recovery() AS in_recovery,
        (SELECT count(*)::int FROM pg_stat_replication) AS standbys,
+       CASE WHEN pg_is_in_recovery()
+            THEN (SELECT count(*) > 0 FROM pg_stat_wal_receiver)
+            ELSE NULL
+       END AS receiving,
        CASE
          WHEN NOT pg_is_in_recovery() THEN NULL
          WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
@@ -77,6 +102,10 @@ export const replicationLag: Check<ReplicationRow, ReplicationData> = {
       inRecovery: r?.in_recovery ?? null,
       lagSeconds: r?.lag_seconds ?? null,
       standbys: r?.standbys ?? null,
+      // `??` for the same reason as the three above: `false` here is the
+      // FINDING this field was added for — a standby with no walreceiver —
+      // and `||` would launder it into "we could not look".
+      receiving: r?.receiving ?? null,
     };
   },
 };

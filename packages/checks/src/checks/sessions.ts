@@ -9,6 +9,7 @@ export interface SessionRow {
   backend_start: string | null;
   in_state_secs: string | null;
   query_age_secs: string | null;
+  xact_age_secs: string | null;
   query: string | null;
   /**
    * `count(*) OVER ()` (int4, cast `::int` below — see connections.ts's
@@ -34,6 +35,15 @@ export interface Session {
   inStateSecs: number | null;
   /** Age of the CURRENT (or, if idle, the LAST) query. Not "time waiting" — see A8. */
   queryAgeSecs: number | null;
+  /**
+   * How long the CURRENT TRANSACTION has been open — null when the session
+   * isn't in one. For an idle-in-transaction blocker this is the number that
+   * matters: `queryAgeSecs` for that session is time since its last query
+   * ENDED, which says nothing about how long it has been sitting there
+   * holding locks. `xact_start` is null outside a transaction, which is what
+   * makes null here mean "not in a transaction" rather than "just started".
+   */
+  xactAgeSecs: number | null;
   query: string | null;
 }
 
@@ -110,6 +120,7 @@ const SQL = (o: SessionOpts) => ({
            client_addr::text AS client_addr, backend_start::text AS backend_start,
            EXTRACT(EPOCH FROM (now() - state_change))::text AS in_state_secs,
            EXTRACT(EPOCH FROM (now() - query_start))::text  AS query_age_secs,
+           EXTRACT(EPOCH FROM (now() - xact_start))::text AS xact_age_secs,
            query,
            count(*) OVER ()::int AS total_matching
     FROM pg_stat_activity
@@ -157,6 +168,7 @@ export const sessions: Check<SessionRow, SessionsData, SessionOpts> = {
         backendStart: r.backend_start,
         inStateSecs: r.in_state_secs == null ? null : Number(r.in_state_secs),
         queryAgeSecs: r.query_age_secs == null ? null : Number(r.query_age_secs),
+        xactAgeSecs: r.xact_age_secs == null ? null : Number(r.xact_age_secs),
         query: r.query,
       })),
       truncated: totalMatching > rows.length,
@@ -216,14 +228,37 @@ export function prepareSessions(rows: Session[], o: PrepareOpts): Session[] {
 }
 
 export interface StateRow {
+  /**
+   * B12: which branch of the statement produced this row. `state` is the
+   * census, one row per session state; `oldest` is the single
+   * idle-in-transaction session that set the verdict, carrying its identity.
+   * Same discriminator pattern as activity.ts's `kind`.
+   */
+  kind: 'state' | 'oldest';
   state: string | null;
   sessions: number;
   longest_secs: string | null;
+  /** `oldest` rows only; null on every census row. */
+  pid: number | null;
+  /** `oldest` rows only, and null there too for a session this role cannot see. */
+  app: string | null;
 }
 
 export interface StatesData {
   byState: { state: string; sessions: number; longestInStateSecs: number }[];
   oldestIdleInTxnSecs: number | null;
+  /**
+   * B12: the session that set `oldestIdleInTxnSecs`, so the panel can link
+   * it and the triage page can tell whether this verdict is about a session
+   * the lock graph already names.
+   *
+   * The remedy on this check's thresholds used to end "Sessions shows its
+   * application_name", which sent an operator to go and find something the
+   * check had already identified and discarded.
+   */
+  oldestIdleInTxnPid: number | null;
+  /** Null when this role cannot read the session's `application_name`. */
+  oldestIdleInTxnApp: string | null;
 }
 
 /**
@@ -231,17 +266,54 @@ export interface StatesData {
  * state collapses pg_stat_activity down to a handful of rows — the distinct
  * Postgres session states — regardless of how many connections are open.
  *
+ * B12: two branches over ONE `MATERIALIZED` CTE, so the census and the named
+ * session are the same snapshot of pg_stat_activity rather than two reads a
+ * few milliseconds apart. `kind` discriminates them, the same way
+ * activity.ts's does.
+ *
+ * `LIMIT 1` sits inside the `oldest` CTE, not on the UNION: on the UNION it
+ * would clip the whole result to one row and the census would arrive as a
+ * single state. The integration test asserts the census survives for exactly
+ * that reason.
+ *
+ * `ORDER BY sessions DESC` only — NOT `ORDER BY kind`, which boundaries.test
+ * rightly rejects as sorting a `::text` alias, and which this statement does
+ * not need: `map` separates the branches by `kind`, and the `oldest` row
+ * carries `sessions = 0` so it lands after the census either way. The census
+ * rows keep the busiest-state-first order the panel's bars are drawn in.
+ *
  * Unlike `sessions` above, this does NOT exclude `pg_backend_pid()`: it's a
  * census, not a list an operator reads row-by-row, and this check's own
  * (necessarily 'active') backend is one real client-backend session among
  * the total — worth counting, not worth the extra WHERE clause to hide.
  */
 const STATES_SQL = `
-SELECT state, count(*)::int AS sessions,
-       max(EXTRACT(EPOCH FROM (now() - state_change)))::text AS longest_secs
-FROM pg_stat_activity
-WHERE backend_type = 'client backend'
-GROUP BY state ORDER BY sessions DESC`;
+WITH act AS MATERIALIZED (
+  SELECT state, state_change, pid, application_name AS app
+    FROM pg_stat_activity
+   WHERE backend_type = 'client backend'
+),
+census AS (
+  SELECT state, count(*)::int AS sessions,
+         max(EXTRACT(EPOCH FROM (now() - state_change)))::text AS longest_secs
+    FROM act GROUP BY state
+),
+oldest AS (
+  SELECT pid, app,
+         EXTRACT(EPOCH FROM (now() - state_change))::text AS longest_secs
+    FROM act
+   WHERE state LIKE 'idle in transaction%'
+   ORDER BY state_change ASC, pid
+   LIMIT 1
+)
+SELECT 'state'::text AS kind, state, sessions, longest_secs,
+       NULL::int AS pid, NULL::text AS app
+  FROM census
+UNION ALL
+SELECT 'oldest'::text AS kind, NULL::text AS state, 0 AS sessions, longest_secs,
+       pid, app
+  FROM oldest
+ORDER BY sessions DESC`;
 
 export const sessionStates: Check<StateRow, StatesData> = {
   id: 'sessionStates',
@@ -250,24 +322,41 @@ export const sessionStates: Check<StateRow, StatesData> = {
   class: 'incident',
   sql: STATES_SQL,
   map: (rows) => {
-    const byState = rows.map((r) => ({
-      state: r.state ?? 'unknown',
-      sessions: r.sessions,
-      longestInStateSecs: r.longest_secs == null ? 0 : Number(r.longest_secs),
-    }));
+    const byState = rows
+      .filter((r) => r.kind === 'state')
+      .map((r) => ({
+        state: r.state ?? 'unknown',
+        sessions: r.sessions,
+        longestInStateSecs: r.longest_secs == null ? 0 : Number(r.longest_secs),
+      }));
     // A11: isIdleInTransaction again — the only definition in this package.
     const oldestIdleInTxnSecs = byState.reduce<number | null>((longest, st) => {
       if (!isIdleInTransaction(st.state)) return longest;
       return longest == null || st.longestInStateSecs > longest ? st.longestInStateSecs : longest;
     }, null);
-    return { byState, oldestIdleInTxnSecs };
+    // B12. Identity only: the AGE still comes from the census above, so the
+    // threshold reads exactly the number it always did. A server where the
+    // two branches disagreed — they are one snapshot of one MATERIALIZED
+    // CTE, so they should not — would show the census maximum, which is the
+    // number the verdict is made of.
+    const oldest = rows.find((r) => r.kind === 'oldest');
+    return {
+      byState,
+      oldestIdleInTxnSecs,
+      oldestIdleInTxnPid: oldest?.pid ?? null,
+      oldestIdleInTxnApp: oldest?.app ?? null,
+    };
   },
   thresholds: [
     { level: 'warn', value: 60, unit: 'seconds',
       because: 'a transaction idle for a minute is holding row locks and pinning the '
              + 'xmin horizon for no reason; almost always an application bug',
-      remedy: 'Find the application holding it open — Sessions shows its application_name '
-            + '— and fix the path that does work between BEGIN and COMMIT.' },
+      // B12: no longer "Sessions shows its application_name". The verdict's
+      // note names the pid and the application, and the panel links the pid
+      // to its row, so the sentence that sent an operator looking for an
+      // identity this check already had is now the identity itself.
+      remedy: 'Fix the path in that application that does work between BEGIN and '
+            + 'COMMIT; the pid above links to its session.' },
     { level: 'critical', value: 300, unit: 'seconds',
       because: 'five minutes of idle-in-transaction blocks autovacuum from reclaiming '
              + 'anything newer, so bloat starts accumulating on top of the locking',
@@ -291,7 +380,13 @@ export const sessionStates: Check<StateRow, StatesData> = {
   verdict: (d, t): Verdict => {
     const s = d.oldestIdleInTxnSecs;
     if (s == null) return { level: 'ok' };
-    const note = `idle in transaction for ${Math.round(s)}s`;
+    // B12: says only what it knows. A restricted role reads
+    // `application_name` as null for a session it does not own, and the pid
+    // alone is still the useful half — it is what the panel links.
+    const who = d.oldestIdleInTxnPid == null
+      ? ''
+      : ` · pid ${d.oldestIdleInTxnPid}${d.oldestIdleInTxnApp == null ? '' : ` ${d.oldestIdleInTxnApp}`}`;
+    const note = `idle in transaction for ${Math.round(s)}s${who}`;
     const crit = t.find((x) => x.level === 'critical');
     if (crit && s >= crit.value) return { level: 'critical', note };
     const warn = t.find((x) => x.level === 'warn');

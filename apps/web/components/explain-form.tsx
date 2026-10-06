@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useEffect, useState, useTransition } from 'react';
 import type { CheckResult, Explanation } from '@pgops/checks';
 import { CheckPanel } from './check-panel';
 import { IndexAdviceList } from './index-advice';
+import { EXPLAIN_HANDOFF_KEY } from './explain-link';
 import { planLines } from '@/lib/format';
 
 type Answer =
@@ -26,6 +27,30 @@ export function ExplainForm({ name }: { name: string }) {
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [pending, startTransition] = useTransition();
   const blocked = pending || sql.trim() === '';
+
+  /**
+   * A9's receiving half: the statement a query row handed over.
+   *
+   * Read AFTER mount rather than as `useState`'s initial value. This
+   * component is client-rendered inside a server-rendered page, and
+   * `sessionStorage` does not exist on the server — an initial-state read
+   * would make the server's HTML and the first client render disagree and
+   * trip hydration.
+   *
+   * CLEARED on read, because the key is a one-shot handoff and not a draft.
+   * Left in place it would silently replace whatever the operator had typed
+   * on every later visit to this page with a statement they clicked once.
+   */
+  useEffect(() => {
+    try {
+      const handed = sessionStorage.getItem(EXPLAIN_HANDOFF_KEY);
+      if (handed === null) return;
+      sessionStorage.removeItem(EXPLAIN_HANDOFF_KEY);
+      setSql(handed);
+    } catch {
+      // Storage blocked: the operator pastes, as they did before.
+    }
+  }, []);
 
   const send = () => {
     if (blocked) return;

@@ -188,6 +188,10 @@ LIMIT $1`;
 
 export const unusedTables: Check<UnusedTableRow, UnusedTableData, ListOpts> = {
   id: 'unusedTables',
+  // A7: the count reaches the hygiene cache and so the triage page and the
+  // overview, without a verdict being invented for a finding that is worth
+  // doing something about and is not a reason to call a database unwell.
+  found: (d) => (d.total === 0 ? null : `${d.total} ${d.total === 1 ? 'unused table' : 'unused tables'}`),
   title: 'Unused tables',
   gate: 'work',
   class: 'hygiene',

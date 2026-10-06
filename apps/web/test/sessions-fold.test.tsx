@@ -6,11 +6,14 @@ import { APP_NAME } from '@/lib/config';
 // Per-file requirement — see kill-button.test.tsx.
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock('next/navigation', () => ({ useRouter: () => ({ refresh: () => {} }) }));
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ refresh: () => {} }),
+  usePathname: () => '/db/prod/sessions',
+}));
 
 const session = (pid: number, app: string | null) => ({
   pid, state: 'idle', user: 'postgres', app, clientAddr: null,
-  backendStart: null, inStateSecs: 1, queryAgeSecs: 1, query: 'SELECT 1',
+  backendStart: null, inStateSecs: 1, queryAgeSecs: 1, xactAgeSecs: null, query: 'SELECT 1',
 });
 
 /**
@@ -37,6 +40,20 @@ vi.mock('@/lib/check', () => ({
         ok: true,
         data: { connections: [], sources: [], bySslStatus: {}, total: 0, truncated: false },
         verdict: { level: 'ok' }, measuredAt: 0,
+      };
+    }
+    if (check.id === 'locks') {
+      return {
+        ok: true,
+        data: { roots: [], truncated: false },
+        verdict: { level: 'ok' }, measuredAt: 0,
+      };
+    }
+    if (check.id === 'activity') {
+      return {
+        ok: true,
+        data: { active: 0, waits: [], shapes: [], waitsTruncated: false, shapesTruncated: false, restricted: false },
+        verdict: null, measuredAt: 0,
       };
     }
     return {

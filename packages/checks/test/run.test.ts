@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
-import { describe, expect, it } from 'vitest';
-import { runCheck, runTool } from '../src/run.js';
+import { describe, expect, it, vi } from 'vitest';
+import { OWN_SQL_MARKER, ownSql, runCheck, runTool } from '../src/run.js';
 import type { Check, CheckContext } from '../src/types.js';
 import { sessions } from '../src/checks/sessions.js';
 import { blocked } from '../src/checks/blocked.js';
@@ -18,7 +18,55 @@ const doubler: Check<{ n: string }, number> = {
   map: (rows) => Number(rows[0]?.n ?? 0) * 2,
 };
 
+describe('ownSql', () => {
+  // The marker is a SUFFIX. PostgreSQL 18 excludes a leading comment from the
+  // text pg_stat_statements stores, so a prefix is not merely relocated there
+  // — it is gone, and query-stats' fold of pgops's own rows silently stops
+  // folding. These three assertions are what stop the marker drifting back to
+  // the front: run.ts's own comment carries the measurement.
+  it('puts the marker at the end, on its own line', () => {
+    expect(ownSql('SELECT 1')).toBe(`SELECT 1\n${OWN_SQL_MARKER}`);
+  });
+
+  it('never puts the marker at the front, where PG 18 would drop it', () => {
+    expect(ownSql('SELECT 1').startsWith(OWN_SQL_MARKER)).toBe(false);
+    expect(ownSql('SELECT 1').endsWith(OWN_SQL_MARKER)).toBe(true);
+  });
+
+  it("keeps the marker out of a statement's trailing line comment", () => {
+    // Appending on the SAME line would put the marker inside this `--`
+    // comment, where Postgres never sees it as a comment of its own and
+    // `query LIKE '%' || marker` can never match. Several of this package's
+    // SQL constants really do end on a `--` line.
+    const marked = ownSql('SELECT 1 -- why this column');
+    expect(marked.split('\n').at(-1)).toBe(OWN_SQL_MARKER);
+  });
+});
+
 describe('runCheck', () => {
+  it('ends every check statement with the pgops marker', async () => {
+    // `(..._args: unknown[])`, not a bare `()`: fakeCtx's own parameter type
+    // narrows to a 0-arg function, but `impl` here keeps ITS OWN inferred
+    // type for the `.mock.calls[0]?.[0]` read below — a 0-arg callback
+    // would type `mock.calls[0]` as the empty tuple `[]`, which cannot be
+    // indexed at all, under this project's strict typecheck:test.
+    const impl = vi.fn(async (..._args: unknown[]) => ({ rows: [] }));
+    await runCheck(fakeCtx(impl), {
+      id: 'x', title: 'x', gate: 'work', class: 'incident', sql: 'SELECT 1', map: () => ({}),
+    } as never);
+    expect(impl.mock.calls[0]?.[0]).toBe('SELECT 1\n/* pgops */');
+  });
+
+  it('marks a parameterised statement too, leaving its values alone', async () => {
+    const impl = vi.fn(async (..._args: unknown[]) => ({ rows: [] }));
+    await runCheck(fakeCtx(impl), {
+      id: 'x', title: 'x', gate: 'work', class: 'incident',
+      sql: (o: { n: number }) => ({ text: 'SELECT $1', values: [o.n] }), map: () => ({}),
+    } as never, { n: 7 });
+    expect(impl.mock.calls[0]?.[0]).toBe('SELECT $1\n/* pgops */');
+    expect(impl.mock.calls[0]?.[1]).toEqual([7]);
+  });
+
   it('returns the mapped data and the time the query started', async () => {
     const before = Date.now();
     const r = await runCheck(fakeCtx(async () => ({ rows: [{ n: '21' }] })), doubler);

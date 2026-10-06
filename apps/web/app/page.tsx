@@ -5,6 +5,7 @@ import { databaseNames } from '@/lib/pools';
 import { ConfigError } from '@/lib/config';
 import { runCheckFor } from '@/lib/check';
 import { hygieneFor } from '@/lib/hygiene';
+import { chainPids } from '@/lib/stuck';
 import { ConfigErrorPage } from '@/components/config-error';
 import { Refresh } from '@/components/refresh';
 import { VerdictBadge, accentClass } from '@/components/verdict-badge';
@@ -36,11 +37,38 @@ const RANK: Record<VerdictLevel, number> = { ok: 0, warn: 1, critical: 2 };
 async function hygieneSummary(name: string): Promise<string | null> {
   const read = await hygieneFor(name);
   if (!read.ok) return null;
-  const loud = read.areas.filter((a) => a.level !== 'ok');
+  // A7: `level !== 'ok'` alone hid every count. A check that judges nothing
+  // leaves its area OK — which is correct, a duplicate index is not a reason
+  // to call a database unwell — so filtering on the level dropped the one
+  // thing this column exists to show. An area with a note has something to
+  // say whatever its level.
+  const loud = read.areas.filter((a) => a.level !== 'ok' || a.note !== null);
   if (loud.length === 0) return null;
   // The notes, not the levels: "2 unused indexes" is what an operator can act
   // on, where "Indexes WARN" only tells them where to click to find out.
-  const notes = loud.map((a) => a.note ?? `${a.label.toLowerCase()} not assessed`);
+  /**
+   * One sentence per DISTINCT finding, with a multiplier when areas share
+   * one. Found by driving the closed Stage 4: with the capture scheduler
+   * behind, every row read "last captured too long ago · last captured too
+   * long ago · last captured too long ago", because three areas were stale
+   * and the notes carry no area label to tell them apart. Repeating a
+   * sentence that names nothing says nothing the first said — on the one
+   * surface whose whole job is to be scannable down twenty rows.
+   *
+   * Counted rather than silently deduplicated: three areas the console
+   * cannot speak for is a bigger gap than one, and dropping the repeats
+   * would hide that. `×N` is the idiom the Active now panel already uses
+   * for a repeated reading.
+   *
+   * First-appearance order, so the worst-first ordering `hygieneAreas`
+   * already established survives the grouping.
+   */
+  const counts = new Map<string, number>();
+  for (const a of loud) {
+    const note = a.note ?? `${a.label.toLowerCase()} not assessed`;
+    counts.set(note, (counts.get(note) ?? 0) + 1);
+  }
+  const notes = [...counts].map(([note, n]) => (n === 1 ? note : `${note} ×${n}`));
   const age = loud
     .map((a) => a.ageMs)
     .filter((ms): ms is number => ms !== null)
@@ -81,8 +109,18 @@ async function hygieneSummary(name: string): Promise<string | null> {
  */
 async function worstVerdict(
   name: string,
-): Promise<{ verdict: Verdict | null; unavailable: number }> {
-  const results = await Promise.all([
+): Promise<{ verdict: Verdict | null; unavailable: number; facts: string[] }> {
+  const [
+    activity, blocked, connections, connectionDetail, horizon, identity, locks,
+    longRunning, queryStats, replication, sessions, sessionStates, slots,
+    wraparound, throughput, standbyList,
+  ] = await Promise.all([
+    // Task 1: carries no verdict, so it can never worsen the overview — but
+    // it can be UNAVAILABLE, and this page counts that separately. Same
+    // reasoning as identity, sessions and queryStats below: guards.test.ts
+    // holds every incident check to the front door, whether or not it can
+    // escalate.
+    runCheckFor(name, CHECKS.activity),
     runCheckFor(name, CHECKS.blocked),
     runCheckFor(name, CHECKS.connections),
     runCheckFor(name, CHECKS.connectionDetail, {}),
@@ -92,6 +130,7 @@ async function worstVerdict(
     // verdict-less: guards.test.ts holds every incident check to the front
     // door, and narrowing that rule to "checks that can escalate" would have
     // quietly excused those two as well.
+    runCheckFor(name, CHECKS.horizon),
     runCheckFor(name, CHECKS.identity),
     runCheckFor(name, CHECKS.locks),
     runCheckFor(name, CHECKS.longRunning, {}),
@@ -104,7 +143,34 @@ async function worstVerdict(
     runCheckFor(name, CHECKS.sessionStates),
     runCheckFor(name, CHECKS.slots),
     runCheckFor(name, CHECKS.wraparound),
+    // Task 2: carries no verdict (see database-activity.ts), so — same as
+    // activity, horizon, sessions and queryStats elsewhere in this list — it
+    // can never worsen the overview, but it CAN be unavailable, and
+    // guards.test.ts holds every incident check to the front door regardless
+    // of whether it can escalate. Appended at the end, not inserted among
+    // the others that precede it.
+    runCheckFor(name, CHECKS.databaseActivity),
+    // B4: appended at the end for the same reason databaseActivity was —
+    // this list is destructured by position above, so a new entry goes last
+    // or it silently renames every result after it. Unlike the two beside
+    // it, standbys DOES carry a verdict and can worsen the overview, which
+    // is the point: the keep-up gate had no replication judgement at all.
+    runCheckFor(name, CHECKS.standbys),
   ]);
+  /**
+   * A6: NAMED above, not indexed, and then re-listed here for the loop.
+   *
+   * The destructure is what makes the facts line below readable and what
+   * makes this list appendable — a check added to the end of the
+   * `Promise.all` cannot silently rename every result after it, which is
+   * what an index-based read would do. `guards.test.ts` holds the two lists
+   * to the registry.
+   */
+  const results = [
+    activity, blocked, connections, connectionDetail, horizon, identity, locks,
+    longRunning, queryStats, replication, sessions, sessionStates, slots,
+    wraparound, throughput, standbyList,
+  ];
   // `verdict: null` is a check with no opinion (spec §1.1). It participates in
   // neither direction: it cannot worsen the overview, and it must not be
   // counted as an `ok` that says a database was judged healthy. Same treatment
@@ -129,7 +195,58 @@ async function worstVerdict(
     if (r.verdict === null) continue;
     if (worst === null || RANK[r.verdict.level] > RANK[worst.level]) worst = r.verdict;
   }
-  return { verdict: worst, unavailable };
+  /**
+   * A6: the readings behind the badge. `worstVerdict` ran twelve checks per
+   * database and discarded every number, so a wall display showed OK and
+   * nothing anybody could watch move.
+   *
+   * Only facts that are WORTH a line appear. The connection count always is.
+   * The rest render only when non-zero, so twenty healthy rows do not each
+   * carry "0 blocked · no standbys" — the scannability of this page across a
+   * fleet is the reason it exists.
+   */
+  const facts: string[] = [];
+  if (connections.ok) {
+    facts.push(`${formatCount(connections.data.used)} of ${formatCount(connections.data.max)} connections`);
+  }
+  if (blocked.ok && blocked.data.count > 0) facts.push(`${formatCount(blocked.data.count)} blocked`);
+  /**
+   * EDITED at the Stage 3 re-plan, before this was built. As specified it
+   * read "2 blocked · longest query 3m 15s" for a lock chain, which states
+   * the chain twice — the longest query IS one of the waiters. That is the
+   * echo A17 removed from the triage page, re-introduced one level up and
+   * multiplied across every row in the fleet.
+   *
+   * So the fact is suppressed when that pid is inside the chain, and NOT
+   * suppressed when the lock graph could not be read: hiding a real finding
+   * on the strength of a graph nobody saw is the false-negative this
+   * console is built against, and it is the same rule A17's fold carries.
+   */
+  const chained = chainPids(locks);
+  const longest = longRunning.ok ? longRunning.data.queries[0] : undefined;
+  if (longest !== undefined && !chained.has(longest.pid)) {
+    facts.push(`longest query ${formatDuration(longest.runningSecs)}`);
+  }
+  if (replication.ok && replication.data.inRecovery) {
+    facts.push(
+      replication.data.receiving === false
+        ? 'standby NOT RECEIVING'
+        : replication.data.lagSeconds === null
+          ? 'standby · nothing replayed yet'
+          : `standby ${formatDuration(replication.data.lagSeconds)} behind`,
+    );
+  }
+  if (standbyList.ok && standbyList.data.standbys.length > 0) {
+    let worstReplay: number | null = null;
+    for (const sb of standbyList.data.standbys) {
+      if (sb.replaySecs === null) continue;
+      if (worstReplay === null || sb.replaySecs > worstReplay) worstReplay = sb.replaySecs;
+    }
+    facts.push(worstReplay === null
+      ? `${plural(standbyList.data.standbys.length, 'standby', 'standbys')} · replay unknown`
+      : `${plural(standbyList.data.standbys.length, 'standby', 'standbys')} · worst replay ${formatDuration(worstReplay)}`);
+  }
+  return { verdict: worst, unavailable, facts };
 }
 
 export default async function Overview() {
@@ -271,6 +388,16 @@ export default async function Overview() {
                   OK, because it is OK: nothing is wrong right now. */}
               <span>
                 <span className="font-medium">{r.name}</span>
+                {/*
+                  A6: the readings, under the name and above the hygiene
+                  line. Incident facts come first because they are the
+                  reason somebody is looking at this page; hygiene stays in
+                  muted ink below, for the reason the long comment above
+                  gives.
+                */}
+                {r.facts.length > 0 ? (
+                  <span className="mt-0.5 block text-xs text-muted-foreground">{r.facts.join(' · ')}</span>
+                ) : null}
                 {r.hygiene === null ? null : (
                   <span className="mt-0.5 block text-xs text-muted-foreground">{r.hygiene}</span>
                 )}

@@ -7,6 +7,24 @@ import type {
 const UNDEFINED_TABLE = '42P01';
 const INSUFFICIENT_PRIVILEGE = '42501';
 
+/**
+ * The GRANT text for a missing-role remedy, pulled out of `remedyFor` and
+ * exported so a check that detects the SAME condition itself — rather than
+ * through the privilege error `classify` below reacts to — can show the
+ * identical fix without a second copy of the statement.
+ *
+ * activity.ts's `restricted` is exactly that case: no error is ever raised
+ * (see its ActivityRow.sees_all docblock), so `remedyFor` never runs for it,
+ * but the operator needs the same sentence. apps/web's guards.test.ts DDL
+ * boundary allows a literal GRANT statement in only this file and
+ * tools/advice.ts — keeping the string here, and having every other caller
+ * go through this function, is what keeps that guard meaningful rather than
+ * working around it with a second hardcoded copy elsewhere.
+ */
+export function grantRemedy(roleName: string): string {
+  return `GRANT ${roleName} TO CURRENT_USER;`;
+}
+
 function remedyFor(reason: FailureReason, requires: Requirement[] = []): string | undefined {
   if (reason === 'missing-extension') {
     const ext = requires.find((r) => r.kind === 'extension');
@@ -14,7 +32,7 @@ function remedyFor(reason: FailureReason, requires: Requirement[] = []): string 
   }
   if (reason === 'privilege') {
     const role = requires.find((r) => r.kind === 'role');
-    return role ? `GRANT ${role.name} TO CURRENT_USER;` : undefined;
+    return role ? grantRemedy(role.name) : undefined;
   }
   if (reason === 'missing-store') {
     return 'Set PGOPS_STORE_URL to a Postgres database pgops may create its own schema in.';
@@ -92,8 +110,50 @@ export function guardClient(client: PoolClient): (err?: Error) => void {
   };
 }
 
+/**
+ * Every statement this package runs carries this comment, which is what lets
+ * the Queries page fold the console's own catalog reads out of the ranking
+ * the way it already folds its own sessions and relations.
+ *
+ * It goes at the END, on its own line — see `ownSql`, the one place that
+ * attaches it. It was a LEADING comment until the 14/16/17/18 gate matrix
+ * caught what that costs: PostgreSQL 18 excludes a leading comment from the
+ * text pg_stat_statements stores. Same statement, two servers:
+ *
+ *     PG 17   [/* pgops *\/ SELECT $1 AS marked]
+ *     PG 18   [SELECT $1 AS marked]
+ *
+ * So on 18 a prefix marker does not merely move, it is gone — `query LIKE
+ * marker || '%'` matches nothing, `ownShapes` reads 0, and the fold silently
+ * stops folding. The Queries page would then blame the operator's database
+ * for pgops's own polling, which is the entire defect this marker exists to
+ * prevent, restored on the newest server anyone would deploy against.
+ *
+ * A trailing comment survives on all four versions, over the extended
+ * protocol as well as the simple one.
+ */
+export const OWN_SQL_MARKER = '/* pgops */';
+
+/**
+ * Attach OWN_SQL_MARKER to a statement.
+ *
+ * Every marked statement in this package goes through here instead of
+ * interpolating the marker itself, so the position is decided once. It was
+ * interpolated at ten call sites before, which is why a server-side change
+ * to one comment position was a ten-file fix; capture.test.ts now enforces
+ * that new marked SQL comes through this function.
+ *
+ * The newline is load-bearing, not formatting: a statement whose last line
+ * ends in a `--` comment would swallow a marker appended to that same line.
+ * With the newline, a trailing `--` comment is measured to be harmless.
+ */
+export function ownSql(text: string): string {
+  return `${text}\n${OWN_SQL_MARKER}`;
+}
+
 function toQuery<Opts>(sql: Check<never, never, Opts>['sql'], opts: Opts): SqlQuery {
-  return typeof sql === 'string' ? { text: sql } : sql(opts);
+  const q = typeof sql === 'string' ? { text: sql } : sql(opts);
+  return { ...q, text: ownSql(q.text) };
 }
 
 /**

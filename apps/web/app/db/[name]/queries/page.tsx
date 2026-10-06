@@ -3,14 +3,19 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { CHECKS, SERIES, slowQueries, SLOW_QUERY_DEFAULTS } from '@pgops/checks';
 import { runCheckFor, runSeriesFor } from '@/lib/check';
+import { ratesFor } from '@/lib/rates';
 import { LOAD_HOURS, queryLoadFor } from '@/lib/load';
+import { foldFrom } from '@/lib/fold';
+import { withParam } from '@/lib/url';
 import { LineChart } from '@/components/line-chart';
 import { CheckPanel } from '@/components/check-panel';
+import { ExplainLink } from '@/components/explain-link';
+import { Throughput } from '@/components/throughput';
 import { Badge } from '@/components/ui/badge';
 import { Refresh } from '@/components/refresh';
 import { ConfirmAction } from '@/components/confirm-action';
 import { actionsAllowed } from '@/lib/actions';
-import { Sql } from '@/components/sql';
+import { safeStatement, Sql } from '@/components/sql';
 import { formatAgo, formatCount, formatMillis, plural } from '@/lib/format';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
@@ -47,18 +52,22 @@ function SortableHead({
   name,
   sort,
   chosen,
+  pgops,
   children,
 }: {
   name: string;
   sort: Sort;
   chosen: Sort;
+  /** Carried through so choosing a sort does not silently reset the fold - foldFrom's rule. */
+  pgops: string | undefined;
   children: ReactNode;
 }) {
   const active = sort === chosen;
+  const href = withParam(`/db/${name}/queries`, { sort, pgops }, 'sort', sort);
   return (
     <TableHead aria-sort={active ? 'descending' : 'none'}>
       <Link
-        href={`/db/${name}/queries?sort=${sort}`}
+        href={href}
         className={cn(
           'underline-offset-4 hover:underline',
           active ? 'font-semibold text-foreground' : 'text-muted-foreground',
@@ -83,10 +92,15 @@ export default async function Queries({
   searchParams,
 }: {
   params: Promise<{ name: string }>;
-  searchParams: Promise<{ sort?: string }>;
+  searchParams: Promise<{ sort?: string; pgops?: string }>;
 }) {
   const { name } = await params;
-  const { sort } = await searchParams;
+  const { sort, pgops } = await searchParams;
+  // The same fold the Sessions and hygiene pages apply to pgops's own
+  // connections and relations, on a new subject: its own statement shapes.
+  // Task 8's finding was that this page's own catalog reads otherwise rank
+  // among the top statement shapes it renders.
+  const fold = foldFrom(`/db/${name}/queries`, { sort, pgops });
   // Default 'total', as this page shipped in an earlier phase — "worst
   // queries by total time". A 'mean' default was tried in this branch and
   // reverted: slowQueries is a CONJUNCTION over two axes (calls >= 100 AND
@@ -102,7 +116,12 @@ export default async function Queries({
   // (c87b47b) precisely because the panel never checks which sort produced
   // its rows, so that property holds identically under 'total'.
   const chosen: Sort = SORTS.includes(sort as Sort) ? (sort as Sort) : 'total';
-  const result = await runCheckFor(name, CHECKS.queryStats, { sort: chosen });
+  const result = await runCheckFor(name, CHECKS.queryStats, { sort: chosen, showOurs: fold.show });
+  // Task 2: commits, rollbacks, deadlocks and temp spill — differenced
+  // between this poll and the last one. See lib/rates.ts for why the
+  // interval comes from the check's own `sampledAt`, not the host clock.
+  const throughput = await runCheckFor(name, CHECKS.databaseActivity);
+  const rates = ratesFor(name, throughput);
   // Spec §5.1: P3's only visible deliverable. One indexed lookup per render,
   // and it must stay that way — this is an INCIDENT page and it polls at 5s.
   const since = await lastIntervalByQueryid(name, result.ok ? result.data.rows : []);
@@ -121,7 +140,11 @@ export default async function Queries({
           hygiene routes share that layout and must not inherit a 5s
           catalog scan. test/guards.test.ts holds this. */}
       <div className="mb-2 flex justify-end"><Refresh intervalMs={5_000} /></div>
-      {canAct ? <StatisticsControls name={name} /> : null}
+
+      <CheckPanel title="Throughput" result={throughput}>
+        {() => <Throughput rates={rates} />}
+      </CheckPanel>
+
       {/*
        * pgHero #17 slow_queries: NOT a query, a FILTER over #14's rows
        * (query_stats.select { calls >= slow_query_calls && average_time >=
@@ -216,6 +239,7 @@ export default async function Queries({
                   every shape visible to this role BEFORE the LIMIT, so a short
                   rows array against a larger totalShapes IS the truncation. */}
               {d.rows.length < d.totalShapes ? ` · showing ${d.rows.length}` : ''}
+              {' · total time includes time spent waiting on locks'}
             </p>
             {since.kind === 'unavailable' && (
               /* Said out loud, not shown as an absent column. A store that is
@@ -229,9 +253,9 @@ export default async function Queries({
             <Table>
               <TableHeader>
                 <TableRow>
-                  <SortableHead name={name} sort="calls" chosen={chosen}>calls</SortableHead>
-                  <SortableHead name={name} sort="total" chosen={chosen}>total</SortableHead>
-                  <SortableHead name={name} sort="mean" chosen={chosen}>mean</SortableHead>
+                  <SortableHead name={name} sort="calls" chosen={chosen} pgops={pgops}>calls</SortableHead>
+                  <SortableHead name={name} sort="total" chosen={chosen} pgops={pgops}>total</SortableHead>
+                  <SortableHead name={name} sort="mean" chosen={chosen} pgops={pgops}>mean</SortableHead>
                   {since.kind === 'ok' && <TableHead>Since last capture</TableHead>}
                   <TableHead>query</TableHead>
                 </TableRow>
@@ -250,25 +274,22 @@ export default async function Queries({
                     calls/total/mean can attach to the wrong row. The index alone
                     would be stable enough; queryid is kept in front of it so the
                     key still changes when the ranking genuinely changes. */}
-                {d.rows.map((q, i) => (
+                {d.rows.map((q, i) => {
+                  /* A9: bound once, and named `statement` rather than
+                     `query`. The redaction guard in test/guards.test.ts
+                     fails any JSX expression containing the word `query`
+                     outside `<Sql>`, so `statement={q.query}` would trip it
+                     — the same way `plural(n, 'query')` did in A17. The
+                     guard is not the thing to edit. */
+                  const statement = q.redacted ? null : q.query;
+                  return (
                   <TableRow key={`${q.queryid ?? 'null'}-${i}`} className={slow.has(q) ? 'bg-warning/5' : undefined}>
-                    <TableCell>
-                      {/* `queryid` is NULLABLE — pg_stat_statements has no id
-                          for a statement it could not normalise, and the check
-                          passes that null through. A link to /queries/null
-                          would 404 into a page that can only ever say "no
-                          history", so a row without one gets no link. */}
-                      {q.queryid === null
-                        ? formatCount(q.calls)
-                        : (
-                          <Link
-                            href={`/db/${name}/queries/${q.queryid}`}
-                            className="underline underline-offset-2"
-                          >
-                            {formatCount(q.calls)}
-                          </Link>
-                        )}
-                    </TableCell>
+                    {/* A9: the calls count has given up its link. The
+                        statement below carries it now — two links per row to
+                        one destination is the echo this console cuts, and of
+                        the two the statement is what an operator is actually
+                        pointing at when they want this shape's history. */}
+                    <TableCell>{formatCount(q.calls)}</TableCell>
                     {/* totalMs/meanMs are MILLISECONDS. These went through
                         formatDuration(ms / 1000), which floors to whole
                         seconds — so every mean under a second rendered "0s",
@@ -297,16 +318,81 @@ export default async function Queries({
                       {slow.has(q) ? (
                         <Badge variant="warning" className="mr-2 align-middle">SLOW</Badge>
                       ) : null}
-                      {q.redacted ? <span className="text-xs italic">insufficient privilege</span> : <Sql>{q.query}</Sql>}
+                      {/* `queryid` is NULLABLE — pg_stat_statements has no
+                          id for a statement it could not normalise, and the
+                          check passes that null through. A link to
+                          /queries/null would 404 into a page that can only
+                          ever say "no history", so a row without one gets no
+                          link — but it still gets Explain, because the two
+                          destinations are independent and a row must not
+                          lose both because it lost one. */}
+                      {statement === null ? (
+                        <span className="text-xs italic">insufficient privilege</span>
+                      ) : (
+                        <>
+                          {q.queryid === null ? (
+                            <Sql>{statement}</Sql>
+                          ) : (
+                            <Link
+                              href={`/db/${name}/queries/${q.queryid}`}
+                              className="underline-offset-2 hover:underline"
+                            >
+                              <Sql>{statement}</Sql>
+                            </Link>
+                          )}
+                          {/* REDACTED before it is handed over, not after.
+                              ExplainLink is a client component, so this prop
+                              is serialised into the RSC payload embedded in
+                              this page BEFORE the component runs — it cannot
+                              redact its own input, and "the explain route
+                              redacts what it echoes back" (what this comment
+                              used to say) protects the wrong end. A real
+                              password reached the HTML of this route and
+                              routes.int.test.ts caught it. */}
+                          <span className="ml-2">
+                            <ExplainLink name={name} statement={safeStatement(statement)} />
+                          </span>
+                        </>
+                      )}
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
+            {d.ownShapes > 0 ? (
+              <p className="mt-3 text-sm text-muted-foreground">
+                {fold.show
+                  ? `Including ${formatCount(d.ownShapes)} of pgops's own statement shapes. `
+                  : `${formatCount(d.ownShapes)} of pgops's own statement shapes hidden. `}
+                <Link href={fold.href} className="underline underline-offset-4">{fold.show ? 'hide them' : 'show them'}</Link>
+              </p>
+            ) : null}
           </>
           );
         }}
       </CheckPanel>
+
+      {/*
+        A10: below the data, behind a disclosure.
+        
+        With actions enabled these two were the FIRST thing on the page: a
+        bordered box of two captions and two danger strings, about seventy
+        words about destroying statistics, above every number the page
+        exists to show. An operator opening Queries mid-incident met a
+        destructive control before a single reading.
+        
+        A reset is a thing you do having read the page, so it belongs after
+        it — and one deliberate click away, the same shape Settings uses on
+        the Cleanup page, so the danger strings are not prose the page
+        carries at rest.
+      */}
+      {canAct ? (
+        <details className="mt-4">
+          <summary className="cursor-pointer text-sm text-muted-foreground">Reset statistics</summary>
+          <StatisticsControls name={name} />
+        </details>
+      ) : null}
     </>
   );
 }
@@ -437,7 +523,7 @@ async function lastIntervalByQueryid(
 function StatisticsControls({ name }: { name: string }) {
   const db = encodeURIComponent(name);
   return (
-    <div className="mb-3 flex flex-wrap items-start gap-3 rounded-md border p-3">
+    <div className="mt-2 flex flex-wrap items-start gap-3 rounded-md border p-3">
       <div>
         <p className="mb-1 text-xs text-muted-foreground">
           Clears pg_stat_statements for this database — the statement

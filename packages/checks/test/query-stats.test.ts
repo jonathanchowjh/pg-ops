@@ -6,13 +6,14 @@ import {
   type QueryStatRow,
   type QueryStatRowData,
   type QueryStatsData,
+  type QueryStatsOpts,
 } from '../src/checks/query-stats.js';
 
 const row = (o: Partial<QueryStatRow>): QueryStatRow => ({
   queryid: '1', query: 'select 1', calls: '10',
   total_ms: 100, mean_ms: 10, stddev_ms: 1,
   rows: '10', shared_blks_hit: '90', shared_blks_read: '10',
-  total_shapes: 1, stats_reset: null, requested_sort: 'total',
+  total_shapes: 1, own_shapes: 0, stats_reset: null, requested_sort: 'total',
   ...o,
 });
 
@@ -129,7 +130,20 @@ describe('queryStats.map', () => {
 
   it('defaults totalShapes to 0, statsResetAt to null, and sort to "total" on an empty result', () => {
     const d = queryStats.map([]);
-    expect(d).toEqual({ rows: [], totalShapes: 0, statsResetAt: null, sort: 'total' });
+    expect(d).toEqual({ rows: [], totalShapes: 0, ownShapes: 0, statsResetAt: null, sort: 'total' });
+  });
+
+  it('carries the count of the console\'s own shapes', () => {
+    const d = queryStats.map([{ queryid: '1', query: 'SELECT 1', calls: '1', total_ms: 1, mean_ms: 1, stddev_ms: 0,
+      rows: '1', shared_blks_hit: '0', shared_blks_read: '0', total_shapes: 5, own_shapes: 3, stats_reset: null, requested_sort: 'total' }]);
+    expect(d.ownShapes).toBe(3);
+  });
+});
+
+describe('queryStats.sql — hiding the console\'s own shapes', () => {
+  it('keeps a row whose text is null when hiding the console\'s shapes', () => {
+    const { text } = (queryStats.sql as (o: QueryStatsOpts) => { text: string })({ sort: 'total' });
+    expect(text).toContain('v.query IS NULL OR');
   });
 });
 

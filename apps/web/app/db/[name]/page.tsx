@@ -3,13 +3,16 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import {
   CHECKS, GATES, GATE_ORDER,
-  type CheckResult, type Gate, type Placement, type RootBlocker, type Verdict, type Waiter,
+  type ActivityData, type CheckResult, type Gate, type Placement, type Verdict,
 } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
+import { ratesFor } from '@/lib/rates';
 import { hygieneFor } from '@/lib/hygiene';
 import type { HygieneArea } from '@pgops/checks';
+import { chainPids, stuckFrom } from '@/lib/stuck';
 import { HygieneLine } from '@/components/hygiene-line';
 import { CheckPanel, needsAttention } from '@/components/check-panel';
+import { Throughput } from '@/components/throughput';
 import { Badge } from '@/components/ui/badge';
 import { Bullet } from '@/components/bullet';
 import { Refresh } from '@/components/refresh';
@@ -64,6 +67,28 @@ interface PanelSpec {
    * is the case where the two genuinely disagree and both need reading.
    */
   secondaryTo?: string;
+  /**
+   * A17: the pid this panel's verdict is ABOUT, when it is about one
+   * session.
+   *
+   * Set it and the panel folds to a compact line whenever that pid is
+   * already inside a loud lock chain — across bands, which is what
+   * `secondaryTo` above cannot do: it names a panel in the same band, and
+   * three of the four echoes this fixes are in other bands.
+   *
+   * Left unset by a panel that is not about one session. Active now,
+   * Throughput and Query statistics describe the whole server, so a chain
+   * explains nothing about them and they must keep their own weight.
+   */
+  pid?: number | null;
+  /**
+   * The id to put on this panel's card, for the folded lines to link to.
+   *
+   * On the spec rather than matched by title inside `Band`, so the band
+   * stays ignorant of which panel is which — the same reason `gate` is read
+   * off the check instead of written here.
+   */
+  anchor?: string;
 }
 
 /**
@@ -93,6 +118,40 @@ function panel<T>(
     render: render as (data: unknown, verdict: Verdict | null) => ReactNode,
     summary: summary as ((data: unknown) => ReactNode) | undefined,
   };
+}
+
+/**
+ * The wait-bucket fragment of the "Active now" summary line, shared by its
+ * loud and compact renderers.
+ *
+ * `waits` empty and `restricted` false really does mean nothing is
+ * executing. `waits` empty and `restricted` true means this role's SQL
+ * filtered on `state`, which it cannot read for a backend it does not own
+ * (see activity.ts's ActivityRow.sees_all docblock) — "nothing executing"
+ * would be the exact false-negative Fix 1 exists to close, so a blind
+ * summary line gets the honest alternative instead.
+ *
+ * B10: folds by wait TYPE, because that is the unit a summary line is in.
+ * `activity` groups by (wait_event_type, wait_event), so one type routinely
+ * spans several events, and printing `w.type` per bucket rendered the same
+ * word several times with different numbers beside it: the seeded lock chain
+ * read "2 active · 1 Lock · 1 Lock". One row per event is right for the
+ * Sessions page, which has the room to name each; here it is noise on the
+ * line an operator scans to tell a stuck server from a busy one.
+ *
+ * `limit` caps the number of TYPES, after the fold. Capping the raw buckets
+ * instead displaced whole types to make room for repeats of one already
+ * named — three Lock events pushed IO off a three-slot line. A Map keeps
+ * first-seen order, so `running` stays first where the SQL put it.
+ */
+function activeWaitSummary(d: ActivityData, limit?: number): string {
+  const byType = new Map<string, number>();
+  for (const w of d.waits) byType.set(w.type, (byType.get(w.type) ?? 0) + w.sessions);
+  const folded = [...byType];
+  const list = (limit === undefined ? folded : folded.slice(0, limit))
+    .map(([type, sessions]) => `${formatCount(sessions)} ${type}`).join(' · ');
+  if (list) return list;
+  return d.restricted ? 'restricted — own sessions only' : 'nothing executing';
 }
 
 /**
@@ -146,6 +205,7 @@ function Band({
   href,
   linkLabel,
   panels,
+  absorbed,
   hygiene,
 }: {
   gate: Gate;
@@ -154,6 +214,16 @@ function Band({
   href?: string;
   linkLabel?: string;
   panels: PanelSpec[];
+  /**
+   * Every pid inside a loud lock chain (A17). Computed once in `Triage`,
+   * because the chain is one fact shared by all four bands, and passed in
+   * rather than derived here so a band cannot hold a different opinion
+   * about it than its neighbours.
+   *
+   * Empty when the lock graph could not be read, or read fine and found
+   * nothing, or found a chain that is not loud — see `Triage`.
+   */
+  absorbed: Set<number>;
   /**
    * The cached hygiene lines belonging to this band, already rolled up. A
    * band with none renders exactly as it did before they existed.
@@ -190,8 +260,24 @@ function Band({
   const escalated = new Set(
     panels.filter((p) => p.result.ok && needsAttention(p.result)).map((p) => p.title),
   );
+  // A17: this panel's verdict is about a session the loud lock chain already
+  // accounts for, so the chain is the incident and this is one of its
+  // symptoms.
+  //
+  // No `p.result.ok` clause, unlike the `secondaryTo` one below, and the
+  // difference is worth stating because the RULE is the same for both: a
+  // check that failed is never a supporting detail of anything, and "we
+  // could not look" must keep its own card and the message naming what
+  // Postgres refused. Here that is already guaranteed by construction —
+  // every `pid` on a spec is read off an `ok` result, so a failed check
+  // carries `pid: null` and cannot match. Adding the clause anyway would be
+  // an unreachable branch no test can hold, which this codebase treats as
+  // prose in a type's clothing. The behaviour is pinned by the
+  // failed-check test on the page instead.
+  const inChain = (p: PanelSpec) => p.pid != null && absorbed.has(p.pid);
   const isLoud = (p: PanelSpec) =>
     needsAttention(p.result) &&
+    !inChain(p) &&
     !(p.secondaryTo !== undefined && p.result.ok && escalated.has(p.secondaryTo));
   const loud = panels.filter(isLoud);
   const quiet = panels.filter((p) => !isLoud(p));
@@ -242,15 +328,38 @@ function Band({
           it belongs to, reading as a box with nothing in it. */}
       <div className="grid content-start gap-2">
         {loud.map((p) => (
-          <CheckPanel key={p.title} headingLevel={3} title={p.title} result={p.result}>
-            {(d, v) => p.render(d, v)}
-          </CheckPanel>
+          // `data-loud` carries the title of every panel this band spent a
+          // full card on. A17 is a claim about HOW MANY cards one incident
+          // gets, and counting rendered cards is the only way to assert it:
+          // a test that looks for the presence of a panel passes just as
+          // well when five of them are loud, which is the defect.
+          <div key={p.title} id={p.anchor} data-loud={p.title}>
+            <CheckPanel headingLevel={3} title={p.title} result={p.result}>
+              {(d, v) => p.render(d, v)}
+            </CheckPanel>
+          </div>
         ))}
         {quiet.length > 0 ? (
           <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
             {quiet.map((p) => (
               <CheckPanel key={p.title} headingLevel={3} title={p.title} result={p.result} compact>
-                {(d, v) => (p.summary ? p.summary(d) : p.render(d, v))}
+                {(d, v) => (
+                  <>
+                    {p.summary ? p.summary(d) : p.render(d, v)}
+                    {/*
+                      A17: five words saying why this reading is small. Without
+                      it the fold is indistinguishable from the panel simply
+                      being healthy, which would hide a real finding — the
+                      opposite of the problem it was added to solve.
+                    */}
+                    {inChain(p) ? (
+                      <span>
+                        {' · '}
+                        <Link href="#lock-wait-graph" className="underline underline-offset-4">in this chain</Link>
+                      </span>
+                    ) : null}
+                  </>
+                )}
               </CheckPanel>
             ))}
           </div>
@@ -261,41 +370,6 @@ function Band({
       </div>
     </section>
   );
-}
-
-/**
- * Every pid in the wait graph that is WAITING, mapped to the root blocker it
- * is ultimately queued behind.
- *
- * This is the join two bands of this page were missing, and its absence was
- * putting a contradiction on screen. `long-running.ts` selects `state =
- * 'active'`, and a session blocked on a lock is `active` in
- * `pg_stat_activity` — so every waiter in a lock chain is ALSO a long-running
- * query, always, by construction. The live incident showed it exactly: Lock
- * chains said "Terminate the ROOT blocker, not a waiter. Killing a waiter
- * frees nothing", and one band below, Queries listed those two waiters
- * with "terminating this backend usually frees work nobody is waiting for".
- *
- * Neither check is wrong on its own — 9402 really had been running 18
- * minutes. The PAGE is the only thing that holds both results, so the page is
- * the only thing that can notice they are the same sessions. Same failure as
- * the `suspectPid` one this file already documents: two answers to "which pid
- * do I kill" on the console's own incident screen.
- *
- * `cycle` marks a back-edge to an ancestor — a deadlock in flight — and is
- * not recursed into, or this would not terminate. Same guard the Locks page
- * applies to the same tree.
- */
-function blockedByRoot(roots: readonly RootBlocker[]): Map<number, number> {
-  const out = new Map<number, number>();
-  const walk = (waiters: readonly Waiter[], root: number) => {
-    for (const w of waiters) {
-      out.set(w.pid, root);
-      if (!w.cycle) walk(w.waiters, root);
-    }
-  };
-  for (const r of roots) walk(r.waiters, r.pid);
-  return out;
 }
 
 /**
@@ -317,22 +391,38 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
   const { name } = await params;
 
   const [
-    connections, sessionStates, blocked, longRunning, locks, wraparound, slots, queryStats,
-    replication, hygiene,
+    connections, sessionStates, blocked, activity, longRunning, locks, wraparound, horizon, slots,
+    queryStats, replication, standbyList, throughput, hygiene,
   ] = await Promise.all([
       runCheckFor(name, CHECKS.connections),
       runCheckFor(name, CHECKS.sessionStates),
       runCheckFor(name, CHECKS.blocked),
+      // Task 1: what the server is doing right now, ahead of Long-running —
+      // see registry.ts and checks/activity.ts for why it carries no verdict.
+      runCheckFor(name, CHECKS.activity),
       runCheckFor(name, CHECKS.longRunning, {}),
       runCheckFor(name, CHECKS.locks),
       runCheckFor(name, CHECKS.wraparound),
+      runCheckFor(name, CHECKS.horizon),
       runCheckFor(name, CHECKS.slots),
       runCheckFor(name, CHECKS.queryStats, { sort: 'total' }),
       runCheckFor(name, CHECKS.replicationLag),
+      // B4: the only replication JUDGEMENT this gate has. `replicationLag`
+      // carries no threshold, so a standby arbitrarily far behind never
+      // escalated the band titled "can the server keep up".
+      runCheckFor(name, CHECKS.standbys),
+      // Task 2: commits, rollbacks, deadlocks and temp spill since the last
+      // poll — also carries no verdict (see database-activity.ts), so it
+      // joins activity and horizon above rather than the `results` list below.
+      runCheckFor(name, CHECKS.databaseActivity),
       // Beside the checks, not after them: it is one indexed read of the
       // store, and serialising it would add its latency to every poll.
       hygieneFor(name),
     ]);
+  // sampledAt is the server's own clock, read in the same statement as the
+  // counters `throughput` just carried — see lib/rates.ts for why that
+  // matters and ratesFor's own module-level Map for why this needs no store.
+  const rates = ratesFor(name, throughput);
 
   // When the database itself is gone, all nine checks fail with the SAME
   // reason and the SAME message, and the page rendered that message nine
@@ -345,7 +435,7 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
   // some checks failed for different reasons — one denied, one needing an
   // extension — is a page where each panel is saying something different, and
   // there the per-panel rendering is exactly right.
-  const results = [connections, sessionStates, blocked, longRunning, locks, wraparound, slots, queryStats, replication];
+  const results = [connections, sessionStates, blocked, longRunning, locks, wraparound, slots, queryStats, replication, standbyList];
   const failures = results.filter((r) => !r.ok);
   // `\0` and not a space: a space is ambiguous between reason "a" + message
   // "b c" and reason "a b" + message "c", which would call two different
@@ -383,24 +473,33 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
     );
   }
 
-  // See `blockedByRoot`. Empty when the lock check could not run, which
+  // See lib/stuck.ts. Empty when the lock check could not run, which
   // degrades to exactly the old behaviour — every long-running query treated
   // as slow — rather than to a claim that nothing is blocked.
-  const blockedBy = locks.ok ? blockedByRoot(locks.data.roots) : new Map<number, number>();
-  const stuck = longRunning.ok ? longRunning.data.queries.filter((q) => blockedBy.has(q.pid)) : [];
-  // Every long-running query on the page is a waiter from the chain above, so
-  // there is no separately slow query here at all — and the threshold's
-  // remedy ("terminating this backend usually frees work nobody is waiting
-  // for") is then false of every row it is sitting next to.
   //
-  // Dropping `crossed` is how it is withheld, because that is the field
-  // CheckPanel renders guidance from. Not a lie by omission: the panel says
-  // in its own words what is going on instead, and it says something the
-  // check could not have known — the check sees one catalog, the page sees
-  // two. The verdict and its badge are untouched, because "this query has
-  // been running 18m" remains true and remains worth escalating.
-  const allStuck = longRunning.ok && longRunning.data.queries.length > 0 && stuck.length === longRunning.data.queries.length;
-  const longRunningResult = allStuck && longRunning.ok ? { ...longRunning, crossed: undefined } : longRunning;
+  // Every long-running query on the page being a waiter means there is no
+  // separately slow query here at all — and the threshold's remedy
+  // ("terminating this backend usually frees work nobody is waiting for") is
+  // then false of every row it is sitting next to. Dropping `crossed` is how
+  // that guidance is withheld, because that is the field CheckPanel renders
+  // it from. Not a lie by omission: the panel says in its own words what is
+  // going on instead, and it says something the check could not have known —
+  // the check sees one catalog, the page sees two. The verdict and its badge
+  // are untouched, because "this query has been running 18m" remains true
+  // and remains worth escalating.
+  const { blockedBy, allStuck, longRunning: longRunningResult, locksUnavailable } = stuckFrom(longRunning, locks);
+
+  /**
+   * A17: every pid the lock chain accounts for, when there IS a loud chain.
+   *
+   * Three conditions, each load-bearing. `locks.ok`, because a fold keyed on
+   * a graph this console could not read would demote real verdicts on the
+   * strength of nothing. `needsAttention`, because a chain the page is not
+   * spending a card on is not a card for anything to fold under — the
+   * folded lines link to it. And computed HERE, once, so all four bands
+   * share one answer rather than each deriving its own.
+   */
+  const chain = locks.ok && needsAttention(locks) ? chainPids(locks) : new Set<number>();
 
   // The tab each band goes deeper into. Keyed by gate so a band cannot be
   // given the wrong link, and partial because `keep-up` has no route of its
@@ -447,7 +546,11 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
       `{ byState: {state, sessions, longestInStateSecs}[], oldestIdleInTxnSecs }`
       — corrected below to the compiler-verified field names.
     */
-    panel(CHECKS.sessionStates, 'Sessions by state', sessionStates, (d) => {
+    {
+      // A17: the session this verdict is about — B12 is what made it
+      // available. When it is the chain's root, this panel is the chain seen
+      // from gate 1 and folds under it.
+      ...panel(CHECKS.sessionStates, 'Sessions by state', sessionStates, (d) => {
       // One shared scale across every row, which is the entire reason
       // these are bars and not a stacked bar. Grafana's guidance is to
       // turn stacking off in most cases because it hides data, and the
@@ -457,6 +560,7 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
       // accurately.
       const peak = Math.max(1, ...d.byState.map((s) => s.sessions));
       return (
+        <>
         <ul className="grid gap-1.5 text-sm">
           {d.byState.map((s) => (
             // Every column FIXED except the track.
@@ -478,10 +582,31 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
             </li>
           ))}
         </ul>
+          {/*
+            B12: the session the verdict is about, reachable rather than
+            described. The threshold's remedy used to end "Sessions shows its
+            application_name", which sent an operator to go and look up an
+            identity this check already had and threw away.
+
+            Rendered only when there IS one: on a healthy database this panel
+            is a census and names nobody.
+          */}
+          {d.oldestIdleInTxnPid === null ? null : (
+            <p className="mt-2 text-sm text-muted-foreground">
+              <Link href={`/db/${name}/sessions#pid-${d.oldestIdleInTxnPid}`} className="font-mono underline underline-offset-4">
+                {d.oldestIdleInTxnPid}
+              </Link>
+              {d.oldestIdleInTxnApp === null ? '' : ` ${d.oldestIdleInTxnApp}`}
+              {' '}is the oldest idle in transaction
+            </p>
+          )}
+        </>
       );
     }, (d) => (
       <span>{d.byState.map((s) => `${formatCount(s.sessions)} ${s.state}`).join(' · ') || 'no sessions'}</span>
-    )),
+      )),
+      pid: sessionStates.ok ? sessionStates.data.oldestIdleInTxnPid : null,
+    },
 
     /*
       Plan defect (see task-8-report.md): the brief's Wraparound panel read
@@ -562,7 +687,10 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
       secondaryTo: 'Lock wait graph',
     },
 
-    panel(CHECKS.locks, 'Lock wait graph', locks, (d) => {
+    {
+      // A17: the card the folded lines link to. The chain is the incident;
+      // every panel that folds is a view of it from another gate.
+      ...panel(CHECKS.locks, 'Lock wait graph', locks, (d) => {
       // `1 root blocker(s)` was this panel's entire output, on the one
       // subject the product's own one-line pitch leads with. A count of
       // root blockers is the least useful fact about them: the operator
@@ -578,7 +706,7 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
           <p>
             {/* The one pid on this page presented as actionable, and
                 the one the remedy means: Sessions is where it ends. */}
-            <Link href={`/db/${name}/sessions`} className="font-mono font-medium underline underline-offset-4">
+            <Link href={`/db/${name}/sessions#pid-${root.pid}`} className="font-mono font-medium underline underline-offset-4">
               {root.pid}
             </Link>
             <span className="text-muted-foreground">
@@ -597,13 +725,54 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
       );
     }, (d) => (
       <span>{d.roots.length === 0 ? 'No blocking.' : plural(d.roots.length, 'root blocker')}</span>
+      )),
+      anchor: 'lock-wait-graph',
+    },
+
+    panel(CHECKS.activity, 'Active now', activity, (d) => (
+      <span>{formatCount(d.active)} active · {activeWaitSummary(d)}</span>
+    ), (d) => (
+      <span>{formatCount(d.active)} active · {activeWaitSummary(d, 3)}</span>
     )),
 
-    panel(CHECKS.longRunning, 'Long-running', longRunningResult, (d) =>
+    {
+      // A17: folds only when EVERY row is a waiter, which is `allStuck`.
+      //
+      // Keying this on the first row's pid alone was wrong, and the existing
+      // mixed-list test caught it: with one genuinely slow query and one
+      // waiter in the panel, the chain does not explain the panel, and
+      // folding it dropped the remedy that is correct for the slow one. That
+      // is the same mixed case the per-row "blocked by" markers below exist
+      // for, one level up.
+      //
+      // When `allStuck` does hold, `stuckFrom` has already rewritten the
+      // verdict to name the root, and the five-word link replaces the
+      // paragraph that used to explain the same thing.
+      ...panel(CHECKS.longRunning, 'Long-running', longRunningResult, (d) =>
       d.queries.length === 0
         ? <span>No long-running queries.</span>
         : (
           <>
+            {/* Above the rows, not only in the Lock wait graph band above:
+                this panel is the one whose rows lose their "blocked by"
+                marks when the wait graph cannot be read, and an operator
+                reading this band alone would see plain durations with
+                nothing connecting the absence to a failure elsewhere on the
+                page. Copy kept identical to the Sessions page's caveat —
+                same console, same fact, one sentence. */}
+            {locksUnavailable === null ? null : (
+              <p className="mb-2 max-w-prose text-sm">
+                <span className="font-medium">Cannot tell which of these are waiting — {locksUnavailable}. </span>
+                <span className="text-muted-foreground">
+                  The lock wait graph could not be read, so no row here is marked "blocked by"
+                  and this console cannot say whether these sessions are working or queued behind
+                  one another. Terminating them may kill sessions that would have finished on
+                  their own.{' '}
+                </span>
+                <Link href={`/db/${name}/locks`} className="underline underline-offset-4">Locks</Link>
+                <span className="text-muted-foreground"> has the reason.</span>
+              </p>
+            )}
             <ul className="grid gap-2 text-sm">
               {d.queries.map((q) => {
                 const root = blockedBy.get(q.pid);
@@ -623,7 +792,7 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
                       {/* Same reasoning as the suspect pid above: a pid this
                           page flags as a problem should be one click from
                           the row that can end it. */}
-                      <Link href={`/db/${name}/sessions`} className="font-mono underline underline-offset-4">
+                      <Link href={`/db/${name}/sessions#pid-${q.pid}`} className="font-mono underline underline-offset-4">
                         {q.pid}
                       </Link>
                       <span className="text-muted-foreground">
@@ -667,8 +836,31 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
             ) : null}
           </>
         ),
-      undefined,
-    ),
+      // A17: a compact line, which this panel did not have.
+      //
+      // `summary` was `undefined`, and a panel with no summary keeps its
+      // full renderer in the compact slot (see the `panel` docblock). So the
+      // first fold of this panel put two rows of pids and two statements
+      // into a one-line cell: the accent bar went away and the HEIGHT did
+      // not, which is half the defect A17 is about. Found by driving it, not
+      // by a test — jsdom computes no layout.
+      (d) => (
+        <span>
+          {d.queries.length === 0
+            ? 'none'
+            // `statement`, not `query`: the redaction guard matches the whole
+            // word `query` inside any brace span that RENDERS, and it is
+            // right to — the space of spellings that leak a statement is
+            // open, so the guard cannot afford to know this one is a count.
+            // The word is no worse here either way.
+            : `${plural(d.queries.length, 'statement')} · longest ${formatDuration(
+                Math.max(...d.queries.map((q) => q.runningSecs)),
+              )}`}
+        </span>
+      ),
+      ),
+      pid: allStuck && longRunningResult.ok ? longRunningResult.data.queries[0]?.pid ?? null : null,
+    },
 
     panel(CHECKS.queryStats, 'Query statistics', queryStats, (d) => {
       // `53 statement shape(s)` was the whole panel: a number that
@@ -701,17 +893,121 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
       return <span>{formatCount(d.totalShapes)} shapes{worst ? ` · worst ${formatMillis(worst.totalMs)} total` : ''}</span>;
     }),
 
+    // Task 2: commits, rollbacks, deadlocks and temp spill since the last
+    // poll. Compact-only by construction — `Throughput` (shared with the
+    // Queries page, components/throughput.tsx) is the only renderer this
+    // panel is given, so it never spends a full card even while escalated;
+    // a deadlock count is still carried in the critical ink inside it.
+    panel(CHECKS.databaseActivity, 'Throughput', throughput,
+      () => <Throughput rates={rates} />,
+      // The compact line is `Throughput compact`, not a span written here.
+      // This WAS such a span, and B11's own-share clause consequently
+      // reached the loud panel and the Queries page but not the one line
+      // this band actually renders — see the component's docblock.
+      () => <Throughput rates={rates} compact />),
+
+    {
+      // A17: the pid pinning the horizon, when a BACKEND is what pins it. A
+      // slot or a prepared transaction is not a session and no chain
+      // explains it, so those keep their own card.
+      ...panel(CHECKS.horizon, 'Oldest snapshot', horizon, (d) => {
+      // The furthest-back holder, whatever kind it is — same ranking the
+      // check's own verdict uses, so the panel never names a different
+      // holder than the one that set the badge.
+      const worst = d.holders[0];
+      if (!worst) return <span>Nothing pinned.</span>;
+      return (
+        <p className="text-sm">
+          {worst.kind === 'backend'
+            ? (
+              <Link href={`/db/${name}/sessions#pid-${worst.who}`} className="font-mono underline underline-offset-4">
+                {worst.who}
+              </Link>
+            )
+            : <span className="font-mono">{worst.who}</span>}
+          <span className="text-muted-foreground">
+            {' '}{worst.kind} pins the horizon {formatCount(worst.xminAge)} transactions back
+            {worst.ageSecs === null ? '' : ` · open ${formatDuration(worst.ageSecs)}`}
+          </span>
+        </p>
+      );
+    }, (d) => {
+      const worst = d.holders[0];
+      return (
+        <span>
+          {worst
+            ? `oldest snapshot ${formatCount(worst.xminAge)} transactions${worst.kind === 'backend' ? ` · pid ${worst.who}` : ` · ${worst.kind} ${worst.who}`}`
+            : 'nothing pinned'}
+        </span>
+      );
+      }),
+      pid: horizon.ok && horizon.data.holders[0]?.kind === 'backend'
+        ? Number(horizon.data.holders[0].who)
+        : null,
+    },
+
+    // B4: NOT `secondaryTo: 'Role and lag'`. The two measure different
+    // things — that one is this server's view of itself, this one is its
+    // view of everything streaming from it — so one being loud says nothing
+    // about whether the other should be.
+    panel(CHECKS.standbys, 'Standbys', standbyList, (d) => (
+      <ul className="grid gap-1 text-sm">
+        {d.standbys.length === 0
+          ? <li className="text-muted-foreground">No standbys are streaming from this server.</li>
+          : d.standbys.map((sb) => (
+            <li key={`${sb.app}-${sb.clientAddr ?? 'local'}`} className="flex flex-wrap items-baseline gap-x-2">
+              <span className="font-mono">{sb.app}</span>
+              <span className="text-muted-foreground">
+                {sb.state ?? 'state unknown'}
+                {' · replay '}
+                {/* Em dash, never a zero — see the check's own note. */}
+                {sb.replaySecs === null ? '—' : formatDuration(sb.replaySecs)}
+                {sb.replayBytes === null ? '' : ` · ${formatBytes(sb.replayBytes)} behind`}
+              </span>
+            </li>
+          ))}
+      </ul>
+    ), (d) => {
+      const timed = d.standbys.filter((sb) => sb.replaySecs !== null);
+      let worst = 0;
+      for (const sb of timed) if (sb.replaySecs !== null && sb.replaySecs > worst) worst = sb.replaySecs;
+      return (
+        <span>
+          {d.standbys.length === 0
+            ? 'no standbys'
+            : timed.length === 0
+              ? `${plural(d.standbys.length, 'standby', 'standbys')} · replay unknown`
+              : `${plural(d.standbys.length, 'standby', 'standbys')} · worst replay ${formatDuration(worst)}`}
+        </span>
+      );
+    }),
+
     panel(CHECKS.replicationLag, 'Role and lag', replication, (d) => (
       <span>
+        {/* B4: `receiving` first — a dead walreceiver reads 0s behind. */}
         {d.inRecovery === null
           ? 'role unknown'
           : d.inRecovery
-            ? d.lagSeconds === null
-              ? 'standby · nothing replayed yet'
-              : `standby · ${formatDuration(d.lagSeconds)} behind`
+            ? d.receiving === false
+              ? 'standby · NOT RECEIVING'
+              : d.lagSeconds === null
+                ? 'standby · nothing replayed yet'
+                : `standby · ${formatDuration(d.lagSeconds)} behind`
             : 'primary'}
-        {' · '}
-        {d.standbys === null ? 'standbys unknown' : `${formatCount(d.standbys)} streaming`}
+        {/*
+          Stage 4's re-plan overlap: this clause and the Standbys panel
+          above it said one fact twice — "no standbys" over
+          "primary · 0 streaming". Withheld rather than deleted, because
+          `standbys` requires pg_monitor and this check requires nothing, so
+          a restricted role has this as its only reading of the count. The
+          specialist owns the fact when it can report it.
+        */}
+        {standbyList.ok ? null : (
+          <>
+            {' · '}
+            {d.standbys === null ? 'standbys unknown' : `${formatCount(d.standbys)} streaming`}
+          </>
+        )}
       </span>
     )),
 
@@ -760,6 +1056,7 @@ export default async function Triage({ params }: { params: Promise<{ name: strin
           href={LINKS[gate]?.href}
           linkLabel={LINKS[gate]?.label}
           panels={panels.filter((p) => p.gate === gate)}
+          absorbed={chain}
           hygiene={<HygieneBand name={name} areas={byBand.get(gate) ?? []} />}
         />
       ))}

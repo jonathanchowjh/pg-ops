@@ -70,6 +70,15 @@ export interface LongRunningData {
 }
 
 /**
+ * The SQL floor, the warn threshold and the Sessions page's "Nothing running
+ * past …" sentence are three separate places that need to agree on the same
+ * number. Naming it once and importing it everywhere those three read it is
+ * what keeps them from drifting apart — a page that stated a floor the SQL
+ * didn't actually use would be lying about what it filtered.
+ */
+export const LONG_RUNNING_FLOOR_SECS = 60;
+
+/**
  * The floor is a parameter rather than a hardcoded 5 seconds: pgHero's
  * long_running_query_sec defaults to 60 (capability #9) and the shipped
  * code's 5 put ordinary reporting queries on the triage screen under a
@@ -102,7 +111,7 @@ const SQL = (o: LongRunningOpts) => ({
       AND now() - query_start >= make_interval(secs => $1)
     ORDER BY query_start ASC, pid
     LIMIT $2`,
-  values: [o.minSecs ?? 60, o.limit ?? 10],
+  values: [o.minSecs ?? LONG_RUNNING_FLOOR_SECS, o.limit ?? 10],
 });
 
 export const longRunning: Check<LongRunningRow, LongRunningData, LongRunningOpts> = {
@@ -130,7 +139,7 @@ export const longRunning: Check<LongRunningRow, LongRunningData, LongRunningOpts
     };
   },
   thresholds: [
-    { level: 'warn', value: 60, unit: 'seconds',
+    { level: 'warn', value: LONG_RUNNING_FLOOR_SECS, unit: 'seconds',
       because: 'pgHero #9 uses 60s as the definition of long-running; matching it keeps '
              + 'the two tools comparable on the same database',
       remedy: 'Check whether this query is normally slow or newly slow — Queries carries '

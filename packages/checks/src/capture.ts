@@ -1,5 +1,5 @@
 import { redactSecrets } from './redact.js';
-import { guardClient, messageOf } from './run.js';
+import { guardClient, messageOf, ownSql } from './run.js';
 import { HYGIENE_CHECK_IDS } from './checks/areas.js';
 import { CHECKS } from './registry.js';
 import { runCheck } from './run.js';
@@ -77,8 +77,7 @@ export type CaptureOutcome =
  * GRANT. Since `upsertQuery` does `DO UPDATE SET query = EXCLUDED.query`,
  * relying on that would have overwritten the store's durable text.
  */
-const QUERY_STATS_SQL = `
-SELECT s.queryid::text                AS queryid,
+const QUERY_STATS_SQL = ownSql(`SELECT s.queryid::text                AS queryid,
        max(s.query)                   AS query,
        sum(s.calls)::text             AS calls,
        sum(s.total_exec_time)         AS total_exec_time,
@@ -92,7 +91,7 @@ SELECT s.queryid::text                AS queryid,
    AND s.queryid IS NOT NULL
    AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
  GROUP BY s.queryid, i.stats_reset
-`;
+`);
 
 /**
  * Relation sizes for the space series. `pg_total_relation_size` includes
@@ -122,14 +121,13 @@ SELECT s.queryid::text                AS queryid,
  * declining to flatten it, which is not a property to hang "never store a
  * measurement pgops did not take" on.
  */
-const SPACE_SQL = `
-SELECT (n.nspname || '.' || c.relname)            AS relation,
+const SPACE_SQL = ownSql(`SELECT (n.nspname || '.' || c.relname)            AS relation,
        pg_total_relation_size(c.oid)::text        AS size_bytes
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE c.relkind IN ('r', 'm', 'p')
    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pgops')
-`;
+`);
 
 /**
  * One capture pass for one database. No timer, no process assumptions — the
@@ -374,11 +372,24 @@ export function checkResultRow(checkId: string, result: CheckResult<unknown>): S
   if (!result.ok) {
     return { checkId, ok: false, level: null, note: null, message: result.message };
   }
+  /**
+   * A7: a check that judges nothing can still have FOUND something, and
+   * until now that count stopped at the page nobody had opened. `found` is
+   * looked up on the check rather than passed in, because the caller is a
+   * loop over `CHECKS` that has the id and not the check.
+   *
+   * The cast is to a minimal structural type, not to the check's own:
+   * `CHECKS` is a heterogeneous record whose members have different `Data`
+   * types, so there is no single `Check<...>` this indexes to.
+   */
+  const check = CHECKS[checkId as keyof typeof CHECKS] as unknown as
+    { found?: (d: unknown) => string | null } | undefined;
   return {
     checkId,
     ok: true,
     level: result.verdict?.level ?? null,
-    note: result.verdict?.note ?? null,
+    // A verdict always wins — see `Check.found`.
+    note: result.verdict?.note ?? check?.found?.(result.data) ?? null,
     message: null,
   };
 }

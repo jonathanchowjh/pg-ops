@@ -15,7 +15,9 @@ const HEALTHY: Record<string, unknown> = {
       txnsUntilShutdown: 2_146_483_647, pctToForcedVacuum: 1,
     }],
   },
-  replicationLag: { inRecovery: false, lagSeconds: null, standbys: 0 },
+  horizon: { holders: [], truncated: false },
+  replicationLag: { inRecovery: false, lagSeconds: null, standbys: 0, receiving: null },
+  standbys: { standbys: [] },
   slots: { slots: [] },
   settings: {
     main: [{ name: 'shared_buffers', value: '128MB' }, { name: 'work_mem', value: '4MB' }],
@@ -49,11 +51,61 @@ const page = async () => {
 };
 
 describe('the cleanup page', () => {
-  it('renders the three checks the keep-up gate owns', async () => {
+  it('renders the four checks the keep-up gate owns', async () => {
     const out = (await page()).container.innerHTML;
     expect(out).toContain('Wraparound');
+    expect(out).toContain('Oldest snapshot');
     expect(out).toContain('Role and lag');
     expect(out).toContain('Replication slots');
+  });
+
+  /**
+   * The pid this check names is one click from the row that can end it —
+   * the same convention every other actionable pid on this console follows.
+   */
+  it('links a backend pinning the horizon to the session that can end it', async () => {
+    overrides.set('horizon', ok({
+      holders: [{
+        kind: 'backend', who: '4021', xminAge: 60_000_000, ageSecs: 900,
+        detail: 'batch-worker · idle in transaction',
+      }],
+      truncated: false,
+    }, { level: 'warn', note: 'backend 4021 pins the horizon 60000000 transactions back, open 15m' }));
+    const r = await page();
+    const link = r.container.querySelector('a[href="/db/prod/sessions#pid-4021"]');
+    expect(link).not.toBeNull();
+    expect(link!.textContent).toBe('4021');
+    expect(r.text()).toContain('batch-worker');
+  });
+
+  /**
+   * A partial list an operator knows is partial is useful; one they believe
+   * is complete is worse than nothing (Convention 6) — asserted in both
+   * directions, because a note that always renders is the same defect as one
+   * that never does.
+   */
+  it('says when the list of holders was clipped', async () => {
+    overrides.set('horizon', ok({
+      holders: [{
+        kind: 'backend', who: '4021', xminAge: 60_000_000, ageSecs: 900,
+        detail: 'batch-worker · idle in transaction',
+      }],
+      truncated: true,
+    }));
+    const r = await page();
+    expect(r.text()).toContain('Showing the ten furthest-back holders.');
+  });
+
+  it('says nothing about clipping when the list was not clipped', async () => {
+    overrides.set('horizon', ok({
+      holders: [{
+        kind: 'backend', who: '4021', xminAge: 60_000_000, ageSecs: 900,
+        detail: 'batch-worker · idle in transaction',
+      }],
+      truncated: false,
+    }));
+    const r = await page();
+    expect(r.text()).not.toContain('Showing the ten furthest-back holders.');
   });
 
   /**
@@ -74,14 +126,14 @@ describe('the cleanup page', () => {
    * without this, "never render a lag" passes by rendering nothing ever.
    */
   it('still reports a real lag when the server is a standby', async () => {
-    overrides.set('replicationLag', ok({ inRecovery: true, lagSeconds: 12, standbys: 0 }));
+    overrides.set('replicationLag', ok({ inRecovery: true, lagSeconds: 12, standbys: 0, receiving: true }));
     const r = await page();
     expect(r.text()).toContain('standby');
     expect(r.text()).toContain('12s');
   });
 
   it('distinguishes a standby that has replayed nothing from one that is caught up', async () => {
-    overrides.set('replicationLag', ok({ inRecovery: true, lagSeconds: null, standbys: 0 }));
+    overrides.set('replicationLag', ok({ inRecovery: true, lagSeconds: null, standbys: 0, receiving: true }));
     const r = await page();
     expect(r.text()).toContain('nothing replayed yet');
   });
@@ -160,5 +212,126 @@ describe('the cleanup page', () => {
     const out = (await page()).container.innerHTML;
     expect(out).toContain('permission denied for view pg_replication_slots');
     expect(out).not.toContain('None configured.');
+  });
+});
+
+/**
+ * B4. The keep-up gate had no replication judgement at all: `replicationLag`
+ * carries no threshold, so a standby arbitrarily far behind never escalated
+ * on the band titled "can the server keep up with what already committed".
+ */
+describe('the cleanup page — standbys as the primary sees them', () => {
+  const sb = (over: Record<string, unknown> = {}) => ({
+    app: 'replica-1', clientAddr: '10.0.0.2', state: 'streaming', syncState: 'async',
+    writeSecs: 0.1, flushSecs: 0.2, replaySecs: 45, sentBytes: 0, replayBytes: 4096, ...over,
+  });
+
+  it('lists each standby with every stage of its lag', async () => {
+    overrides.set('standbys', ok({ standbys: [sb()] }, { level: 'warn', note: 'replica-1 is 45s behind' }));
+    const r = await page();
+    const t = r.text();
+    expect(t).toContain('replica-1');
+    expect(t).toContain('streaming');
+    expect(t).toContain('45s');
+  });
+
+  /**
+   * The rule the check is built around, carried through to the pixel: a lag
+   * this role cannot read renders as an em dash, never as a zero. A role
+   * without pg_monitor reads another user's walsender as NULL, and "0s
+   * behind" would be a claim about a standby nobody looked at.
+   */
+  it('renders an unreadable lag as unknown, never as caught up', async () => {
+    overrides.set('standbys', ok({ standbys: [sb({ replaySecs: null, writeSecs: null, flushSecs: null })] }));
+    const r = await page();
+    expect(r.text()).toContain('—');
+    expect(r.text()).not.toContain('0s');
+  });
+
+  it('says a primary has no standbys rather than rendering an empty table', async () => {
+    const r = await page();
+    expect(r.text()).toContain('No standbys are streaming from this server');
+  });
+
+  /**
+   * And when the detail could not be read, the panel must not look like a
+   * primary with nothing attached — the distinction this console exists to
+   * keep. Through `CheckPanel`'s own UNAVAILABLE rendering, not a sentence
+   * written here: the task brief specified a bespoke "Standby detail
+   * unavailable — {reason}" line, which would be a second spelling of the
+   * failure state every other panel on this page already renders one way.
+   */
+  it('does not read as "no standbys" when the standby detail could not be read', async () => {
+    overrides.set('standbys', { ok: false, reason: 'privilege', message: 'permission denied' });
+    const r = await page();
+    expect(r.text()).toContain('UNAVAILABLE');
+    expect(r.text()).toContain('permission denied');
+    expect(r.text()).not.toContain('No standbys are streaming');
+  });
+
+  /**
+   * B4, standby side. `lagSeconds: 0` means "I have replayed everything I
+   * received", which is also exactly what a dead walreceiver looks like. One
+   * word stops a broken standby reading as a perfect one.
+   */
+  it('says a standby is not receiving rather than showing it caught up', async () => {
+    overrides.set('replicationLag', ok({ inRecovery: true, lagSeconds: 0, standbys: 0, receiving: false }));
+    const r = await page();
+    const t = r.text();
+    expect(t).toMatch(/not receiving/i);
+    expect(t).not.toContain('0s behind');
+  });
+
+  it('says nothing about receiving on a primary, which has no walreceiver', async () => {
+    const r = await page();
+    expect(r.text()).not.toMatch(/not receiving/i);
+  });
+});
+/**
+ * Stage 4's re-plan overlap. Driving the closed stage at 390px, these two
+ * panels sat adjacent and said the same thing:
+ *
+ *   Role and lag   This server is a primary · replication lag does not apply · 0 streaming
+ *   Standbys       No standbys are streaming from this server.
+ *
+ * "0 streaming" and that sentence are one fact in two consecutive panels,
+ * one of which B4 had just added — the overlap the programme's re-plan step
+ * exists to cut.
+ *
+ * Cut CONDITIONALLY rather than outright, which is the part worth recording.
+ * The obvious fix is to delete the clause, and it is wrong: `replicationLag`
+ * declares no `requires`, while `standbys` declares
+ * `requires: [{ kind: 'role', name: 'pg_monitor' }]`. So on a role without
+ * pg_monitor the Standbys panel is UNAVAILABLE and Role and lag is the only
+ * thing that can report the count at all — deleting the clause would lose it
+ * exactly where it is the only source.
+ *
+ * The rule is therefore: the specialist speaks when it can, the generalist
+ * fills in when it cannot.
+ */
+describe('the cleanup page — the standby count has one owner', () => {
+  it('leaves the count to the Standbys panel when that panel can speak', async () => {
+    overrides.set('replicationLag', ok({ inRecovery: false, lagSeconds: null, standbys: 2, receiving: null }));
+    overrides.set('standbys', ok({ standbys: [] }));
+    const t = (await page()).text();
+    expect(t).toContain('This server is a primary');
+    expect(t).not.toContain('2 streaming');
+    expect(t).not.toContain('streaming from this server · ');
+  });
+
+  it('reports the count itself when the Standbys panel could not be read', async () => {
+    overrides.set('replicationLag', ok({ inRecovery: false, lagSeconds: null, standbys: 2, receiving: null }));
+    overrides.set('standbys', { ok: false, reason: 'privilege', message: 'permission denied' });
+    const t = (await page()).text();
+    // The one case the clause exists for: pg_monitor is missing, the
+    // specialist is UNAVAILABLE, and this is the only reading of how many
+    // standbys are attached.
+    expect(t).toContain('2 streaming');
+  });
+
+  it('never launders an unreadable count into zero', async () => {
+    overrides.set('replicationLag', ok({ inRecovery: false, lagSeconds: null, standbys: null, receiving: null }));
+    overrides.set('standbys', { ok: false, reason: 'privilege', message: 'permission denied' });
+    expect((await page()).text()).toContain('standbys unknown');
   });
 });

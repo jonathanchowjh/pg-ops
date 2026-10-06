@@ -146,8 +146,24 @@ WITH act AS MATERIALIZED (
 )
 SELECT a.pid, a.usename, a.app, a.state, a.query, a.backend_start,
        a.xact_age_secs, a.blocked_by,
-       (SELECT string_agg(DISTINCT l.mode, ',') FROM pg_locks l
-         WHERE l.pid = a.pid AND NOT l.granted) AS waiting_mode,
+       -- ORDER BY l.mode: without it, a waiter queued on two ungranted locks
+       -- of different modes (a real case — see apps/web's locks/page.tsx
+       -- comment on the DDL marker) gets this aggregate's row order from the
+       -- planner, which is free to change it between two otherwise-identical
+       -- 5-second polls. That made a stable wait render as if the modes it
+       -- wants had changed, with nothing on the server actually different.
+       -- Closing paren on its own line, deliberately (see boundaries.test.ts's
+       -- "never sorts a ::text-cast column by its own text alias"): that
+       -- guard bounds an ORDER BY clause by the next LIMIT or a closing paren
+       -- starting a line, and every paren in this statement otherwise closes
+       -- on the same line as its last argument — an inlined 'ORDER BY l.mode)'
+       -- has neither ahead of it before the outer LIMIT, so the guard's slice
+       -- would run past this clause into l.relation::regclass::text below
+       -- and flag a numeric-looking alias it never actually sorts by.
+       (SELECT string_agg(DISTINCT l.mode, ',' ORDER BY l.mode)
+          FROM pg_locks l
+         WHERE l.pid = a.pid AND NOT l.granted
+       ) AS waiting_mode,
        (SELECT string_agg(DISTINCT l.relation::regclass::text, ',') FROM pg_locks l
          WHERE l.pid = a.pid AND NOT l.granted AND l.relation IS NOT NULL) AS waiting_on,
        (SELECT EXTRACT(EPOCH FROM (now() - COALESCE(min(l.waitstart), now())))::text
@@ -243,16 +259,28 @@ export function buildChains(rows: LockRow[]): RootBlocker[] {
   // the view read "no lock contention" during a live deadlock — the one moment
   // this check exists for. Seed one entry point per cycle (lowest pid); the
   // `cycle` flag on the back-edge is what names it a deadlock.
-  if (roots.length === 0 && rows.length > 0) {
-    const covered = new Set<number>();
-    const collect = (ws: Waiter[]) => { for (const w of ws) { covered.add(w.pid); collect(w.waiters); } };
-    for (const pid of [...children.keys()].sort((a, b) => a - b)) {
-      if (covered.has(pid) || !byPid.has(pid)) continue;
-      const root = makeRoot(pid);
-      covered.add(pid);
-      collect(root.waiters);
-      roots.push(root);
-    }
+  //
+  // B8: this pass used to be gated on `roots.length === 0`, which asks "did
+  // this database produce no unblocked session at all" when the question is
+  // "is every blocked session covered by some tree". A deadlock is a property
+  // of one connected component, and components are independent: one ordinary
+  // chain anywhere else in the database answered the global question and the
+  // cycle was dropped from `roots` entirely. Its sessions are `children` keys
+  // with blockers, so they are roots of nothing and waiters under nobody —
+  // absent from the tree, from `countDistinctWaiters`, from `longestWaitSecs`
+  // and from the verdict, while Postgres was within `deadlock_timeout` of
+  // aborting one of them. So the pass runs always, and `covered` carries the
+  // ordinary roots and their whole subtrees to keep it from re-seeding a pid
+  // that is already in the forest.
+  const covered = new Set<number>();
+  const collect = (ws: Waiter[]) => { for (const w of ws) { covered.add(w.pid); collect(w.waiters); } };
+  for (const root of roots) { covered.add(root.pid); collect(root.waiters); }
+  for (const pid of [...children.keys()].sort((a, b) => a - b)) {
+    if (covered.has(pid) || !byPid.has(pid)) continue;
+    const root = makeRoot(pid);
+    covered.add(pid);
+    collect(root.waiters);
+    roots.push(root);
   }
 
   return roots.sort((a, b) => b.totalWaiters - a.totalWaiters || a.pid - b.pid);
@@ -320,8 +348,51 @@ export function countDistinctWaiters(roots: RootBlocker[]): number {
       collect(w.waiters);
     }
   };
-  for (const root of roots) collect(root.waiters);
+  for (const root of roots) {
+    // B8: a root is normally the session doing the blocking, not one stuck
+    // behind it, and must not count. The exception is a deadlock's seeded
+    // root: every session in a cycle is waiting, so the one `buildChains`
+    // picked as an entry point is a stuck session too — and the only node in
+    // its tree the waiter walk below never reaches, since it appears there
+    // solely as the `cycle` back-edge this walk skips. Skipping it as well
+    // reported a two-session deadlock as one blocked session, on the exact
+    // quantity `verdict` escalates on.
+    //
+    // `waitSecs` is the difference, and it is the documented one: null for a
+    // root that holds no ungranted lock, a real number for one that is
+    // itself waiting (see `Waiter.waitSecs`). During the brief window where
+    // `pg_locks.waitstart` is still NULL for a wait that has only just
+    // begun, this undercounts by one, which is the same bound every other
+    // reading of that column in this file carries.
+    if (root.waitSecs != null) pids.add(root.pid);
+    collect(root.waiters);
+  }
   return pids.size;
+}
+
+/**
+ * Every pid in the wait graph that is WAITING, mapped to the root blocker it
+ * is ultimately queued behind. A `cycle` edge is not recursed into.
+ *
+ * This is the join that lets a page say "blocked by 9401" beside a session
+ * that pg_stat_activity reports as `active`, and it lives here so that every
+ * page renders the same answer.
+ */
+export function blockedByRoot(roots: readonly RootBlocker[]): Map<number, number> {
+  const out = new Map<number, number>();
+  const walk = (waiters: readonly Waiter[], root: number): void => {
+    for (const w of waiters) {
+      out.set(w.pid, root);
+      if (!w.cycle) walk(w.waiters, root);
+    }
+  };
+  for (const r of roots) walk(r.waiters, r.pid);
+  return out;
+}
+
+/** Root pid → how many sessions are queued behind it. */
+export function blockingCounts(roots: readonly RootBlocker[]): Map<number, number> {
+  return new Map(roots.map((r) => [r.pid, r.totalWaiters]));
 }
 
 export const locks: Check<LockRow, LocksData> = {

@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { homedir, hostname, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { redactSecrets } from '../redact.js';
@@ -159,4 +159,65 @@ export async function writeAudit(
   } catch (err) {
     console.error(`pgops: failed to write audit log to ${path}:`, err);
   }
+}
+
+/**
+ * Result of `readRecentAudit`: the records, and why the file could not be
+ * read when it couldn't.
+ *
+ * `unreadable` carries the SAME distinction `locksUnavailable` carries for
+ * the lock graph (apps/web/lib/stuck.ts): "no history" and "could not read
+ * the history" must never collapse onto one empty-looking panel, because
+ * this log is the only record of who terminated what — an operator reading
+ * silence here is an operator concluding nothing was done, when in fact the
+ * accountability trail is the thing that broke. A missing file (ENOENT) is
+ * legitimately an empty history and stays `null`; anything else that keeps
+ * the read from happening — a permission error, a directory where a file
+ * should be, any other I/O error — is said, not swallowed.
+ */
+export interface RecentAudit {
+  records: AuditRecord[];
+  /** Null when the file was read (or was simply absent). Otherwise a short reason, e.g. an fs error code like "EACCES". */
+  unreadable: string | null;
+}
+
+/**
+ * The last few audit records for one database, newest first.
+ *
+ * Reads the same file `writeAudit` appends to, so there is no second copy of
+ * the record and nothing to keep in step. Per host: a console with several
+ * replicas sees only its own file, and the page that renders this says so.
+ * Never throws — a missing file is an empty history, a corrupt line is
+ * skipped — because it renders on the incident page and must not take it
+ * down. A read failure that is NOT a missing file is reported through
+ * `unreadable` rather than folded into the same `[]` a clean empty history
+ * produces — see `RecentAudit` above.
+ */
+export async function readRecentAudit(
+  opts: { database: string; limit?: number; path?: string },
+): Promise<RecentAudit> {
+  const limit = opts.limit ?? 10;
+  let text: string;
+  try {
+    text = await readFile(opts.path ?? defaultAuditPath(), 'utf8');
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    if (code === 'ENOENT') return { records: [], unreadable: null };
+    return { records: [], unreadable: code ?? 'error' };
+  }
+  const out: AuditRecord[] = [];
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0 && out.length < limit; i--) {
+    const line = lines[i]!.trim();
+    if (line === '') continue;
+    let rec: AuditRecord;
+    try {
+      rec = JSON.parse(line) as AuditRecord;
+    } catch {
+      continue;
+    }
+    if (rec?.target?.database !== opts.database) continue;
+    out.push(rec);
+  }
+  return { records: out, unreadable: null };
 }

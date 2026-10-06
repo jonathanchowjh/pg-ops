@@ -281,3 +281,76 @@ describe('the README parity claims', () => {
     }
   });
 });
+
+/**
+ * A18. The README had grown to 3,935 words and opened with 330 words of
+ * design rationale before the first instruction — so the document a reader
+ * opens to find out what this is and how to run it made them read an essay
+ * first, and the one asking "which environment variable" scrolled past four
+ * sections of it.
+ *
+ * Split into a pitch plus an operator manual, with the design record moved
+ * to CONTRIBUTING, where the people it is written for already are.
+ *
+ * Held by a guard rather than by remembering, which is this repository's own
+ * stated rule and the reason the parity numbers above are checked here too:
+ * prose drifts back silently, and the README is the one file every
+ * contributor edits and nobody reviews for length.
+ *
+ * The numbers are ceilings, not targets. They fail on a README that grew,
+ * never on one that got shorter.
+ */
+describe('the README is a pitch and a manual, not an essay', () => {
+  // Read here rather than reusing the binding in the parity block above:
+  // that one is scoped to its own describe.
+  const README = readFileSync(new URL('../../../README.md', import.meta.url), 'utf8');
+  const words = (s: string): number => s.trim().split(/\s+/).filter((w) => w !== '').length;
+
+  it('pitches in under 150 words, before the first heading', () => {
+    // Everything above the first `##`, minus the `# pgops` title line.
+    const body = README.slice(README.indexOf('\n')).split(/^## /m)[0]!;
+    expect(words(body)).toBeLessThanOrEqual(150);
+  });
+
+  it('is under 1,800 words in total', () => {
+    expect(words(README)).toBeLessThanOrEqual(1_800);
+  });
+
+  /**
+   * The split is only real if the design record actually landed somewhere.
+   * Without this, deleting those sections outright would pass both counts
+   * above while losing the reasoning — which is the opposite of the
+   * intended change, and the exact failure mode "move it to CONTRIBUTING"
+   * invites.
+   */
+  it('keeps the design record, in CONTRIBUTING', () => {
+    const contributing = readFileSync(new URL('../../../CONTRIBUTING.md', import.meta.url), 'utf8');
+    for (const claim of [
+      // The four gates' causal order: the console's organising model.
+      'symptoms run up',
+      // Why capture stores cumulative values instead of resetting.
+      'never resets',
+      // The five declines, by the capability each one names.
+      'kill_all',
+      'autoindex',
+      // The deliberate divergences from pgHero.
+      'null` on a primary',
+    ]) {
+      expect(contributing, `CONTRIBUTING must carry: ${claim}`).toContain(claim);
+    }
+  });
+
+  /**
+   * And the manual must still answer the operator's questions. A split that
+   * moved these to CONTRIBUTING would pass the word counts and leave the
+   * person deploying pgops reading a contributor guide.
+   */
+  it('keeps the operator manual in the README', () => {
+    for (const heading of [
+      '## Quick start', '## Configuration', '## Database permissions',
+      '## Pages', '## Safety model', '## Parity with pgHero',
+    ]) {
+      expect(README, `README must keep: ${heading}`).toContain(heading);
+    }
+  });
+});

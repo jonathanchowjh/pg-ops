@@ -107,3 +107,37 @@ describe('ExplainForm', () => {
     expect(r.text()).toContain('Failed to fetch');
   });
 });
+
+/**
+ * A9's receiving half. The handoff is read AFTER mount, not as the initial
+ * state: this is a client component inside a server-rendered page, so an
+ * initial-state read would make the server's render and the first client
+ * render disagree and trip hydration.
+ *
+ * It is also CLEARED on read. The key is a one-shot handoff, not a draft —
+ * left in place, every later visit to this page would silently replace
+ * whatever the operator had typed with a statement they clicked once.
+ */
+describe('ExplainForm — the handoff from a query row', () => {
+  it('starts with the handed-off statement and clears the handoff', async () => {
+    sessionStorage.setItem('pgops.explain', 'SELECT 2');
+    const r = await render(<ExplainForm name="prod" />);
+    expect((r.container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('SELECT 2');
+    expect(sessionStorage.getItem('pgops.explain')).toBeNull();
+    r.unmount();
+  });
+
+  it('starts empty when nothing was handed over', async () => {
+    sessionStorage.clear();
+    const r = await render(<ExplainForm name="prod" />);
+    expect((r.container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('');
+    r.unmount();
+  });
+
+  it('renders rather than throwing when storage is blocked', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    const r = await render(<ExplainForm name="prod" />);
+    expect(r.container.querySelector('textarea')).not.toBeNull();
+    r.unmount();
+  });
+});

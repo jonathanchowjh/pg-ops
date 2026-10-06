@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { replicationLag } from '../src/checks/replication.js';
 
 describe('replicationLag', () => {
-  const primary = { in_recovery: false, lag_seconds: null, standbys: 2 };
+  // `receiving` is null on a primary: it has no walreceiver to report on.
+  const primary = { in_recovery: false, lag_seconds: null, standbys: 2, receiving: null };
 
   it('reports a primary with standbys attached', () => {
     expect(replicationLag.map([primary])).toEqual({
-      inRecovery: false, lagSeconds: null, standbys: 2,
+      inRecovery: false, lagSeconds: null, standbys: 2, receiving: null,
     });
   });
 
@@ -23,14 +24,14 @@ describe('replicationLag', () => {
   });
 
   it('reports zero lag on a caught-up standby', () => {
-    const caughtUp = { in_recovery: true, lag_seconds: 0, standbys: 0 };
+    const caughtUp = { in_recovery: true, lag_seconds: 0, standbys: 0, receiving: true };
     expect(replicationLag.map([caughtUp]).lagSeconds).toBe(0);
   });
 
   it('reports a lagging standby in seconds', () => {
-    const behind = { in_recovery: true, lag_seconds: 12.5, standbys: 0 };
+    const behind = { in_recovery: true, lag_seconds: 12.5, standbys: 0, receiving: true };
     expect(replicationLag.map([behind])).toEqual({
-      inRecovery: true, lagSeconds: 12.5, standbys: 0,
+      inRecovery: true, lagSeconds: 12.5, standbys: 0, receiving: true,
     });
   });
 
@@ -46,12 +47,45 @@ describe('replicationLag', () => {
 
   it('reports every field unknown when there is no row at all', () => {
     expect(replicationLag.map([])).toEqual({
-      inRecovery: null, lagSeconds: null, standbys: null,
+      inRecovery: null, lagSeconds: null, standbys: null, receiving: null,
     });
   });
 
   it('never escalates — pgHero has no lag threshold and neither do we', () => {
     expect(replicationLag.verdict).toBeUndefined();
     expect(replicationLag.thresholds).toBeUndefined();
+  });
+});
+
+/**
+ * B4, standby side. `lag_seconds` is 0 when
+ * `pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()` — "I have replayed
+ * everything I received", which is pgHero's caught-up test and the right one
+ * for a healthy standby.
+ *
+ * It is also exactly what a DEAD walreceiver looks like: nothing arriving,
+ * nothing left to replay, so a standby that lost its connection to the
+ * primary hours ago reads 0 seconds behind. Beside a standbys check that now
+ * judges lag, that reading is the one remaining way for this gate to call a
+ * broken standby perfect.
+ */
+describe('replicationLag — a standby that is not receiving', () => {
+  it('reports whether a walreceiver is running, and only on a standby', () => {
+    expect(replicationLag.map([{ in_recovery: true, lag_seconds: 0, standbys: 0, receiving: false }]).receiving)
+      .toBe(false);
+    expect(replicationLag.map([{ in_recovery: true, lag_seconds: 0, standbys: 0, receiving: true }]).receiving)
+      .toBe(true);
+    // A primary has no walreceiver to report on, which is not the same as
+    // having a dead one.
+    expect(replicationLag.map([{ in_recovery: false, lag_seconds: null, standbys: 2, receiving: null }]).receiving)
+      .toBeNull();
+  });
+
+  it('reads an unreadable row as unknown rather than as not receiving', () => {
+    expect(replicationLag.map([]).receiving).toBeNull();
+  });
+
+  it('asks the catalog that answers it', () => {
+    expect(replicationLag.sql as string).toContain('pg_stat_wal_receiver');
   });
 });

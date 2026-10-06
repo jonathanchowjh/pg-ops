@@ -8,6 +8,29 @@ import { redactSecrets } from '@pgops/checks';
  * through one component makes the rule mechanically checkable: Task 11's guard
  * asserts that no page renders a `query` field outside this component.
  */
+/**
+ * A statement safe to put anywhere: collapsed to ONE LINE, then redacted.
+ *
+ * That order is the whole point, and it is why this is a function rather
+ * than two calls at each site. `redactSecrets`'s quoted-literal rules are
+ * scoped to a single line on purpose — an unterminated literal must not
+ * swallow a document up to some unrelated apostrophe — so a secret split
+ * across two lines gets only its first line masked:
+ *   ALTER USER app WITH PASSWORD 'hun\nter2';  ->  … PASSWORD ***\nter2';
+ *
+ * Exported because `Sql` is not the only thing that needs it. Anything
+ * handed to a CLIENT component is serialised into the RSC payload embedded
+ * in the page, before that component runs — so a client component cannot
+ * redact its own props, and the call site must. `ExplainLink` is the case
+ * that proved it: A9 passed `pg_stat_statements` text straight through and
+ * `routes.int.test.ts` caught a real password in the HTML of
+ * `/db/<name>/queries`. The guard in test/guards.test.ts requires this
+ * function at every such call site.
+ */
+export function safeStatement(text: string): string {
+  return redactSecrets(text.replace(/\s+/g, ' ').trim());
+}
+
 export function Sql({ children }: { children: string | null | undefined }) {
   if (children == null) return <span>—</span>;
 
@@ -26,7 +49,7 @@ export function Sql({ children }: { children: string | null | undefined }) {
   // Lossless for the reader either way: a rendered statement is wrapped and
   // clamped, never laid out as source, so the newlines were never visible as
   // newlines.
-  const oneLine = children.replace(/\s+/g, ' ').trim();
+  const oneLine = safeStatement(children);
   if (oneLine === '') return <span>—</span>;
 
   // CLAMPED, NOT SCROLLED, and the reason is a rule in the overflow spec
@@ -54,7 +77,7 @@ export function Sql({ children }: { children: string | null | undefined }) {
   // element had never done.
   return (
     <code className="line-clamp-2 max-w-full font-mono text-xs break-words whitespace-normal">
-      {redactSecrets(oneLine)}
+      {oneLine}
     </code>
   );
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildChains, countDistinctWaiters, locks, longestWaitSecs,
+  blockedByRoot, blockingCounts, buildChains, countDistinctWaiters, locks, longestWaitSecs,
   type LockRow, type Waiter,
 } from '../src/checks/locks.js';
 
@@ -73,6 +73,56 @@ describe('buildChains', () => {
     expect(roots.every((r) => r.waiters.some((w) => w.pid === 20))).toBe(true);
     expect(roots.every((r) => r.totalWaiters === 1)).toBe(true);
     expect(countDistinctWaiters(roots)).toBe(1);
+  });
+
+  /**
+   * B8, second half. In a deadlock every session in the ring is waiting, and
+   * `buildChains` seeds one of them as a root because no unblocked session
+   * exists to be one. That seeded root is a stuck session — it is the only
+   * node in its own tree that the waiter walk never reaches — so a count
+   * that skips every root under-reported a two-session deadlock as one
+   * blocked session, on the quantity `verdict` escalates on.
+   *
+   * A root that is genuinely unblocked still must not count: it is the
+   * session doing the blocking, not one of the sessions stuck behind it.
+   * `waitSecs` is the documented difference (see `Waiter.waitSecs`) — null
+   * for an unblocked root, a real number for one that is itself waiting.
+   */
+  it('counts a seeded cycle root, which is itself a stuck session', () => {
+    expect(countDistinctWaiters(buildChains([row(1, [2]), row(2, [1])]))).toBe(2);
+  });
+
+  it('does not count an unblocked root as one of the sessions stuck behind it', () => {
+    expect(countDistinctWaiters(buildChains([row(1, []), row(2, [1])]))).toBe(1);
+  });
+
+  /**
+   * B8. Cycle seeding used to be gated on `roots.length === 0`, which asks
+   * "did this whole database produce no unblocked session" when the question
+   * is "is every blocked session covered by some tree". One ordinary chain
+   * anywhere in the graph answered the first question and hid every deadlock
+   * in the database: pids 3 and 4 below are `children` keys with blockers, so
+   * they are roots of nothing and waiters under nobody, and they vanished
+   * from the view with the kill button while Postgres was about to abort one
+   * of them.
+   */
+  it('seeds a cycle even when an unrelated ordinary root exists', () => {
+    // 1 blocks 2. Separately and independently, 3 and 4 block each other.
+    const roots = buildChains([row(1, []), row(2, [1]), row(3, [4]), row(4, [3])]);
+    expect(roots.map((r) => r.pid).sort((a, b) => a - b)).toEqual([1, 3]);
+    const ring = roots.find((r) => r.pid === 3)!;
+    expect(ring.waiters[0]!.pid).toBe(4);
+    expect(ring.waiters[0]!.waiters[0]!.cycle).toBe(true);
+    expect(ring.waiters[0]!.waiters[0]!.pid).toBe(3);
+  });
+
+  it('does not re-seed an ordinary root as a cycle entry point', () => {
+    // The seeding pass now runs unconditionally, so it must treat the
+    // ordinary roots and everything under them as already covered. Without
+    // that, pid 1 is a `children` key and would be appended a second time.
+    const roots = buildChains([row(1, []), row(2, [1])]);
+    expect(roots).toHaveLength(1);
+    expect(roots[0]!.pid).toBe(1);
   });
 
   it('does not crash when a referenced blocker has no row of its own', () => {
@@ -229,5 +279,29 @@ describe('locks.requires', () => {
    */
   it('declares the PG14 floor its waitstart column needs', () => {
     expect(locks.requires).toContainEqual({ kind: 'version', min: 140000 });
+  });
+});
+
+describe('blockedByRoot / blockingCounts', () => {
+  // 9401 holds; 9403 waits on 9401; 9402 waits on 9403.
+  const rows = [
+    row(9401, []), row(9403, [9401]), row(9402, [9403]),
+  ];
+  const roots = buildChains(rows);
+
+  it('maps every waiter, at any depth, to the root of its chain', () => {
+    const m = blockedByRoot(roots);
+    expect(m.get(9403)).toBe(9401);
+    expect(m.get(9402)).toBe(9401);
+    expect(m.has(9401)).toBe(false);
+  });
+
+  it('counts waiters per root', () => {
+    expect(blockingCounts(roots).get(9401)).toBe(2);
+  });
+
+  it('does not recurse into a cycle edge', () => {
+    const cyc = buildChains([row(1, [2]), row(2, [1])]);
+    expect(() => blockedByRoot(cyc)).not.toThrow();
   });
 });

@@ -1,6 +1,7 @@
 import type { CheckContext } from '../types.js';
 // Type-only: explain.ts imports adviseOn from here, so a value import back would be a cycle.
 import type { PlanNode } from './explain.js';
+import { ownSql } from '../run.js';
 
 /**
  * Index advice, read from the planner's own plan — P6's answer to the
@@ -335,19 +336,17 @@ export function chooseIndex(scan: Scan, facts: RelationFacts | undefined): Index
 const RELATIONS = 'unnest($1::text[], $2::text[]) AS r(schema, relname)';
 
 // reltuples is -1 before the first ANALYZE on PG 14+; 0 stands in for pgHero's `to_i`.
-const ROWS_SQL = `
-SELECT n.nspname::text AS schema, c.relname::text AS relname, greatest(c.reltuples, 0)::float8 AS rows
+const ROWS_SQL = ownSql(`SELECT n.nspname::text AS schema, c.relname::text AS relname, greatest(c.reltuples, 0)::float8 AS rows
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-JOIN ${RELATIONS} ON r.schema = n.nspname AND r.relname = c.relname`;
+JOIN ${RELATIONS} ON r.schema = n.nspname AND r.relname = c.relname`);
 
 // NOT inherited: the scan is of this relation, not of its inheritance tree.
-const STATS_SQL = `
-SELECT s.schemaname::text AS schema, s.tablename::text AS relname, s.attname::text AS column,
+const STATS_SQL = ownSql(`SELECT s.schemaname::text AS schema, s.tablename::text AS relname, s.attname::text AS column,
        s.null_frac::float8 AS null_frac, s.n_distinct::float8 AS n_distinct
 FROM pg_stats s
 JOIN ${RELATIONS} ON r.schema = s.schemaname AND r.relname = s.tablename
-WHERE NOT s.inherited`;
+WHERE NOT s.inherited`);
 
 /**
  * Every valid, non-partial index on the relations named, one key column per
@@ -359,8 +358,7 @@ WHERE NOT s.inherited`;
  * 1-based. Divergence D6: an invalid index serves nothing, and a partial one
  * covers only the rows its predicate admits, so neither counts as covering.
  */
-const INDEXES_SQL = `
-SELECT n.nspname::text AS schema, t.relname::text AS relname, ic.relname::text AS name, am.amname::text AS using,
+const INDEXES_SQL = ownSql(`SELECT n.nspname::text AS schema, t.relname::text AS relname, ic.relname::text AS name, am.amname::text AS using,
        array(SELECT pg_get_indexdef(i.indexrelid, k, true)
                FROM generate_series(1, i.indnkeyatts) k ORDER BY k) AS keys,
        array(SELECT CASE WHEN o.opcdefault THEN '' ELSE o.opcname::text END
@@ -373,7 +371,7 @@ JOIN pg_namespace n ON n.oid = t.relnamespace
 JOIN pg_class ic ON ic.oid = i.indexrelid
 JOIN pg_am am ON am.oid = ic.relam
 JOIN ${RELATIONS} ON r.schema = n.nspname AND r.relname = t.relname
-WHERE i.indisvalid AND i.indpred IS NULL`;
+WHERE i.indisvalid AND i.indpred IS NULL`);
 
 const WHOLE_IDENT = new RegExp(`^${IDENT}$`);
 const keyOf = (schema: string, table: string) => JSON.stringify([schema, table]);

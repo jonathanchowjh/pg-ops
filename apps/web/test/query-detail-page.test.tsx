@@ -153,3 +153,31 @@ describe('/queries/[queryid]', () => {
       .not.toContain('Refresh');
   });
 });
+
+/**
+ * A9, on the page a Queries row links to. An operator who followed the
+ * statement here to read its movement is one click from its plan, and this
+ * is the one page that always has the full statement text rather than a
+ * two-line clamp of it.
+ */
+describe('/queries/[queryid] — the plan is one click away', () => {
+  it('offers Explain when the statement text was recovered', async () => {
+    sqlState.text = 'select * from orders where customer_id = $1';
+    const r = await show('1234567890');
+    expect([...r.container.querySelectorAll('button')].filter((b) => b.textContent === 'Explain'))
+      .toHaveLength(1);
+  });
+
+  /**
+   * `queryTextFor` returns null when the store has never seen this shape's
+   * text, or when the role could not read it. There is nothing to hand to
+   * the Explain form, and the heading already degrades to the bare id — so
+   * the control goes with it rather than handing over an empty statement.
+   */
+  it('offers no Explain when the statement text could not be recovered', async () => {
+    sqlState.text = null;
+    const r = await show('1234567890');
+    expect([...r.container.querySelectorAll('button')].filter((b) => b.textContent === 'Explain'))
+      .toHaveLength(0);
+  });
+});

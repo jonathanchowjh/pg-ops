@@ -6,30 +6,75 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+The incident path: the console now acts the way a DBA works during a lock
+incident, and reads the way one watches a fleet between incidents.
 
-- **No annotated tag could be pushed, so the documented way to cut a release
-  was impossible.** For `refs/tags/*` git feeds the pre-push hook the TAG
-  OBJECT's sha, while `scripts/gate.sh` records `git rev-parse HEAD`, a
-  commit. The hook compared the two literally, so the match could never
-  succeed and `git push origin v2.5.0` was refused for a commit that had just
-  passed all four Postgres legs and the image smoke test. Step 4 of
-  CONTRIBUTING's release procedure is "Tag vX.Y.Z", which made the release
-  procedure reachable only through the `--no-verify` this hook exists to make
-  unnecessary — the same failure mode that produced the hook in the first
-  place, arriving by a different route. The hook now dereferences a ref to its
-  commit before consulting the receipt, which is a no-op on a commit and on a
-  lightweight tag.
-- **A tag for a release older than the receipt file could not be pushed
-  either.** v2.3.1 and v2.4.0 were tagged locally and never reached the
-  remote, and their commits predate the receipt mechanism entirely, so no
-  receipt will ever name them. The hook now also accepts a ref that introduces
-  no commit the remote does not already have: the push sends no code, only a
-  tag object pointing into published history. This is the same reasoning the
-  hook already applied to a branch deletion, and it weakens nothing, because an
-  unpushed commit still counts — commit after gating and the hook still refuses.
+**49 commits across six staged passes.** Each stage ended by driving the
+console against a seeded lock chain and rewriting what came after, which is
+why several entries below are defects no test could see.
+
+### Added
+
+- **Active now** on Sessions and in the triage Queries band — what the server
+  is doing this instant, by wait event type and by statement shape. The first
+  question a DBA asks during an incident, and the one this console could not
+  answer at all.
+- **The xmin horizon**, judged: which transaction, replication slot or
+  prepared transaction is pinning cleanup, how far back, and on xid distance
+  rather than on wall-clock age.
+- **The lock graph names the mode and relation each waiter wants**, and marks
+  a DDL amplifier — an `ACCESS EXCLUSIVE` request behind which every ordinary
+  reader queues.
+- **Recent actions** on Sessions: the last ten audited actions against this
+  database, read back from the audit log the console already wrote. After a
+  kill the row vanished and with it the only feedback there was.
+- **Throughput rates** — commits, rollbacks, deadlocks and temp spill per
+  second, differenced between two readings rather than reported as totals.
+- **Standbys, as the primary sees them**, with write, flush and replay lag per
+  standby and a threshold on each. The gate titled "Replication & cleanup" had
+  no replication verdict at all.
+- **The overview states readings, not only a badge**: connections, blocking,
+  longest query and lag under each database name. Twelve checks ran per row
+  and every number was discarded.
+- **Hygiene counts reach triage and the overview.** A duplicate index is a
+  finding with no verdict, so the roll-up used to read "Indexes OK" beside a
+  database with four redundant ones. Counts now travel as notes and still
+  cannot invent a verdict or tint a row.
+- **One click from a statement to its plan.** The statement travels in
+  `sessionStorage`, never a URL — it can carry a literal secret, and a query
+  string would put it in history, in logs and in referrers.
+- **Transaction age on the Sessions table**, and the long-running floor is
+  stated rather than implied by "nothing running past the floor".
 
 ### Changed
+
+- **One incident is one card.** A seeded lock chain used to light four
+  separate triage panels about the same pid, in three different bands. Each
+  panel now folds to a line pointing at the Lock wait graph when the pid it
+  judged is in that chain. Only two safety rules make it sound, and both are
+  tested: nothing folds when the chain itself is quiet, and nothing folds when
+  the lock graph could not be read — a reading the console could not take
+  never suppresses one it did.
+- **The Sessions page leads with the table that can end the incident.**
+  Measured at 390x844 with a chain open, the first Terminate button was 1292px
+  down the page against an 844px viewport. It is 343px now, and the action
+  column is pinned to the right edge of the scrolling table, which is where
+  the same measurement found it 334px out of reach.
+- **The console stops counting itself.** Every statement pgops issues is
+  marked and excluded from the statement ranking, its own connections are
+  separated from the application's on the Sessions table, and the count of
+  what was hidden is always stated. A tool that silently removed itself from
+  the page that shows load would be lying about the thing it exists to
+  measure.
+- **The statistics resets sit below the data they destroy**, behind a
+  disclosure. With actions enabled, the first seventy words on the Queries
+  page were two warnings about destroying statistics, above every number.
+- **The tab strip wraps at phone width** instead of scrolling the page
+  sideways.
+- **The README is a pitch and a manual**, 1,790 words from 3,935. The design
+  record — the four gates, the package boundary, the five declines, every
+  deliberate difference from pgHero — moves to CONTRIBUTING. Four guards hold
+  the split, including that CONTRIBUTING actually received it.
 
 - **The tab strip is data, in `apps/web/lib/tabs.ts`, not a local `const`
   inside the component that renders it.** Each tab now declares two things the
@@ -53,6 +98,83 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with its own redirects and its own decision about the three pages v2.5.0
   deliberately did not fold into `/tables`. `mode` is true today and the bands
   can be rendered from it the day the routes sit either side of the line.
+
+### Fixed
+
+- **The page with the Terminate buttons contradicted the page with the
+  diagnosis.** A session blocked on a lock is `active` in `pg_stat_activity`,
+  so every waiter was also a long-running query: Sessions offered "Terminate
+  all" while triage, from the same two checks, said killing a waiter frees
+  nothing. One shared join now answers both, and the Locks page grew the
+  control for the one pid it tells you to end.
+- **A deadlock was only seeded into the lock graph when an ordinary chain
+  existed beside it.** The graph's roots were collected from sessions that
+  block without waiting; in a pure cycle every participant waits, so the page
+  rendered nothing on the one incident Postgres had already detected.
+- **Blocked sessions escalated on query age, not wait time** — the quantity
+  the threshold's own prose describes. A fast query blocked for ten minutes
+  read as a ten-minute query.
+- **The Active now line counted sessions per wait event, not per wait type**,
+  so three Lock events displaced IO entirely from a line capped at three.
+- **A standby that lost its primary read "0s behind."** Replaying everything
+  you received is indistinguishable from receiving nothing, so the check now
+  reports whether a walreceiver is running and that is read first.
+- **`replicationLag` and the new Standbys panel both reported the standby
+  count**, adjacently. The duplicate clause is now withheld when the
+  specialist can speak — not deleted, because the two checks have different
+  privilege requirements and on a restricted role it is the only source.
+- **The overview printed one hygiene finding once per stale area** — "last
+  captured too long ago" three times, joined. Stated once now, with a count.
+- **The idle-in-transaction verdict named no session.** It now carries the pid
+  and application it judged, linked to that row.
+- **The landed-on session row was never marked.** `:target` tracks the
+  document's target element and the App Router moves the URL with the History
+  API, so every pid link scrolled the right row into view and highlighted
+  nothing.
+- **The long-running badge named the one pid its own panel says not to kill.**
+- **Sessions rendered "we could not read the lock graph" identically to
+  "nothing is blocked"**, and the panel offering the bulk kill said nothing
+  about it.
+- **A restricted role was told nothing about what it could not see.** The
+  reading such a role gets is now named, along with the lock modes it misses.
+- **A React key carried a raw statement into the RSC payload.**
+- **A statement handed to a client component reached the page unredacted.**
+  `ExplainLink` is a client component, so its props are serialised into the
+  HTML before the component runs; redaction has to happen at the call site.
+  Found end to end by the integration test that seeds a real password into a
+  real query and fetches every route.
+- **PostgreSQL 18 drops a leading comment from `pg_stat_statements`**, which
+  silently disabled the whole mechanism that keeps pgops out of its own
+  ranking. The marker is a trailing comment now.
+- **The store's statements were never marked**, so that same mechanism missed
+  them. Pointed at a database it also monitors — the documented
+  single-database setup — the console's own `INSERT` was the number one
+  statement by total time on the Queries page.
+- **The kill confirm panel hung 104px off a 390px screen**, with the sentence
+  explaining why Confirm was disabled among the clipped part.
+- **A rate spanning a statistics reset is not a rate**, and an audit log that
+  cannot be read is not an empty one.
+
+- **No annotated tag could be pushed, so the documented way to cut a release
+  was impossible.** For `refs/tags/*` git feeds the pre-push hook the TAG
+  OBJECT's sha, while `scripts/gate.sh` records `git rev-parse HEAD`, a
+  commit. The hook compared the two literally, so the match could never
+  succeed and `git push origin v2.5.0` was refused for a commit that had just
+  passed all four Postgres legs and the image smoke test. Step 4 of
+  CONTRIBUTING's release procedure is "Tag vX.Y.Z", which made the release
+  procedure reachable only through the `--no-verify` this hook exists to make
+  unnecessary — the same failure mode that produced the hook in the first
+  place, arriving by a different route. The hook now dereferences a ref to its
+  commit before consulting the receipt, which is a no-op on a commit and on a
+  lightweight tag.
+- **A tag for a release older than the receipt file could not be pushed
+  either.** v2.3.1 and v2.4.0 were tagged locally and never reached the
+  remote, and their commits predate the receipt mechanism entirely, so no
+  receipt will ever name them. The hook now also accepts a ref that introduces
+  no commit the remote does not already have: the push sends no code, only a
+  tag object pointing into published history. This is the same reasoning the
+  hook already applied to a branch deletion, and it weakens nothing, because an
+  unpushed commit still counts — commit after gating and the hook still refuses.
 
 ### Tests
 
@@ -86,6 +208,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   purpose, and a branch deletion. Both acceptance tests were confirmed red
   against the previous hook, and both refusal tests green, so the change is
   demonstrably targeted.
+
+### Not done, and why
+
+- **Sessions by application and state** (depth Task 5) was **cut**. It added a
+  third panel about a pid the console already escalates twice. The question it
+  answered — which application is holding the connections — is one field, and
+  that field is now on the note Sessions by state already renders; the
+  pool-exhaustion case it was walked against is answered by Connection
+  sources, which only lacked a link from the verdict to that table.
+- **Per-database versus per-server session figures.** No session check filters
+  by `datname`, so `blocked`, `locks`, `sessions` and `long-running` report
+  server-wide numbers. Correct when each configured entry is its own server;
+  double-counting when two entries name databases on one, which pgops
+  supports. Seen twice while driving: a quiet database claimed "3 blocked" for
+  a chain held in its neighbour. A `datname` filter is not obviously the fix —
+  lock contention genuinely crosses databases, and filtering would amputate a
+  cross-database chain from the graph the kill path reads — so this needs a
+  decision about what these figures mean before it needs code.
+- **Folding the three duplicate table pages** (`/queries/tables`,
+  `/cleanup/space`'s largest-relations panel, `/cleanup/maintenance`'s
+  last-vacuum table) and the double "Tables" in the navigation. A route
+  restructure with redirects and its own decision record.
+- **Statements per relation on the Table page**, which needs either a store
+  join or a check that reads `pg_stat_statements` text by table name.
+- **Durable cross-replica action history.** Recent actions reads this host's
+  audit file and says so. A `pgops.actions` table is a migration and a write
+  on every kill; decide after seeing whether the per-host view is enough.
+- **Splitting the tab strip into Now and Explore bands** stays deferred, for
+  the reason already recorded below.
 
 ## [2.5.0] — 2026-09-28
 

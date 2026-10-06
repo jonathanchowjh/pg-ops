@@ -181,7 +181,46 @@ export function hygieneAreas(
       .sort((a, b) => RANK[b.level as 'warn' | 'critical'] - RANK[a.level as 'warn' | 'critical']);
 
     const level = escalated[0]?.level as 'warn' | 'critical' | undefined ?? 'ok';
-    const note = escalated.map((r) => r.note).filter((n) => n !== null).join(' · ');
+    /**
+     * A7: counts from members that judge nothing, after the notes from
+     * members that do.
+     *
+     * This used to range over `escalated` alone, so a count written by an
+     * unjudged check — a duplicate index, an unvalidated constraint —
+     * reached the cache and stopped there, and the line read "Indexes OK"
+     * beside a database with four redundant indexes.
+     *
+     * Escalated first: the sentence opens with the thing that decided the
+     * LEVEL, and the counts follow as detail. They cannot change the level,
+     * which is the whole reason they are notes and not verdicts.
+     *
+     * `escalated` comes from `present`, which is the JUDGING members only —
+     * `judges = area.members.filter(canJudge)` two levels up. That is why
+     * the first attempt at this fix did nothing: an unjudged check is not in
+     * `present` by construction, which is the defect itself. The counts
+     * therefore range over `area.members` in full.
+     *
+     * The staleness and failure guards above keep ranging over the judging
+     * members, unchanged. An unjudged member that failed contributes no
+     * count — appending one would be a finding from a reading nobody took.
+     */
+    const counted = area.members
+      .map((id) => byId.get(id))
+      .filter((r): r is StoredCheckResult => r !== undefined)
+      // Every member that was READ and has a note it is not already
+      // contributing as an escalation.
+      //
+      // NOT `r.level === null`, which was the first attempt: a check that
+      // HAS a verdict can return `ok` with no note and still have found
+      // something, and `checkResultRow` writes the count in that case. The
+      // test that caught it pairs a warning from one member with a count
+      // from another that judges.
+      //
+      // `r.ok`: a member that could not be read contributes no count. Its
+      // note is from no reading at all, and a stale one would be worse.
+      .filter((r) => r.ok && r.note !== null && !escalated.includes(r));
+    const note = [...escalated, ...counted]
+      .map((r) => r.note).filter((n) => n !== null).join(' · ');
 
     return { ...line, level, note: note === '' ? null : note, ageMs };
   });

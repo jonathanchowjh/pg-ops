@@ -56,7 +56,16 @@ export default async function Suggested({ params }: { params: Promise<{ name: st
                 </p>
               ) : (
                 <ul className="space-y-4">
-                  {d.indexes.map((g) => <Suggestion key={g.statement} name={name} index={g} />)}
+                  {/* Not `g.statement`: it is a pgops-generated `CREATE
+                      INDEX`, so a live secret in it is unlikely rather than
+                      impossible — but a React key is published into the RSC
+                      Flight payload regardless of how likely its contents
+                      are to be sensitive (see the Sessions page's `shapeKey`
+                      comment for the mechanism and the gate failure it
+                      caused with `pg_stat_activity.query`). No stabler id is
+                      available on `SuggestedIndex`, so the array index is
+                      used instead — defence in depth, not a known leak. */}
+                  {d.indexes.map((g, i) => <Suggestion key={i} name={name} index={g} />)}
                 </ul>
               )}
 

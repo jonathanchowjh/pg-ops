@@ -4,8 +4,13 @@ export * from './types.js';
 export * from './gates.js';
 // By name, not `export *`: run.ts owns both runners and `messageOf`, which
 // capture.ts imports and which is not part of this package's surface.
-export { runCheck, runSeries, runTool } from './run.js';
+export { runCheck, runSeries, runTool, OWN_SQL_MARKER, grantRemedy } from './run.js';
 export * from './registry.js';
+// A value: the web layer differences two polls into rates with this
+// function, and `export type *` below (database-activity.js) carries the
+// interfaces only.
+export { counterRates } from './checks/database-activity.js';
+export type * from './checks/database-activity.js';
 export { redactSecrets } from './redact.js';
 export { captureOnce, captureHygiene, cacheCheckPass, checkResultRow, queryLoadRow } from './capture.js';
 export type { StoredCheckWrite } from './store/write.js';
@@ -35,9 +40,11 @@ export type * from './series/space.js';
  * stay reachable through CHECKS, so there remains exactly one way to get a
  * check and this adds no second one.
  */
+export type * from './checks/activity.js';
 export type * from './checks/blocked.js';
 export type * from './checks/connections.js';
 export type * from './checks/constraints.js';
+export type * from './checks/horizon.js';
 export type * from './checks/identity.js';
 export type * from './checks/index-bloat.js';
 export type * from './checks/indexes.js';
@@ -46,6 +53,7 @@ export type * from './checks/maintenance.js';
 export type * from './checks/long-running.js';
 export type * from './checks/query-stats.js';
 export type * from './checks/replication.js';
+export type * from './checks/standbys.js';
 export type * from './checks/sequences.js';
 export type * from './checks/sessions.js';
 export type * from './checks/settings.js';
@@ -72,6 +80,9 @@ export type * from './checks/table-list.js';
 // above carries interfaces only, so without this apps/web cannot import them
 // and the queries page fails to compile.
 export { slowQueries, SLOW_QUERY_DEFAULTS } from './checks/query-stats.js';
+// A value: the Sessions page states this floor in prose, and the import is
+// what keeps that sentence from drifting away from the SQL that enforces it.
+export { LONG_RUNNING_FLOOR_SECS } from './checks/long-running.js';
 // Same reason: `settingNames` is the function the settings check's own
 // integration test and any caller that needs the asked-for list uses, and
 // `export type *` above cannot carry it.
@@ -81,3 +92,11 @@ export { settingNames } from './checks/settings.js';
 export { checkStatement } from './tools/explain.js';
 // A value: the suggestions page names the thresholds it applied.
 export { SUGGESTION_DEFAULTS } from './tools/suggested-indexes.js';
+// Values: `export type *` above (locks.js) carries the interfaces only, and
+// the join two pages need — waiter pid -> root blocker, and root pid -> how
+// many are queued behind it — is a function, not a type.
+export { blockedByRoot, blockingCounts } from './checks/locks.js';
+// A value: the Sessions page's "Recent actions" panel reads the same audit
+// trail `writeAudit` writes, rather than keeping a second copy of it.
+export { readRecentAudit } from './actions/audit.js';
+export type { AuditRecord, RecentAudit } from './actions/audit.js';

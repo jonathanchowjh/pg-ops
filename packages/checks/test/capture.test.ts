@@ -1,9 +1,187 @@
 import { EventEmitter } from 'node:events';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { captureOnce, checkResultRow, queryLoadRow } from '../src/capture.js';
 import type { CounterPoint } from '../src/series/query-stats.js';
 import type { QueryStatsSnapshot } from '../src/store/write.js';
 import type { CheckContext } from '../src/types.js';
+
+/**
+ * Task 8 found the marker missing in THREE places a hardcoded two-file list
+ * could never have caught: `tools/suggested-indexes.ts` reused `queryStats`'s
+ * own sql() outside `runCheck` (so `toQuery`'s automatic prefix never ran),
+ * and `actions/kill.ts` / `actions/stats.ts` read or reset catalog state with
+ * no marker at all. The list-based version of this test could not see files
+ * it did not name, and could not have seen the next one either — the
+ * exemption for "text that must stay unmarked" was a SENTENCE in a plan,
+ * and a sentence cannot shadow a second call site in the same file.
+ *
+ * So this sweeps every `.ts` file under `src/` for a direct
+ * `ctx.target.query(...)` call — the one way to run a statement in this
+ * package without going through `runCheck`/`toQuery` — and requires each one
+ * to be either provably marked or named on an explicit allowlist with a
+ * reason a reader can check, instead of a claim a reader has to trust.
+ */
+describe('the pgops marker on every catalog read that bypasses runCheck', () => {
+  const SRC = fileURLToPath(new URL('../src/', import.meta.url));
+
+  function allSourceFiles(dir: string): string[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory()
+      ? allSourceFiles(join(dir, e.name))
+      : e.name.endsWith('.ts') ? [join(dir, e.name)] : []));
+  }
+
+  /**
+   * Whole files exempted from "every ctx.target.query call must be marked",
+   * each with the reason a reader (or this test) can check independently —
+   * see the dedicated `it` below, which verifies `explain.ts`'s reason holds
+   * rather than just asserting the exemption exists.
+   *
+   * `actions/analyze.ts` used to be here as a whole-file entry, on the
+   * reasoning that its calls are BEGIN/SET LOCAL/ANALYZE/COMMIT/ROLLBACK —
+   * true of those five, but the file also has ONE actual `ctx.target.query`
+   * catalog read, `TABLES_SQL` (`pg_class`/`pg_namespace`, choosing which
+   * tables to ANALYZE), that a whole-file grant silently covered too. That
+   * miss survived a plain `grep 'ctx.target.query('` because the call is
+   * `ctx.target.query<{ qualified: string }>(` — the generic type argument
+   * sits between the method name and the paren, and a literal-paren search
+   * skips straight past it. `TABLES_SQL` is marked now and enforced by the
+   * general sweep below like any other catalog read; analyze.ts's five
+   * remaining statements need no entry here at all, because they run
+   * through `client.query` on a manually checked-out client, never through
+   * `ctx.target.query` — see "analyze.ts's transaction control…" below,
+   * which pins that split directly rather than re-widening the exemption
+   * back out to the whole file.
+   *
+   * `run.ts` is NOT here either: it is handled separately below, because
+   * its one `ctx.target.query` call is `runCheck`'s own — the mechanism
+   * that ADDS the marker, not a bypass of it — and its argument is a
+   * runtime-computed `text` variable that no textual match on the call
+   * site could ever confirm is marked. That is checked against `toQuery`'s
+   * source directly instead (see "runCheck's own call carries the marker
+   * unconditionally").
+   */
+  const ALLOWLIST: ReadonlyArray<{ file: string; reason: string }> = [
+    {
+      file: 'tools/explain.ts',
+      reason: 'planStatements runs EXPLAIN over an OPERATOR-supplied statement — the text is '
+        + 'theirs, not pgops\'s, and marking it would misattribute their SQL and change what '
+        + 'Postgres plans.',
+    },
+  ];
+
+  it('marks every direct ctx.target.query call that is not explicitly allowlisted', () => {
+    const problems: string[] = [];
+    const callRe = /ctx\.target\.query(?:<[\s\S]*?>)?\s*\(\s*/g;
+
+    for (const file of allSourceFiles(SRC)) {
+      const rel = relative(SRC, file).split(sep).join('/');
+      if (rel === 'run.ts') continue; // see "runCheck's own call…" below.
+      const allowed = ALLOWLIST.find((a) => a.file === rel);
+      const src = readFileSync(file, 'utf8');
+      for (const m of src.matchAll(callRe)) {
+        if (allowed) continue; // whole file exempt — see the dedicated per-file checks below.
+        const line = src.slice(0, m.index).split('\n').length;
+        const after = src.slice(m.index + m[0].length);
+        // `ownSql(...)` is the marked form, and the ONLY one. It is the one
+        // function that attaches OWN_SQL_MARKER, so a call site can no longer
+        // get the marker's POSITION wrong — which is the whole point of
+        // requiring it: the position used to be interpolated at ten call
+        // sites, and when PostgreSQL 18 turned out to drop a leading comment
+        // from pg_stat_statements' stored text, all ten had to move. A bare
+        // template literal is therefore a failure here now, even one that
+        // interpolates the marker itself.
+        if (after.startsWith('ownSql(')) continue;
+        if (after.startsWith('`')) {
+          problems.push(`${rel}:${line}: inline query text is not wrapped in ownSql(...)`);
+          continue;
+        }
+        const id = /^[A-Za-z_][A-Za-z0-9_]*/.exec(after)?.[0];
+        // Only an ALL_CAPS name follows this package's convention for a SQL
+        // constant (QUERY_STATS_SQL, KILL_SQL, …) closely enough to look up
+        // its definition with confidence. Anything else — no identifier at
+        // all, or a lowercase/camelCase one — is a shape this sweep cannot
+        // verify statically, and per the brief that must FAIL, not pass:
+        // a test that is wrong about its own scope is worse than no test.
+        if (!id || !/^[A-Z][A-Z0-9_]*$/.test(id)) {
+          problems.push(`${rel}:${line}: this call's argument (${id ?? 'unrecognized'}) is not an `
+            + 'ALL_CAPS SQL constant or inline template this sweep can verify statically — name it '
+            + 'that way, or add the file/line to the allowlist with a reason.');
+          continue;
+        }
+        if (!new RegExp(`const\\s+${id}\\b[^=]*=\\s*ownSql\\(`).test(src)) {
+          problems.push(`${rel}:${line}: ${id} is not defined as ownSql(\`…\`)`);
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  it('explain.ts is allowlisted for a reason this test can check: it never calls ctx.target.query at all', () => {
+    // planStatements runs entirely on its own dedicated connection
+    // (ctx.target.connect(), then client.query) so that it can be destroyed
+    // afterwards rather than returned to the pool — see explain.ts's own
+    // docblock. That means this file was NEVER actually in scope for the
+    // sweep above; it is named on the allowlist anyway, prophylactically, so
+    // a reader sees the reason written down instead of having to rediscover
+    // it — and so that if a direct ctx.target.query call is ever added here,
+    // this assertion breaks and forces that reader to re-examine it.
+    const src = readFileSync(new URL('../src/tools/explain.ts', import.meta.url), 'utf8');
+    expect(src).not.toMatch(/ctx\.target\.query/);
+  });
+
+  it("analyze.ts's transaction control and ANALYZE itself run via client.query, not ctx.target.query", () => {
+    // BEGIN, both SET LOCAL statements, ANALYZE ${qualified}, COMMIT and
+    // ROLLBACK all run on `client` — checked out with ctx.target.connect()
+    // — never through `ctx.target.query` directly, so none of them were
+    // ever in the general sweep's domain to begin with; analyze.ts needs no
+    // allowlist entry for them, whole-file or otherwise. That is the reason
+    // TABLES_SQL — the file's one REAL ctx.target.query call, a pg_class/
+    // pg_namespace catalog read — could be missed by a whole-file exemption
+    // written for these five statements: a grant covering the file covers
+    // any call in it, not just the ones the reason names. TABLES_SQL is
+    // marked now and enforced by the general sweep above like any other
+    // catalog read.
+    const src = readFileSync(new URL('../src/actions/analyze.ts', import.meta.url), 'utf8');
+    for (const stmt of [
+      "client.query('BEGIN')",
+      'client.query(`SET LOCAL lock_timeout = ${lockMs}`)',
+      'client.query(`SET LOCAL statement_timeout = ${stmtMs}`)',
+      'client.query(`ANALYZE ${qualified}`)',
+      "client.query('COMMIT')",
+      "client.query('ROLLBACK')",
+    ]) {
+      expect(src, stmt).toContain(stmt);
+    }
+    expect(src).toMatch(/ctx\.target\.query<\{ qualified: string }>\(\s*\n\s*TABLES_SQL/);
+  });
+
+  it('never marks the operator statement planStatements sends to EXPLAIN', () => {
+    // suggested-indexes.ts is the file Change 1 touched: its OWN sql() reuse
+    // (a few lines above) now carries the marker, and this call must not.
+    // Checked directly against the call site rather than trusted from prose,
+    // because that prose is exactly what let the two calls get confused once.
+    const src = readFileSync(new URL('../src/tools/suggested-indexes.ts', import.meta.url), 'utf8');
+    // Non-greedy up to the first `);` (statement end), not the first `)` —
+    // the argument itself contains a nested call (`plannable.map((r) => …)`)
+    // whose own closing paren would otherwise truncate the match early.
+    const call = /planStatements\(ctx,[\s\S]*?\)\s*;/.exec(src);
+    expect(call, 'suggested-indexes.ts should still call planStatements(ctx, …)').not.toBeNull();
+    expect(call![0]).not.toMatch(/ownSql|OWN_SQL_MARKER/);
+  });
+
+  it("runCheck's own call carries the marker unconditionally (toQuery)", () => {
+    // The one ctx.target.query call this sweep skips by name (run.ts) is
+    // exactly this function's return value. Its argument at the call site is
+    // a runtime `text` variable, which no textual match on the CALL could
+    // ever confirm — so the guarantee is pinned here, against the function
+    // that actually builds it, instead.
+    const src = readFileSync(new URL('../src/run.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/return \{ \.\.\.q, text: ownSql\(q\.text\) \};/);
+  });
+});
 
 /**
  * Node raises an AggregateError with an EMPTY `.message` when a host resolves
@@ -308,5 +486,48 @@ describe('queryLoadRow', () => {
 
   it('reports no row for the first capture of a database', () => {
     expect(queryLoadRow([snapshot(1), snapshot(2)], new Map())).toBeNull();
+  });
+});
+
+/**
+ * A7. A duplicate index is a FINDING with no verdict — pgHero's dashboard
+ * shows it, and the triage rollup said "Indexes OK" because nothing wrote
+ * anything to roll up. The count has to reach the cache without a verdict
+ * being invented for it: inventing one would make `duplicateIndexes` able to
+ * worsen a database's overall level, which is a different and wrong claim.
+ */
+describe('checkResultRow — a check that finds things and judges nothing', () => {
+  it('writes the count as the note, with no level', () => {
+    const row = checkResultRow('duplicateIndexes', {
+      ok: true, verdict: null, measuredAt: 0,
+      data: { pairs: [{ name: 'a', table: 't', coveredBy: 'b', sizeBytes: 1 }], total: 1 },
+    });
+    expect(row.level).toBeNull();
+    expect(row.note).toBe('1 duplicate index');
+  });
+
+  it('writes no note when the check found nothing', () => {
+    const row = checkResultRow('duplicateIndexes', {
+      ok: true, verdict: null, measuredAt: 0, data: { pairs: [], total: 0 },
+    });
+    expect(row.note).toBeNull();
+  });
+
+  /**
+   * A verdict always wins. `found` is for checks that have none; a check
+   * that judged has already said the more important thing.
+   */
+  it('prefers a verdict note over a count', () => {
+    const row = checkResultRow('unusedIndexes', {
+      ok: true, verdict: { level: 'warn', note: 'the verdict speaking' }, measuredAt: 0,
+      data: { indexes: [], total: 3 },
+    });
+    expect(row.note).toBe('the verdict speaking');
+  });
+
+  it('writes nothing for a check that did not run', () => {
+    const row = checkResultRow('duplicateIndexes', { ok: false, reason: 'privilege', message: 'denied' });
+    expect(row.note).toBeNull();
+    expect(row.message).toBe('denied');
   });
 });

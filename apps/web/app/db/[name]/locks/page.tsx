@@ -1,9 +1,12 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { CHECKS, type Waiter } from '@pgops/checks';
 import { runCheckFor } from '@/lib/check';
 import { CheckPanel } from '@/components/check-panel';
+import { KillButton } from '@/components/kill-button';
 import { Refresh } from '@/components/refresh';
 import { Sql } from '@/components/sql';
+import { actionsAllowed } from '@/lib/actions';
 import { formatDuration } from '@/lib/format';
 
 
@@ -25,7 +28,24 @@ function WaiterTree({ waiters }: { waiters: Waiter[] }) {
           <span className="font-mono">{w.pid}</span>{' '}
           <span className="text-muted-foreground">
             {w.user ?? '—'}@{w.app ?? '—'} · waiting {formatDuration(w.waitSecs)}
+            {w.waitingMode ? ` · wants ${w.waitingMode}${w.waitingOn ? ` on ${w.waitingOn}` : ''}` : ''}
           </span>
+          {/* AccessExclusiveLock specifically, not any strong mode: it is the one
+              ALTER TABLE, DROP and TRUNCATE take, and the only one that queues plain
+              SELECTs behind it — which is why the sentence can promise every reader
+              is queued. `waitingMode` is a `string_agg(DISTINCT l.mode, ',' ORDER BY
+              l.mode)` (locks.ts) over EVERY ungranted lock this session wants, so a
+              waiter queued on two different modes at once arrives as
+              'AccessExclusiveLock,RowExclusiveLock' — `=== 'AccessExclusiveLock'`
+              missed exactly that case, the multi-lock migration pile-up this marker
+              exists for. Split and test membership instead. Still not a substring
+              test on the raw string: lock mode names are a fixed Postgres enum, and
+              testing membership in the SPLIT list rather than `includes()` on the
+              joined text is what still refuses a false positive on a future mode
+              whose name happens to contain this one. */}
+          {(w.waitingMode?.split(',') ?? []).includes('AccessExclusiveLock') ? (
+            <span className="ml-1 font-medium text-warning-ink">· DDL — every reader behind it is queued too</span>
+          ) : null}
           {w.cycle ? (
             <span className="ml-1 font-semibold text-destructive">
               · DEADLOCK (cycle back to an ancestor)
@@ -51,6 +71,11 @@ export async function generateMetadata({
 export default async function Locks({ params }: { params: Promise<{ name: string }> }) {
   const { name } = await params;
   const result = await runCheckFor(name, CHECKS.locks);
+  // Read here, after runCheckFor has already awaited connection() — so this
+  // page is dynamic before the gate is read, and the gate reflects the
+  // deployment rather than being frozen at build time. Not hoisted to module
+  // scope; see lib/check.ts and test/guards.test.ts.
+  const canAct = actionsAllowed(process.env);
 
   return (
     <>
@@ -72,13 +97,32 @@ export default async function Locks({ params }: { params: Promise<{ name: string
               <ul className="space-y-3">
                 {d.roots.map((r) => (
                   <li key={r.pid}>
-                    <p>
-                      <span className="font-mono font-medium">{r.pid}</span>{' '}
-                      <span className="text-muted-foreground">
-                        {r.user ?? '—'}@{r.app ?? '—'} · {r.state ?? '—'} · open {formatDuration(r.xactAgeSecs)} ·
-                        blocking {r.totalWaiters}
-                      </span>
-                    </p>
+                    <div className="relative pr-24">
+                      <p>
+                        <Link href={`/db/${name}/sessions#pid-${r.pid}`} className="font-mono font-medium underline underline-offset-4">
+                          {r.pid}
+                        </Link>
+                        {' '}
+                        <span className="text-muted-foreground">
+                          {r.user ?? '—'}@{r.app ?? '—'} · {r.state ?? '—'} · open {formatDuration(r.xactAgeSecs)} ·
+                          blocking {r.totalWaiters}
+                        </span>
+                      </p>
+                      {/* The one pid this page tells the operator to end, and the control that
+                          ends it. Waiters below get no button: killing one frees nothing. */}
+                      {canAct ? (
+                        <span className="absolute top-0 right-0">
+                          <KillButton database={name} pid={r.pid} backendStart={r.backendStart} />
+                        </span>
+                      ) : null}
+                    </div>
+                    {/* `startsWith`, not equality: Postgres also reports
+                        `idle in transaction (aborted)`, which has the same
+                        consequence for the reader — the statement below already
+                        finished, and the transaction is still holding its locks. */}
+                    {r.state?.startsWith('idle in transaction') ? (
+                      <p className="text-xs text-muted-foreground">last statement (transaction idle):</p>
+                    ) : null}
                     <Sql>{r.query}</Sql>
                     <WaiterTree waiters={r.waiters} />
                   </li>

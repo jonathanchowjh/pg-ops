@@ -83,6 +83,24 @@ describe('blocked', () => {
         expect(found!.data.suspectPid).toBe(holderPid);
         // `blocked` carries a verdict function, so this is never null in practice.
         expect(found!.verdict!.level).not.toBe('ok');
+
+        /**
+         * B9. The unit tests pin what `verdict` does with a wait; only a real
+         * server proves the SQL produces one. `waitstart` is briefly NULL for
+         * a wait that has only just begun, but this fixture has been waiting
+         * for at least one poll interval by the time it is found, so a null
+         * here means the correlated subquery is wrong rather than early.
+         *
+         * The inequality is the claim worth making: the wait must not exceed
+         * the age of the query doing the waiting. It is what distinguishes
+         * the new column from the old one — against a SQL change that
+         * accidentally aliased `longest_wait_secs` to the same
+         * `now() - query_start` expression, both readings would be equal and
+         * this would fail, where a bare `toBeGreaterThan(0)` would pass.
+         */
+        expect(found!.data.longestWaitSecs).not.toBeNull();
+        expect(found!.data.longestWaitSecs!).toBeGreaterThan(0);
+        expect(found!.data.longestWaitSecs!).toBeLessThan(found!.data.longestQueryAgeSecs!);
       } finally {
         await Promise.all(clients.map((c) => c.end().catch(() => {})));
       }

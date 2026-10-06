@@ -100,4 +100,20 @@ describe('Nav', () => {
       expect(hrefs, `object tab ${href} is missing`).toContain(href);
     }
   });
+
+  /**
+   * jsdom computes no layout: there is no box, no viewport, no line-breaking,
+   * so nothing here can observe the strip wrapping, overflowing, or measuring
+   * 469px wide, the same limit the allowlist test above lives with. What this
+   * assertion can do is lock the class that wrapping actually depends on —
+   * delete `flex-wrap` from nav.tsx and this fails, the way deleting the
+   * Tables tab fails the test above it. The real evidence that the strip
+   * wraps instead of scrolling the phone sideways is the measured viewport
+   * numbers recorded in this task's commit message, not anything jsdom can
+   * check.
+   */
+  it('keeps the wrap class the phone-width layout depends on', async () => {
+    rendered = await render(<Nav name="prod" />);
+    expect(rendered.container.querySelector('nav')!.className).toContain('flex-wrap');
+  });
 });

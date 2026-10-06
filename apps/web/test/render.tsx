@@ -27,6 +27,7 @@ export interface Rendered {
   container: HTMLElement;
   text: () => string;
   find: (pattern: string | RegExp) => HTMLElement | null;
+  rerender: (element: ReactElement) => Promise<void>;
   unmount: () => void;
 }
 
@@ -51,6 +52,11 @@ export async function render(element: ReactElement): Promise<Rendered> {
           .join('');
         return re ? re.test(own) : own.includes(pattern as string);
       }) ?? null;
+    },
+    rerender: async (next) => {
+      await act(async () => {
+        root.render(next);
+      });
     },
     unmount: () => {
       act(() => { root.unmount(); });

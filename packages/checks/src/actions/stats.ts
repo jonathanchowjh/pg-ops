@@ -1,4 +1,5 @@
 import type { ActionMeta, CheckContext } from '../types.js';
+import { ownSql } from '../run.js';
 import { writeAudit } from './audit.js';
 
 /**
@@ -25,11 +26,10 @@ import { writeAudit } from './audit.js';
  * operator's intent. That scoping is the difference between an action and an
  * incident.
  */
-const RESET_QUERY_STATS_SQL = `
-SELECT pg_stat_statements_reset(
+const RESET_QUERY_STATS_SQL = ownSql(`SELECT pg_stat_statements_reset(
          0,
          (SELECT oid FROM pg_database WHERE datname = current_database()),
-         0)`;
+         0)`);
 
 export async function resetQueryStats(ctx: CheckContext, meta: ActionMeta): Promise<void> {
   let result = 'unknown';
@@ -57,7 +57,7 @@ export async function resetQueryStats(ctx: CheckContext, meta: ActionMeta): Prom
 export async function resetStats(ctx: CheckContext, meta: ActionMeta): Promise<void> {
   let result = 'unknown';
   try {
-    await ctx.target.query('SELECT pg_stat_reset()');
+    await ctx.target.query(ownSql(`SELECT pg_stat_reset()`));
     result = 'ok';
   } catch (err) {
     result = `error: ${err instanceof Error ? err.message : String(err)}`;

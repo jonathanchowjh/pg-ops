@@ -62,6 +62,37 @@ describe('KillButton', () => {
    * an empty reason": before any click there must be no reason input and no
    * Confirm/Cancel at all, only a single "Terminate" button.
    */
+  /**
+   * jsdom computes no layout — no viewport, no boxes, no flex line-breaking —
+   * so nothing in this file can observe that the armed panel is 477px wide on
+   * one line and hangs 104px off the right edge of a 390px screen, taking the
+   * `reason required` hint (the only thing that says why Confirm is dead) with
+   * it. That was measured in a real browser at 390 × 844 on 2026-10-01; this
+   * assertion locks the two classes the fix depends on, the way nav.test.tsx
+   * locks `flex-wrap` for the tab strip.
+   *
+   * Both halves are load-bearing and neither works alone: the cap alone would
+   * clip the panel's contents, and `flex-wrap` alone would not narrow a panel
+   * that sizes itself to its content. `right-2` is asserted alongside them
+   * because the cap is only safe while the panel stays anchored to the cell's
+   * right edge — un-anchor it and a narrower panel starts growing rightward off
+   * the screen instead, which is the desktop defect kill-button.tsx's own
+   * comment records (Confirm at x=1422 on a 1280px viewport).
+   */
+  it('keeps the armed panel inside a phone viewport', async () => {
+    const { container } = await render(<KillButton {...PROPS} />);
+    await click(container.querySelector('button'));
+    const panel = container.querySelector('button[data-confirm]')!.parentElement!;
+    expect(panel.className).toContain('max-w-[calc(100vw-2rem)]');
+    expect(panel.className).toContain('flex-wrap');
+    expect(panel.className).toContain('right-2');
+    // Both halves are released above `sm`. Measured at 1280px: without these,
+    // the panel wraps at the ~190px action cell on EVERY screen and the tidy
+    // single row becomes a four-line stack. See kill-button.tsx's comment.
+    expect(panel.className).toContain('sm:flex-nowrap');
+    expect(panel.className).toContain('sm:max-w-none');
+  });
+
   it('does not send anything on the first click — it asks first', async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);

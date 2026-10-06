@@ -328,4 +328,43 @@ describe('queryStats', () => {
       expect(Date.now() - resetAt).toBeLessThan(60_000);
     });
   }, 120_000);
+
+  it('hides the console\'s own shapes by default, counts them, and shows them on request', async () => {
+    await withPostgres(async (ctx, pool) => {
+      // Distinct ARITY, not just a distinct alias: pg_stat_statements'
+      // queryid jumbling ignores a target list entry's alias entirely
+      // (measured against a live PG17 — `SELECT 42 AS marked` and `SELECT 43
+      // AS unmarked` collapse into ONE row, keeping whichever text ran
+      // first), so `SELECT 42 AS marked` and `SELECT 43 AS unmarked` would
+      // be indistinguishable to Postgres and this fixture would silently
+      // test nothing. Two columns is a genuinely different shape.
+      // The marker TRAILS, on its own line, and the literal is spelled out
+      // here rather than built with `ownSql` on purpose: this test is the only
+      // place that checks the marker against a real server, so it has to state
+      // the wire format independently instead of agreeing with whatever
+      // production currently produces. A LEADING marker is what this test
+      // caught on PostgreSQL 18, which excludes a leading comment from the
+      // text pg_stat_statements stores — see run.ts's comment on
+      // OWN_SQL_MARKER. 14, 16 and 17 all kept it, so only the four-version
+      // gate matrix could find this.
+      await pool.query('SELECT 42 AS marked\n/* pgops */');
+      await pool.query('SELECT 43, 44 AS unmarked');
+
+      const hidden = await runCheck(ctx, queryStats, { sort: 'calls', limit: 500 });
+      if (!hidden.ok) throw new Error(hidden.message);
+      expect(hidden.data.rows.some((r) => r.query?.endsWith('/* pgops */'))).toBe(false);
+      expect(hidden.data.rows.some((r) => r.query?.includes('unmarked'))).toBe(true);
+      expect(hidden.data.ownShapes).toBeGreaterThan(0);
+
+      const shown = await runCheck(ctx, queryStats, { sort: 'calls', limit: 500, showOurs: true });
+      if (!shown.ok) throw new Error(shown.message);
+      expect(shown.data.rows.some((r) => r.query?.endsWith('/* pgops */'))).toBe(true);
+      // NOT strict equality: `hidden`'s own marked statement is recorded by
+      // pg_stat_statements only once IT finishes — same self-observation lag
+      // this file's other tests already account for (see "reports how many
+      // shapes it did not return"'s own note on this). So `shown`, run right
+      // after, sees one more shape than `hidden` counted: `hidden`'s own.
+      expect(shown.data.totalShapes).toBeGreaterThanOrEqual(hidden.data.totalShapes);
+    });
+  }, 120_000);
 });

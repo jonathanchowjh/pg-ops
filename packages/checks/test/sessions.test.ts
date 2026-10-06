@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
-  isIdleInTransaction, prepareSessions, sessions, sessionStates,
+  isIdleInTransaction, prepareSessions, sessions, sessionStates, type StateRow,
   type Session, type SessionRow,
 } from '../src/checks/sessions.js';
 
 const s = (o: Partial<Session>): Session => ({
   pid: 1, state: 'idle', user: 'u', app: 'a', clientAddr: null, backendStart: null,
-  inStateSecs: 0, queryAgeSecs: 0, query: '', ...o,
+  inStateSecs: 0, queryAgeSecs: 0, xactAgeSecs: null, query: '', ...o,
 });
 
 describe('isIdleInTransaction', () => {
@@ -78,7 +78,7 @@ describe('prepareSessions', () => {
 
 const row = (o: Partial<SessionRow>): SessionRow => ({
   pid: 1, state: 'active', usename: 'u', app: 'a', client_addr: null, backend_start: null,
-  in_state_secs: '1', query_age_secs: '1', query: 'select 1', total_matching: 1, ...o,
+  in_state_secs: '1', query_age_secs: '1', xact_age_secs: null, query: 'select 1', total_matching: 1, ...o,
 });
 
 describe('sessions.map', () => {
@@ -106,14 +106,32 @@ describe('sessions.map', () => {
     const data = sessions.map([row({
       pid: 42, state: 'active', usename: 'app', app: 'web',
       client_addr: '10.0.0.1', backend_start: '2026-01-01T00:00:00Z',
-      in_state_secs: '3.5', query_age_secs: '1.25', query: 'select 1',
+      in_state_secs: '3.5', query_age_secs: '1.25', xact_age_secs: '4.5', query: 'select 1',
       total_matching: 1,
     })]);
     expect(data.sessions[0]).toEqual({
       pid: 42, state: 'active', user: 'app', app: 'web',
       clientAddr: '10.0.0.1', backendStart: '2026-01-01T00:00:00Z',
-      inStateSecs: 3.5, queryAgeSecs: 1.25, query: 'select 1',
+      inStateSecs: 3.5, queryAgeSecs: 1.25, xactAgeSecs: 4.5, query: 'select 1',
     });
+  });
+
+  it('carries the transaction age', () => {
+    const d = sessions.map([{
+      pid: 1, state: 'active', usename: 'u', app: 'a', client_addr: null, backend_start: null,
+      in_state_secs: '1', query_age_secs: '2', xact_age_secs: '30',
+      query: 'x', total_matching: 1,
+    }]);
+    expect(d.sessions[0]!.xactAgeSecs).toBe(30);
+  });
+
+  it('maps a null transaction age to null, never 0', () => {
+    const d = sessions.map([{
+      pid: 1, state: 'idle', usename: null, app: null, client_addr: null, backend_start: null,
+      in_state_secs: null, query_age_secs: null, xact_age_secs: null,
+      query: null, total_matching: 1,
+    }]);
+    expect(d.sessions[0]!.xactAgeSecs).toBeNull();
   });
 });
 
@@ -137,6 +155,69 @@ describe('sessions SQL parameter wiring (fix-round 1)', () => {
 });
 
 /**
+ * B12. The panel reads "WARN idle in transaction for 253s" and its remedy
+ * says "Find the application holding it open — Sessions shows its
+ * application_name". The check knew which session set that number and threw
+ * it away, so the console told an operator to go and look for something it
+ * had already identified.
+ */
+describe('sessionStates.map — the session that set the verdict', () => {
+  const census = (over: Partial<StateRow> = {}): StateRow => ({
+    kind: 'state', state: 'idle', sessions: 4, longest_secs: '2',
+    pid: null, app: null, ...over,
+  });
+
+  it('names the pid and application of the oldest idle-in-transaction session', () => {
+    const d = sessionStates.map([
+      census(),
+      census({ state: 'idle in transaction', sessions: 1, longest_secs: '253' }),
+      { kind: 'oldest', state: null, sessions: 0, longest_secs: '253', pid: 18705, app: 'batch-worker' },
+    ]);
+    expect(d.oldestIdleInTxnSecs).toBe(253);
+    expect(d.oldestIdleInTxnPid).toBe(18705);
+    expect(d.oldestIdleInTxnApp).toBe('batch-worker');
+    // The census itself must not gain a row from the second branch.
+    expect(d.byState.map((r) => r.state)).toEqual(['idle', 'idle in transaction']);
+  });
+
+  it('leaves the pid null when nothing is idle in transaction', () => {
+    const d = sessionStates.map([census()]);
+    expect(d.oldestIdleInTxnSecs).toBeNull();
+    expect(d.oldestIdleInTxnPid).toBeNull();
+    expect(d.oldestIdleInTxnApp).toBeNull();
+  });
+
+  /**
+   * A restricted role reads `application_name` as null for a session it does
+   * not own, and the pid is still worth having on its own: it is what the
+   * link on the panel points at.
+   */
+  it('keeps the pid when the application cannot be read', () => {
+    const d = sessionStates.map([
+      census({ state: 'idle in transaction', sessions: 1, longest_secs: '70' }),
+      { kind: 'oldest', state: null, sessions: 0, longest_secs: '70', pid: 991, app: null },
+    ]);
+    expect(d.oldestIdleInTxnPid).toBe(991);
+    expect(d.oldestIdleInTxnApp).toBeNull();
+  });
+
+  /**
+   * `oldestIdleInTxnSecs` comes from the census branch, as it always has, so
+   * the verdict's threshold still reads the same max. The second branch is
+   * for identity only — if the two ever disagreed, the number an operator
+   * sees beside the pid must be the pid's own.
+   */
+  it('reports the named session own age, not the census maximum', () => {
+    const d = sessionStates.map([
+      census({ state: 'idle in transaction', sessions: 2, longest_secs: '400' }),
+      { kind: 'oldest', state: null, sessions: 0, longest_secs: '400', pid: 7, app: 'a' },
+    ]);
+    expect(d.oldestIdleInTxnSecs).toBe(400);
+    expect(d.oldestIdleInTxnPid).toBe(7);
+  });
+});
+
+/**
  * I5. `sessionStates.verdict` had no test of any kind, and it was the check
  * carrying the `>=` vs `>` divergence INSIDE one function: `s >= crit.value`
  * for critical but `s > warn.value` for warn. Nothing pinned either. Spec §9
@@ -155,7 +236,7 @@ describe('sessionStates.verdict', () => {
   const at = (secs: number | null) => sessionStates.verdict!(
     {
       byState: [{ state: 'idle in transaction', sessions: 1, longestInStateSecs: secs ?? 0 }],
-      oldestIdleInTxnSecs: secs,
+      oldestIdleInTxnSecs: secs, oldestIdleInTxnPid: null, oldestIdleInTxnApp: null,
     },
     t,
   ).level;
@@ -176,13 +257,32 @@ describe('sessionStates.verdict', () => {
     expect(at(critAt + 1)).toBe('critical');
   });
 
+  /**
+   * B12: the note carries the identity, so the panel can link it and the
+   * triage fold (A17) can tell whether this panel is about a session the
+   * lock graph already names.
+   */
+  it('names the session in the note, and says only what it knows', () => {
+    const note = (pid: number | null, app: string | null) => sessionStates.verdict!(
+      {
+        byState: [{ state: 'idle in transaction', sessions: 1, longestInStateSecs: 253 }],
+        oldestIdleInTxnSecs: 253, oldestIdleInTxnPid: pid, oldestIdleInTxnApp: app,
+      },
+      t,
+    ).note;
+
+    expect(note(18705, 'batch-worker')).toBe('idle in transaction for 253s · pid 18705 batch-worker');
+    expect(note(991, null)).toBe('idle in transaction for 253s · pid 991');
+    expect(note(null, null)).toBe('idle in transaction for 253s');
+  });
+
   // Convention 3, the same proof the other checks carry: the lookups must
   // not use a non-null assertion.
   it('does not throw when a threshold level is absent from the array', () => {
     const warnOnly = t.filter((x) => x.level === 'warn');
     const d = {
       byState: [{ state: 'idle in transaction', sessions: 1, longestInStateSecs: 99999 }],
-      oldestIdleInTxnSecs: 99999,
+      oldestIdleInTxnSecs: 99999, oldestIdleInTxnPid: null, oldestIdleInTxnApp: null,
     };
     expect(sessionStates.verdict!(d, warnOnly).level).toBe('warn');
     expect(sessionStates.verdict!(d, []).level).toBe('ok');

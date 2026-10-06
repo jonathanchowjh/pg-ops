@@ -4,7 +4,8 @@ import { SERIES } from '@pgops/checks';
 import type { Interval } from '@pgops/checks';
 import { runSeriesFor } from '@/lib/check';
 import { queryTextFor } from '@/lib/load';
-import { Sql } from '@/components/sql';
+import { ExplainLink } from '@/components/explain-link';
+import { safeStatement, Sql } from '@/components/sql';
 import { LineChart, type ChartPoint } from '@/components/line-chart';
 import { formatCount, formatMillis } from '@/lib/format';
 
@@ -66,6 +67,14 @@ export default async function QueryDetail({
           {sql === null ? null : <><code className="font-mono">{queryid}</code> · </>}
           Movement over the last {HOURS} hours, between captures.
         </p>
+        {/* A9: one click to the plan, from the one page that holds the FULL
+            statement rather than the two-line clamp the ranking shows.
+            Absent when the text could not be recovered — the heading already
+            degrades to the bare id, and a control that handed an empty
+            statement to the Explain form could not work. */}
+        {sql === null ? null : (
+          <p className="mt-1"><ExplainLink name={name} statement={safeStatement(sql)} /></p>
+        )}
       </div>
 
       <History history={history} />

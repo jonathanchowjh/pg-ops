@@ -163,10 +163,13 @@ import { killBackend, killLongRunning } from './actions/kill.js';
 import { resetQueryStats, resetStats } from './actions/stats.js';
 import { analyzeTables } from './actions/analyze.js';
 import { captureOnce } from './capture.js';
+import { activity } from './checks/activity.js';
 import { blocked } from './checks/blocked.js';
 import { connectionDetail, connections } from './checks/connections.js';
 import { invalidConstraints } from './checks/constraints.js';
+import { databaseActivity } from './checks/database-activity.js';
 import { identity } from './checks/identity.js';
+import { horizon } from './checks/horizon.js';
 import { indexBloat } from './checks/index-bloat.js';
 import {
   duplicateIndexes, indexCaching, indexHitRate, indexList, indexUsage,
@@ -181,6 +184,7 @@ import { sequences } from './checks/sequences.js';
 import { sessionStates, sessions } from './checks/sessions.js';
 import { settings } from './checks/settings.js';
 import { slots } from './checks/slots.js';
+import { standbys } from './checks/standbys.js';
 import { databaseSize, relationSizes, tableSizes } from './checks/space.js';
 import { tableList } from './checks/table-list.js';
 import { tableCaching, tableHitRate, tableStats, unusedTables } from './checks/tables.js';
@@ -191,12 +195,15 @@ import { explain } from './tools/explain.js';
 import { suggestedIndexes } from './tools/suggested-indexes.js';
 
 export const CHECKS = {
+  activity,
   autovacuumDanger,
   blocked,
   connectionDetail,
   connections,
+  databaseActivity,
   databaseSize,
   duplicateIndexes,
+  horizon,
   identity,
   indexBloat,
   indexCaching,
@@ -217,6 +224,7 @@ export const CHECKS = {
   sessionStates,
   settings,
   slots,
+  standbys,
   tableCaching,
   tableHitRate,
   tableList,

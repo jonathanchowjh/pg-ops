@@ -94,6 +94,10 @@ LIMIT $1`;
  */
 export const invalidConstraints: Check<ConstraintRow, ConstraintData, ListOpts> = {
   id: 'invalidConstraints',
+  // A7: the count reaches the hygiene cache and so the triage page and the
+  // overview, without a verdict being invented for a finding that is worth
+  // doing something about and is not a reason to call a database unwell.
+  found: (d) => (d.total === 0 ? null : `${d.total} ${d.total === 1 ? 'unvalidated constraint' : 'unvalidated constraints'}`),
   title: 'Invalid constraints',
   gate: 'keep-up',
   class: 'hygiene',

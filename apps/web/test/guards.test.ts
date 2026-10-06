@@ -201,6 +201,44 @@ describe('module specifiers', () => {
 
 describe('redaction', () => {
   /**
+   * A9 drove a password into the rendered HTML, and this is the guard that
+   * would have stopped it.
+   *
+   * `ExplainLink` is a CLIENT component, so whatever is passed to it is
+   * serialised into the RSC payload embedded in the page — before the
+   * component runs. Redacting inside it is therefore impossible: the raw
+   * value has already crossed the boundary. (Same class as 2c2ea5e, a
+   * password reaching the payload through a React key.)
+   *
+   * The Queries page handed it `q.query` straight from
+   * `pg_stat_statements`, and `routes.int.test.ts` caught it end to end:
+   * `/db/primary/queries leaked the password`. The sibling guard below could
+   * not, because A9 bound the value as `const statement = q.query` first —
+   * precisely the "lifts the value out first" bypass that guard's own
+   * KNOWN LIMITS section documents. Worth recording: the plan text for A9
+   * suggested that rename explicitly, as a way to avoid tripping the guard.
+   * Renaming a variable to get past a redaction guard is a warning, not a
+   * workaround.
+   *
+   * So this asserts the PERMITTED SHAPE rather than grepping for a
+   * violation: every `statement=` prop on an `ExplainLink` must be wrapped
+   * in `safeStatement(...)`, which is the one function that collapses a
+   * statement to a line and then redacts it — in that order, for the reason
+   * `Sql` documents.
+   */
+  it('every statement handed to a client component is redacted first', () => {
+    const offenders: string[] = [];
+    for (const file of [...sources(APP), ...sources(COMPONENTS)]) {
+      const code = strip(readFileSync(file, 'utf8'));
+      for (const tag of code.match(/<ExplainLink[^>]*>/g) ?? []) {
+        if (!/statement=\{safeStatement\(/.test(tag)) offenders.push(`${file}: ${tag.trim()}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+
+  /**
    * §7.3: every rendered query goes through `redactSecrets`. `Sql` is the one
    * component that calls it, so the enforceable form of the rule is that no
    * page renders a query-shaped field except through `Sql`.
@@ -282,6 +320,48 @@ describe('redaction', () => {
       // destructuring pattern, and it renders nothing at all.
       const direct = code.match(/(?:>\s*|[=$}])\{[^{}]*\bquery\b[^{}]*\}/g) ?? [];
       if (direct.length > 0) offenders.push(`${file}: ${direct.join(', ')}`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  /**
+   * The sessions-page password leak, closed here. A React `key` is not
+   * rendered as an HTML attribute, which invites the assumption that it is
+   * therefore invisible. Under React Server Components it is NOT invisible:
+   * the key is serialized into the Flight payload embedded inside the
+   * page's own HTML document, so a secret used as a key is published exactly
+   * as if it had been rendered as text. `apps/web/app/db/[name]/sessions/
+   * page.tsx` did `<li key={s.queryId ?? statement ?? ''}>` one line above a
+   * `<Sql>{statement}</Sql>` that redacted the very same value correctly —
+   * and the guard above, which asks whether a `query` field sits in a
+   * rendering position, had no notion that a `key={…}` expression IS a
+   * rendering position, so it walked straight past. tsc was clean. All 43
+   * web tests were green. The change had been through three reviews. It
+   * took `routes.int.test.ts` seeding a real password into a real
+   * `pg_stat_activity.query` and grepping the served HTML to catch it —
+   * because that test reads what actually reached the wire, and nothing
+   * else in the suite does.
+   *
+   * This asks the same field-name question the guard above already asks
+   * (`query`, `statement`, a `.sql` accessor — the shapes it already treats
+   * as query-ish) of every `key={…}` expression instead of every rendering
+   * position. `\bquery\b`/`\bstatement\b` keep `queryid` and `queryAgeSecs`
+   * out of it, the same word-boundary reasoning as the guard above.
+   */
+  it('no key= expression is built from a query-ish field', () => {
+    const offenders: string[] = [];
+    const FIELD = /\b(query|statement)\b|\.sql\b/;
+    for (const file of [...sources(APP), ...sources(COMPONENTS)]) {
+      const code = strip(readFileSync(file, 'utf8'));
+      // One level of nested braces tolerated, so a template-literal key such
+      // as `key={`${w.type}-${w.event ?? ''}`}` is matched as a single span
+      // rather than being cut short at its first inner `}`.
+      for (const m of code.matchAll(/key\s*=\s*\{(?:[^{}]|\{[^{}]*\})*\}/g)) {
+        if (FIELD.test(m[0])) {
+          const line = code.slice(0, m.index).split('\n').length;
+          offenders.push(`${file}:${line}: ${m[0]}`);
+        }
+      }
     }
     expect(offenders).toEqual([]);
   });
@@ -624,6 +704,40 @@ describe('operator SQL', () => {
       .filter((p) => /\bPREPARE\s/.test(strip(readFileSync(p, 'utf8'))))
       .map((p) => p.slice(CHECKS_SRC.length + 1));
     expect(offenders).toEqual([join('tools', 'explain.ts')]);
+  });
+});
+
+/**
+ * B11. The Triage band's Throughput line was a span written in the triage
+ * page that formatted `commitsPerSec` and `rollbacksPerSec` itself — a
+ * second copy of the formatting in `components/throughput.tsx`, whose own
+ * docblock says it is shared "rather than written twice". The copy went
+ * unnoticed until the console's own-share clause was added to the component
+ * and reached every surface except the single line that band renders.
+ *
+ * The guard is on the FORMATTING, not on the import: a page that renders
+ * `<Throughput>` and also hand-builds a rate string beside it is the state
+ * this prevents, and that passes any import-only check.
+ */
+describe('the throughput line', () => {
+  const RATE_FIELDS = /\b(commitsPerSec|rollbacksPerSec|tempBytesPerSec|cacheHitPct|ownPerSec)\b/;
+
+  it('is formatted in one component, not re-written by the pages that show it', () => {
+    const offenders = [...sources(APP), ...sources(COMPONENTS)]
+      .filter((f) => f !== join(COMPONENTS, 'throughput.tsx'))
+      .filter((f) => RATE_FIELDS.test(strip(readFileSync(f, 'utf8'))));
+
+    expect(offenders.map((f) => f.replace(WEB_ROOT, ''))).toEqual([]);
+  });
+
+  /**
+   * And the pages really do render it, so the guard above cannot be
+   * satisfied by a page that simply stopped showing throughput at all.
+   */
+  it('is rendered by both surfaces that carry it', () => {
+    for (const page of [join(APP, 'db', '[name]', 'page.tsx'), join(APP, 'db', '[name]', 'queries', 'page.tsx')]) {
+      expect(strip(readFileSync(page, 'utf8')), page).toMatch(/<Throughput\b/);
+    }
   });
 });
 
