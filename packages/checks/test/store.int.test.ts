@@ -1,10 +1,10 @@
 import type { PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
 import { CURRENT_VERSION, migrate } from '../src/store/schema.js';
-import { withAdvisoryLock } from '../src/store/lock.js';
+import { HEALTH_LOCK_NS, releaseCaptureLock, tryCaptureLock, withAdvisoryLock } from '../src/store/lock.js';
 import {
-  RETENTION, insertQueryStats, insertSpaceStats, prune, recordCheckResults, upsertDatabase,
-  upsertQueries,
+  HEALTH_COLUMNS, RETENTION, healthIsFresh, insertHealth, insertQueryStats, insertSpaceStats, prune,
+  recordCheckResults, upsertDatabase, upsertQueries, type HealthRow,
 } from '../src/store/write.js';
 import {
   readCheckResults, readQueryStats, readRelationSpace, readSpaceGrowth,
@@ -50,7 +50,7 @@ describe('migrate', () => {
       // migration is supposed to change, so it should be edited by whoever
       // changes it and read by whoever reviews that.
       expect(rows.map((r) => r.table_name)).toEqual([
-        'check_results', 'databases', 'queries', 'query_load', 'query_stats',
+        'check_results', 'databases', 'health_stats', 'queries', 'query_load', 'query_stats',
         'schema_version', 'space_stats',
       ]);
     });
@@ -601,6 +601,111 @@ describe('the hygiene cache', () => {
       const dbId = await upsertDatabase(client, 'prod');
       await expect(recordCheckResults(client, dbId, at('2026-09-23T10:00:00Z'), []))
         .resolves.toBeUndefined();
+    });
+  });
+});
+
+
+function blankHealth(over: Partial<HealthRow> = {}): HealthRow {
+  const row = Object.fromEntries(HEALTH_COLUMNS.map((c) => [c, null])) as HealthRow;
+  return { ...row, ...over };
+}
+
+describe('health_stats', () => {
+  it('stores a row whose every column is null, because null is not zero', async () => {
+    await withPostgres(async (_ctx, pool) => {
+      await migrate(pool);
+      const client = await pool.connect();
+      try {
+        const id = await upsertDatabase(client, 'prod');
+        await insertHealth(client, id, blankHealth(), RETENTION.healthStatsDays);
+        const { rows } = await client.query(
+          'SELECT connections, xact_commit, wal_bytes FROM pgops.health_stats WHERE database_id = $1', [id]);
+        expect(rows).toEqual([{ connections: null, xact_commit: null, wal_bytes: null }]);
+      } finally {
+        client.release();
+      }
+    });
+  });
+
+  it('keeps a counter larger than a 32-bit integer', async () => {
+    await withPostgres(async (_ctx, pool) => {
+      await migrate(pool);
+      const client = await pool.connect();
+      try {
+        const id = await upsertDatabase(client, 'prod');
+        await insertHealth(client, id,
+          blankHealth({ xact_commit: '9000000000', wal_bytes: '123456789012345678901' }),
+          RETENTION.healthStatsDays);
+        const { rows } = await client.query<{ c: string; w: string }>(
+          'SELECT xact_commit::text AS c, wal_bytes::text AS w FROM pgops.health_stats WHERE database_id = $1', [id]);
+        expect(rows[0]).toEqual({ c: '9000000000', w: '123456789012345678901' });
+      } finally {
+        client.release();
+      }
+    });
+  });
+
+  it('prunes rows past retention in the same call that inserts', async () => {
+    await withPostgres(async (_ctx, pool) => {
+      await migrate(pool);
+      const client = await pool.connect();
+      try {
+        const id = await upsertDatabase(client, 'prod');
+        await client.query(
+          `INSERT INTO pgops.health_stats (database_id, captured_at, blocked)
+           VALUES ($1, now() - interval '91 days', 1), ($1, now() - interval '89 days', 2)`, [id]);
+        await insertHealth(client, id, blankHealth({ blocked: 3 }), 90);
+        const { rows } = await client.query<{ blocked: number }>(
+          'SELECT blocked FROM pgops.health_stats WHERE database_id = $1 ORDER BY captured_at', [id]);
+        expect(rows.map((r) => r.blocked)).toEqual([2, 3]);
+      } finally {
+        client.release();
+      }
+    });
+  });
+
+  it('calls a row fresh for 45 seconds and not after', async () => {
+    await withPostgres(async (_ctx, pool) => {
+      await migrate(pool);
+      const client = await pool.connect();
+      try {
+        const id = await upsertDatabase(client, 'prod');
+        expect(await healthIsFresh(client, id)).toBe(false);
+        await client.query(
+          `INSERT INTO pgops.health_stats (database_id, captured_at) VALUES ($1, now() - interval '50 seconds')`, [id]);
+        expect(await healthIsFresh(client, id)).toBe(false);
+        await client.query(
+          `INSERT INTO pgops.health_stats (database_id, captured_at) VALUES ($1, now() - interval '40 seconds')`, [id]);
+        expect(await healthIsFresh(client, id)).toBe(true);
+      } finally {
+        client.release();
+      }
+    });
+  });
+
+  it('locks health apart from capture, so neither tick starves the other', async () => {
+    await withPostgres(async (_ctx, pool) => {
+      await migrate(pool);
+      const a = await pool.connect();
+      const b = await pool.connect();
+      try {
+        const id = await upsertDatabase(a, 'prod');
+        expect(await tryCaptureLock(a, id)).toBe(true);                    // capture namespace
+        expect(await tryCaptureLock(b, id, HEALTH_LOCK_NS)).toBe(true);    // health namespace: still free
+        const c = await pool.connect();
+        try {
+          expect(await tryCaptureLock(c, id, HEALTH_LOCK_NS)).toBe(false); // health is held by b
+          expect(await tryCaptureLock(c, id)).toBe(false);                 // capture is held by a
+        } finally {
+          c.release();
+        }
+        await releaseCaptureLock(a, id);
+        await releaseCaptureLock(b, id, HEALTH_LOCK_NS);
+      } finally {
+        a.release();
+        b.release();
+      }
     });
   });
 });

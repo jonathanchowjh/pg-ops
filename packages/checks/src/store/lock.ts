@@ -16,6 +16,14 @@ export const MIGRATION_LOCK_KEY = 4021975;
 export const CAPTURE_LOCK_NS = 4021976;
 
 /**
+ * Namespace for the per-database health lock. Separate from the capture
+ * lock on purpose: the five-minute capture can hold its lock for a long time
+ * on a database with many relations, and a health tick that shared it would
+ * skip every minute the capture ran — a gap in the chart caused by pgops.
+ */
+export const HEALTH_LOCK_NS = 4021977;
+
+/**
  * Run `fn` holding a session-level advisory lock, on one dedicated client.
  *
  * The lock must be taken and released on the SAME connection — advisory locks
@@ -63,10 +71,11 @@ export async function withAdvisoryLock<T>(
 export async function tryCaptureLock(
   client: import('pg').PoolClient,
   databaseId: number,
+  ns: number = CAPTURE_LOCK_NS,
 ): Promise<boolean> {
   const { rows } = await client.query<{ locked: boolean }>(
     'SELECT pg_try_advisory_lock($1, $2) AS locked',
-    [CAPTURE_LOCK_NS, databaseId],
+    [ns, databaseId],
   );
   return rows[0]!.locked;
 }
@@ -74,8 +83,9 @@ export async function tryCaptureLock(
 export async function releaseCaptureLock(
   client: import('pg').PoolClient,
   databaseId: number,
+  ns: number = CAPTURE_LOCK_NS,
 ): Promise<void> {
   await client
-    .query('SELECT pg_advisory_unlock($1, $2)', [CAPTURE_LOCK_NS, databaseId])
+    .query('SELECT pg_advisory_unlock($1, $2)', [ns, databaseId])
     .catch(() => {});
 }

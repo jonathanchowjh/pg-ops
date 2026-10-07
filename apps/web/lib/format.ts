@@ -251,3 +251,34 @@ export function planLines(node: PlanNode, depth = 0, pad = 0): string[] {
   }
   return lines;
 }
+
+/**
+ * What a health figure measures. A string and not a formatting function
+ * because chart props cross from a server page into a client component, and
+ * a function cannot make that trip.
+ */
+export type Unit = 'count' | 'sessions' | 'secs' | 'bytes' | 'bytesPerSec' | 'perSec' | 'pct';
+
+export function formatUnit(unit: Unit, v: number): string {
+  switch (unit) {
+    case 'count': return formatCount(Math.round(v));
+    // An average number of sessions is usually a fraction; 0.25 must not print as 0.
+    case 'sessions': return v === 0 ? '0' : v < 0.1 ? v.toFixed(3) : v < 10 ? v.toFixed(2) : v.toFixed(1);
+    case 'secs': return formatDuration(v);
+    case 'bytes': return formatBytes(v);
+    case 'bytesPerSec': return `${formatBytes(v)}/s`;
+    case 'perSec':
+      if (v === 0) return '0/s';
+      if (v < 0.1) return `${v.toFixed(2)}/s`;
+      return v < 10 ? `${v.toFixed(1)}/s` : `${formatCount(Math.round(v))}/s`;
+    case 'pct': return `${v.toFixed(1)}%`;
+  }
+}
+
+/**
+ * A chart's time label. UTC and fixed-width, so the server and the browser
+ * print the same string and a URL shared between time zones means one thing.
+ */
+export function formatUtc(ms: number): string {
+  return new Date(ms).toISOString().slice(5, 16).replace('T', ' ');
+}

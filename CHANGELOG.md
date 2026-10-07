@@ -15,6 +15,15 @@ why several entries below are defects no test could see.
 
 ### Added
 
+- **Health over time.** One row per database per minute in a new store table,
+  `pgops.health_stats` (migration 005), kept 90 days; measured at 39 MB per
+  database. `/health` charts every database's last 48 hours.
+  `/db/<name>/health` charts one database under the four gates over 6 hours
+  to 90 days, with a trend fitted through daily peaks, a projection for
+  connections and transaction ID age, and one cursor across every chart.
+  Stored session counts are per database; the live checks are unchanged and
+  still server-wide. A role that cannot see other sessions stores no count
+  rather than a low one.
 - **Active now** on Sessions and in the triage Queries band — what the server
   is doing this instant, by wait event type and by statement shape. The first
   question a DBA asks during an incident, and the one this console could not
@@ -48,6 +57,8 @@ why several entries below are defects no test could see.
 
 ### Changed
 
+- The tab strip has a seventh tab, Health, and a second tab that does not
+  poll.
 - **One incident is one card.** A seeded lock chain used to light four
   separate triage panels about the same pid, in three different bands. Each
   panel now folds to a line pointing at the Lock wait graph when the pid it

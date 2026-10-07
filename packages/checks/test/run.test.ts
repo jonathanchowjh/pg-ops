@@ -225,8 +225,8 @@ describe('queryWithTimeout: pool hygiene when ROLLBACK itself fails', () => {
     const releaseCalls: unknown[] = [];
     const fakeClient = {
       query: async (text: string) => {
-        if (text === 'ROLLBACK') throw new Error('connection lost');
-        if (text === 'BEGIN' || text.startsWith('SET LOCAL')) return { rows: [] };
+        if (text.startsWith('ROLLBACK')) throw new Error('connection lost');
+        if (text.startsWith('BEGIN') || text.startsWith('SET LOCAL')) return { rows: [] };
         throw new Error('query failed');
       },
       on: () => {},
@@ -249,8 +249,8 @@ describe('queryWithTimeout: pool hygiene when ROLLBACK itself fails', () => {
     const releaseCalls: unknown[] = [];
     const fakeClient = {
       query: async (text: string) => {
-        if (text === 'ROLLBACK') return { rows: [] };
-        if (text === 'BEGIN' || text.startsWith('SET LOCAL')) return { rows: [] };
+        if (text.startsWith('ROLLBACK')) return { rows: [] };
+        if (text.startsWith('BEGIN') || text.startsWith('SET LOCAL')) return { rows: [] };
         throw new Error('query failed');
       },
       on: () => {},

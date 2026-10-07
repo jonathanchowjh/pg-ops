@@ -29,10 +29,11 @@ import type { Gate } from '@pgops/checks';
  *
  * WHY THE STRIP IS NOT YET SPLIT INTO TWO BANDS, since `mode` now records the
  * side every tab falls on and rendering it would be a few lines. Grouping the
- * six tabs today gives **five in Now and one in Explore**. Queries and Cleanup
+ * seven tabs today gives **five in Now and two in Explore** (Tables, and
+ * Health, which reads stored history and does not poll). Queries and Cleanup
  * both poll, so both are Now, while everything underneath them — indexes,
  * bloat, suggested indexes, space, maintenance, sequences — is hygiene that
- * runs on visit. A band labelled Explore holding one tab, beside a band
+ * runs on visit. A band labelled Explore holding two tabs, beside a band
  * labelled Now whose largest tab is a doorway to hygiene, is a label
  * contradicting its contents. That is the defect the triage bands already had
  * once, when they were named `Saturation` / `Lock chains` / `Slow queries` /
@@ -76,4 +77,5 @@ export const TABS: readonly Tab[] = [
   // here, which is what made a label-derived mapping in nav.test.tsx assert
   // "Replication" — a word that is not on the page at all.
   { segment: 'cleanup', href: '/cleanup', label: 'Cleanup', mode: 'now', gate: 'keep-up' },
+  { segment: 'health', href: '/health', label: 'Health', mode: 'explore', gate: null },
 ] as const;

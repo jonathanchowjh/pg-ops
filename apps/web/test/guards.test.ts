@@ -526,11 +526,18 @@ describe('the poll boundary', () => {
    */
   const OVERVIEW = join(APP, 'page.tsx');
 
+  /**
+   * The fleet health page polls at the capture cadence. Faster would redraw
+   * the same rows; and it reads the store only, so its tick costs the
+   * monitored databases nothing.
+   */
+  const FLEET_HEALTH = join(APP, 'health', 'page.tsx');
+
   it('renders <Refresh> in exactly the incident pages and the overview', () => {
     const polling = sources(APP)
       .filter((f) => /<Refresh\b/.test(strip(readFileSync(f, 'utf8'))))
       .sort();
-    expect(polling).toEqual([...INCIDENT_PAGES, OVERVIEW].sort());
+    expect(polling).toEqual([...INCIDENT_PAGES, OVERVIEW, FLEET_HEALTH].sort());
   });
 
   /**
@@ -576,6 +583,12 @@ describe('the poll boundary', () => {
     for (const page of INCIDENT_PAGES) {
       expect(interval(OVERVIEW)).toBeGreaterThan(interval(page));
     }
+  });
+
+  it('polls fleet health once a minute, and never the monitored databases', () => {
+    const code = strip(readFileSync(FLEET_HEALTH, 'utf8'));
+    expect(code).toMatch(/<Refresh\s+intervalMs=\{60_000\}/);
+    expect(code).not.toMatch(/runCheckFor|contextFor|CHECKS\./);
   });
 });
 
@@ -644,6 +657,18 @@ describe('the DDL boundary', () => {
 
 describe('capture', () => {
   const RESET = /pg_stat_statements_reset|pg_stat_reset\b/i;
+
+  /**
+   * `health` is optional on SchedulerDeps so the scheduler's tests need not
+   * all supply one. That makes forgetting it here silent: the console would
+   * start, capture every five minutes, and never write a health row.
+   */
+  it('wires the health tick into the scheduler at boot', () => {
+    const code = strip(readFileSync(fileURLToPath(new URL('../instrumentation.ts', import.meta.url)), 'utf8'));
+    expect(code).toMatch(/health:\s*async/);
+    expect(code).toMatch(/captureHealth\(/);
+    expect(code).toMatch(/ownStatementsTotal\(/);
+  });
 
   /**
    * The parent spec §4.3 calls this the strongest product claim in the design.

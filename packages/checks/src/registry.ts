@@ -189,6 +189,7 @@ import { databaseSize, relationSizes, tableSizes } from './checks/space.js';
 import { tableList } from './checks/table-list.js';
 import { tableCaching, tableHitRate, tableStats, unusedTables } from './checks/tables.js';
 import { wraparound } from './checks/wraparound.js';
+import { healthHistory } from './series/health.js';
 import { historicalQueryStats, queryShapeHistory } from './series/query-stats.js';
 import { relationSpace, spaceGrowth } from './series/space.js';
 import { explain } from './tools/explain.js';
@@ -268,7 +269,7 @@ export const ACTIONS = {
  * parity map can name a real thing and the test can prove it exists.
  */
 export const SERIES = {
-  historicalQueryStats, queryShapeHistory, relationSpace, spaceGrowth,
+  healthHistory, historicalQueryStats, queryShapeHistory, relationSpace, spaceGrowth,
 } as const;
 export type SeriesId = keyof typeof SERIES;
 

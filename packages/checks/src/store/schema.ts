@@ -4,6 +4,7 @@ import { SQL as M001 } from './migrations/001-initial.js';
 import { SQL as M002 } from './migrations/002-query-stats-query-id.js';
 import { SQL as M003 } from './migrations/003-check-results.js';
 import { SQL as M004 } from './migrations/004-query-load.js';
+import { SQL as M005 } from './migrations/005-health-stats.js';
 
 /**
  * Forward-only, numbered, idempotent. No migration framework — the list is
@@ -13,7 +14,7 @@ import { SQL as M004 } from './migrations/004-query-load.js';
  * `register()` fires on every dev-server restart, so re-running is the normal
  * case rather than the exceptional one.
  */
-const MIGRATIONS: readonly string[] = [M001, M002, M003, M004];
+const MIGRATIONS: readonly string[] = [M001, M002, M003, M004, M005];
 
 /** The version this build knows how to produce. */
 export const CURRENT_VERSION = MIGRATIONS.length;

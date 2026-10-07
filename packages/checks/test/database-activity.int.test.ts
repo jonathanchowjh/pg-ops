@@ -6,6 +6,18 @@ import { awaitPublished, withPostgres } from './harness.js';
 describe('databaseActivity', () => {
   it('reads this database\'s counters and they move with work', async () => {
     await withPostgres(async (ctx, pool) => {
+      // On Postgres 14 the statistics collector creates a database's entry
+      // when its first message arrives, a moment after the database exists.
+      // Read before that, `stats_reset` is null; read after, it is the
+      // entry's creation time, and `counterRates` rightly calls that a
+      // reset. Whether the first reading beat the collector was a race this
+      // test lost four runs in four on 2026-10-07, on a commit that had
+      // passed the full matrix that morning. Wait for the entry.
+      await awaitPublished(
+        pool,
+        'the database\'s statistics entry',
+        'SELECT (xact_commit > 0)::boolean AS ready FROM pg_stat_database WHERE datname = current_database()',
+      );
       const a = await runCheck(ctx, databaseActivity);
       if (!a.ok) throw new Error(a.message);
       await pool.query('CREATE TABLE da_t (id int)');

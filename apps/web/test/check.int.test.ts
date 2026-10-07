@@ -68,3 +68,36 @@ describe('runCheckFor', () => {
     expect(r.ok).toBe(false);
   });
 });
+
+/**
+ * Final review. Only `pool.query` was counted, and the health tick samples
+ * on a checked-out client: the commit chart showed a floor of pgops's own
+ * making while "statements pgops itself sent" read zero, which is the case
+ * that line was added for.
+ */
+describe('ownStatementsTotal', () => {
+  it('counts statements sent on a checked-out client, but not transaction control', async () => {
+    const { contextFor, ownStatementsTotal } = await import('../lib/pools.js');
+    const ctx = await contextFor('primary');
+    const before = ownStatementsTotal('primary');
+    const client = await ctx.target.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET LOCAL statement_timeout = 5000');
+      await client.query('SELECT 1');
+      await client.query({ text: 'SELECT 2' });
+      await client.query('COMMIT');
+    } finally {
+      client.release();
+    }
+    expect(ownStatementsTotal('primary') - before).toBe(2);
+    // The same client comes back from the pool; it must not be wrapped twice.
+    const again = await ctx.target.connect();
+    try {
+      await again.query('SELECT 3');
+    } finally {
+      again.release();
+    }
+    expect(ownStatementsTotal('primary') - before).toBe(3);
+  });
+});

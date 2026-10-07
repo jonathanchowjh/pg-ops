@@ -5,8 +5,19 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": "./dist/index.js" },
-  "scripts": { "build": "rm -rf dist && tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
-  "dependencies": { "pg": "^8.13.1" },
-  "devDependencies": { "@types/pg": "^8.11.10", "@testcontainers/postgresql": "^12.1.0" }
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^12.1.0",
+    "@types/pg": "^8.11.10",
+    "testcontainers": "^12.1.0"
+  }
 }

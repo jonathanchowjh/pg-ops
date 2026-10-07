@@ -183,10 +183,14 @@ async function queryWithTimeout(
   const client = await ctx.target.connect();
   const release = guardClient(client);
   try {
-    await client.query('BEGIN');
-    await client.query(`SET LOCAL statement_timeout = ${ms}`);
+    // The envelope is marked as pgops's own, like the statement inside it.
+    // Sent bare, BEGIN and COMMIT became the two most-called statements on a
+    // monitored database and the Queries page ranked them: the exclusion
+    // looks for the marker and these did not carry it.
+    await client.query(ownSql('BEGIN'));
+    await client.query(ownSql(`SET LOCAL statement_timeout = ${ms}`));
     const result = await client.query(text, values);
-    await client.query('COMMIT');
+    await client.query(ownSql('COMMIT'));
     // A committed transaction leaves the connection clean — no SET LOCAL,
     // no open transaction — so releasing it with no argument (return to
     // pool, reuse as-is) is correct.
@@ -207,7 +211,7 @@ async function queryWithTimeout(
     // to release() is what tells pg-pool to destroy the connection instead
     // of returning it to the pool — a plain release() here would not.
     try {
-      await client.query('ROLLBACK');
+      await client.query(ownSql('ROLLBACK'));
       release();
     } catch (rollbackErr) {
       release(rollbackErr instanceof Error ? rollbackErr : new Error(String(rollbackErr)));

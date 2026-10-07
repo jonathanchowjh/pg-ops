@@ -130,16 +130,18 @@ export async function analyzeTables(
     try {
       for (const { qualified } of rows) {
         try {
-          await client.query('BEGIN');
-          await client.query(`SET LOCAL lock_timeout = ${lockMs}`);
-          await client.query(`SET LOCAL statement_timeout = ${stmtMs}`);
-          await client.query(`ANALYZE ${qualified}`);
-          await client.query('COMMIT');
+          // All marked as pgops's own, the ANALYZE included: an operator who
+          // clicks this and then opens Queries should not find the click.
+          await client.query(ownSql('BEGIN'));
+          await client.query(ownSql(`SET LOCAL lock_timeout = ${lockMs}`));
+          await client.query(ownSql(`SET LOCAL statement_timeout = ${stmtMs}`));
+          await client.query(ownSql(`ANALYZE ${qualified}`));
+          await client.query(ownSql('COMMIT'));
           results.push({ relation: qualified, ok: true });
         } catch (err) {
           // Unwind before the next iteration: until this runs, every statement
           // on this connection fails with "current transaction is aborted".
-          await client.query('ROLLBACK').catch(() => {});
+          await client.query(ownSql('ROLLBACK')).catch(() => {});
           results.push({
             relation: qualified,
             ok: false,

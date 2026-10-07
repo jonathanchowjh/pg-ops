@@ -1,0 +1,164 @@
+import { describe, expect, it } from 'vitest';
+import { OWN_SQL_MARKER, runCheck } from '../src/run.js';
+import type { Check } from '../src/types.js';
+import { HEALTH_PARTS, healthRow, sampleHealth, type HealthParts } from '../src/health.js';
+
+const PARTS: HealthParts = {
+  database: {
+    sessions: '10', sessions_abandoned: '1', sessions_fatal: '0', sessions_killed: '0',
+    idle_in_transaction_time: 1500, active_time: 9000, deadlocks: '2',
+    xact_commit: '9000000000', xact_rollback: '5', blks_hit: '100', blks_read: '4', temp_bytes: '0',
+    stats_reset: new Date('2026-10-01T00:00:00Z'), xid_age: '1200',
+    wal_bytes: '123456789012345678901',
+  },
+  activity: {
+    server_connections: 40, connections: 12, hidden: 0, active: 3, idle_in_txn: 1,
+    longest_query_secs: 4.5, max_connections: 97,
+  },
+  wait: { blocked: 2, longest_wait_secs: 31 },
+  replication: { replication_lag_secs: null },
+  xmin: { xmin_age: '77' },
+  size: { size_bytes: '8000000' },
+};
+
+describe('healthRow', () => {
+  it('carries every part into its columns, counters untouched', () => {
+    const row = healthRow(PARTS, 6);
+    expect(row.xact_commit).toBe('9000000000');
+    expect(row.wal_bytes).toBe('123456789012345678901');
+    expect(row).toMatchObject({
+      connections: 12, server_connections: 40, max_connections: 97,
+      blocked: 2, longest_wait_secs: 31, active: 3, idle_in_txn: 1,
+      own_statements: 6, xid_age: '1200', xmin_age: '77', replication_lag_secs: null,
+    });
+  });
+
+  it('stores null, not zero, for a part that could not be read', () => {
+    const row = healthRow({ ...PARTS, wait: null, database: null }, null);
+    expect(row.blocked).toBeNull();
+    expect(row.longest_wait_secs).toBeNull();
+    expect(row.xact_commit).toBeNull();
+    expect(row.size_bytes).toBe('8000000');
+    expect(row.own_statements).toBeNull();
+    expect(row.connections).toBe(12);
+  });
+
+  it('nulls every session count when the role cannot see other sessions', () => {
+    const row = healthRow({ ...PARTS, activity: { ...PARTS.activity!, hidden: 5 } }, 0);
+    expect(row.connections).toBeNull();
+    expect(row.server_connections).toBeNull();
+    expect(row.active).toBeNull();
+    expect(row.idle_in_txn).toBeNull();
+    expect(row.longest_query_secs).toBeNull();
+    // The limit is a setting, not a count of sessions. It is still known.
+    expect(row.max_connections).toBe(97);
+  });
+});
+
+/**
+ * Final review. Size was read in the same statement as the thirteen
+ * counters, and pg_database_size stats every relation file: on a database
+ * with many relations it timed out every minute and took every rate chart
+ * with it, for ever, with nothing logged.
+ */
+describe('the size part', () => {
+  it('fails alone: the counters still land', () => {
+    const row = healthRow({ ...PARTS, size: null }, null);
+    expect(row.size_bytes).toBeNull();
+    expect(row.xact_commit).toBe('9000000000');
+  });
+
+  it('is sampled last, so its timeout costs nothing else', () => {
+    expect(HEALTH_PARTS[HEALTH_PARTS.length - 1]).toBe('size');
+  });
+});
+
+/** A pool whose one client records what it is sent and fails where told to. */
+function fakePool(fail: (sql: string) => unknown) {
+  const sent: string[] = [];
+  let released = 0;
+  const client = {
+    on() {}, removeListener() {}, release() { released += 1; },
+    query: async (sql: string) => {
+      sent.push(sql);
+      const err = fail(sql);
+      if (err) throw err;
+      return { rows: [{}] };
+    },
+  };
+  return { pool: { connect: async () => client } as never, sent, released: () => released };
+}
+
+describe('sampleHealth', () => {
+  /**
+   * Final review. A session-level SET through a transaction-mode pooler
+   * (PgBouncer) lands on a server connection the APPLICATION shares, and the
+   * RESET may land on another: the application's own statements then die at
+   * five seconds. SET LOCAL inside a transaction cannot outlive it.
+   */
+  it('sets its timeout inside a transaction, never on the session', async () => {
+    const { pool, sent, released } = fakePool(() => undefined);
+    const { missing } = await sampleHealth(pool, null);
+    expect(missing).toEqual([]);
+    expect(sent.filter((s) => /^SET LOCAL statement_timeout = \d+/.test(s))).toHaveLength(HEALTH_PARTS.length);
+    expect(sent.filter((s) => s.startsWith('BEGIN'))).toHaveLength(HEALTH_PARTS.length);
+    expect(sent.filter((s) => s.startsWith('COMMIT'))).toHaveLength(HEALTH_PARTS.length);
+    expect(sent.filter((s) => /^(SET statement_timeout|RESET)/.test(s))).toEqual([]);
+    expect(released()).toBe(1);
+  });
+
+  /**
+   * Final review. A database that has stopped answering cost five timeouts
+   * of five seconds each, serially, and enough of those made every OTHER
+   * database's rows arrive too far apart to join.
+   */
+  it('stops asking after the first timeout', async () => {
+    const { pool, sent } = fakePool((sql) => (
+      sql.includes('pg_stat_database') ? Object.assign(new Error('canceling statement'), { code: '57014' }) : undefined
+    ));
+    const { missing } = await sampleHealth(pool, null);
+    expect(missing).toEqual([...HEALTH_PARTS]);
+    expect(sent.some((s) => s.includes('pg_stat_activity'))).toBe(false);
+    expect(sent.filter((s) => s.startsWith('ROLLBACK'))).toHaveLength(1);
+  });
+
+  it('carries on past a failure that is not a timeout', async () => {
+    const { pool, sent } = fakePool((sql) => (
+      sql.includes('pg_stat_replication') ? Object.assign(new Error('permission denied'), { code: '42501' }) : undefined
+    ));
+    const { missing } = await sampleHealth(pool, null);
+    expect(missing).toEqual(['replication']);
+    expect(sent.some((s) => s.includes('pg_prepared_xacts'))).toBe(true);
+  });
+});
+
+/**
+ * Found by reading pg_stat_statements on the dev server after this shipped:
+ * BEGIN and COMMIT were the two most-called statements on the database, and
+ * the Queries page listed them. They were pgops's own, sent bare around
+ * every timed statement, so the ranking's exclusion (which looks for the
+ * marker) could not see them. The health tick added twelve a minute per
+ * database to a leak the timed checks already had.
+ */
+describe('transaction control is marked as pgops\'s own', () => {
+  it('on every statement the health sample sends, including on rollback', async () => {
+    const ok = fakePool(() => undefined);
+    await sampleHealth(ok.pool, null);
+    expect(ok.sent.filter((s) => !s.endsWith(OWN_SQL_MARKER))).toEqual([]);
+    const failing = fakePool((sql) => (sql.includes('pg_stat_wal') ? new Error('boom') : undefined));
+    await sampleHealth(failing.pool, null);
+    expect(failing.sent.filter((s) => !s.endsWith(OWN_SQL_MARKER))).toEqual([]);
+  });
+
+  it('on every statement a timed check sends', async () => {
+    const { pool, sent } = fakePool(() => undefined);
+    const check: Check<unknown, number> = {
+      id: 'probe', title: 'Probe', gate: 'work', class: 'incident', timeoutMs: 1_000,
+      sql: 'SELECT 1', map: (rows) => rows.length,
+    };
+    const res = await runCheck({ target: pool, serverVersion: 170000 }, check);
+    expect(res.ok).toBe(true);
+    expect(sent).toHaveLength(4);
+    expect(sent.filter((s) => !s.endsWith(OWN_SQL_MARKER))).toEqual([]);
+  });
+});

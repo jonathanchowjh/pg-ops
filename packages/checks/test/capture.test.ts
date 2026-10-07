@@ -146,12 +146,12 @@ describe('the pgops marker on every catalog read that bypasses runCheck', () => 
     // catalog read.
     const src = readFileSync(new URL('../src/actions/analyze.ts', import.meta.url), 'utf8');
     for (const stmt of [
-      "client.query('BEGIN')",
-      'client.query(`SET LOCAL lock_timeout = ${lockMs}`)',
-      'client.query(`SET LOCAL statement_timeout = ${stmtMs}`)',
-      'client.query(`ANALYZE ${qualified}`)',
-      "client.query('COMMIT')",
-      "client.query('ROLLBACK')",
+      "client.query(ownSql('BEGIN'))",
+      'client.query(ownSql(`SET LOCAL lock_timeout = ${lockMs}`))',
+      'client.query(ownSql(`SET LOCAL statement_timeout = ${stmtMs}`))',
+      'client.query(ownSql(`ANALYZE ${qualified}`))',
+      "client.query(ownSql('COMMIT'))",
+      "client.query(ownSql('ROLLBACK'))",
     ]) {
       expect(src, stmt).toContain(stmt);
     }

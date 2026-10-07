@@ -186,4 +186,26 @@ describe('analyzeTables audits', () => {
       }
     });
   }, 120_000);
+
+  /**
+   * An operator who clicks Analyze and then opens Queries should not find
+   * the click there. Every statement Analyze sends, the ANALYZE included,
+   * carries the marker the ranking excludes.
+   */
+  it('leaves nothing unmarked in the statement ranking', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE TABLE marked_me (a int)');
+      await pool.query('INSERT INTO marked_me SELECT generate_series(1, 10)');
+      await pool.query('SELECT pg_stat_statements_reset()');
+      const results = await analyzeTables(ctx, { subcommand: 'test', reason: 'marker' }, {});
+      expect(results.every((r) => r.ok)).toBe(true);
+      const { rows } = await pool.query<{ query: string }>(
+        `SELECT query FROM pg_stat_statements
+          WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND query ~* '^\\s*(BEGIN|COMMIT|ROLLBACK|SET LOCAL|ANALYZE)'
+            AND query NOT LIKE '%/* pgops */'`,
+      );
+      expect(rows).toEqual([]);
+    });
+  });
 });

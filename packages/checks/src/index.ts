@@ -13,6 +13,12 @@ export { counterRates } from './checks/database-activity.js';
 export type * from './checks/database-activity.js';
 export { redactSecrets } from './redact.js';
 export { captureOnce, captureHygiene, cacheCheckPass, checkResultRow, queryLoadRow } from './capture.js';
+export { captureHealth, HEALTH_PARTS } from './health.js';
+export type { HealthOutcome } from './health.js';
+export {
+  HEALTH_GAP_SECS, HEALTH_METRICS, HEALTH_MIN_BUCKET_SECS, readHealthHistory,
+} from './series/health.js';
+export type { HealthHistory, HealthMetric, HealthPoint } from './series/health.js';
 export type { StoredCheckWrite } from './store/write.js';
 export { AREAS, HYGIENE_CHECK_IDS, areaEscalates, hygieneAreas } from './checks/areas.js';
 export type { Area, HygieneArea, HygieneLevel, HygieneOpts } from './checks/areas.js';

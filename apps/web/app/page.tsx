@@ -313,6 +313,12 @@ export default async function Overview() {
           <p className="text-sm text-muted-foreground">
             On-call console for Postgres — lock chains, slow queries and replication, live.
           </p>
+          <Link
+            href="/health"
+            className="text-sm underline-offset-4 hover:underline"
+          >
+            Health over time →
+          </Link>
         </div>
         {/*
           The front door was the one surface with no clock and no way to ask

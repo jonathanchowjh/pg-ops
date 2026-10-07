@@ -1,12 +1,12 @@
 import type { PoolClient } from 'pg';
 
-export interface Retention { queryStatsDays: number; spaceStatsDays: number }
+export interface Retention { queryStatsDays: number; spaceStatsDays: number; healthStatsDays: number }
 
 /**
  * pgHero's own defaults. Query stats are dense and short-lived interest;
  * space grows slowly and the interesting window is a quarter.
  */
-export const RETENTION: Retention = { queryStatsDays: 14, spaceStatsDays: 90 };
+export const RETENTION: Retention = { queryStatsDays: 14, spaceStatsDays: 90, healthStatsDays: 90 };
 
 /**
  * Rows per statement, for every batched write here.
@@ -292,4 +292,70 @@ export async function prune(
          AND NOT EXISTS (SELECT 1 FROM pgops.query_stats s WHERE s.query_id = q.id)`,
     [databaseId],
   );
+}
+
+/**
+ * The metric columns of pgops.health_stats, in table order. The insert is
+ * built from this list, so a column added to migration 005's successor is
+ * added here and nowhere else.
+ */
+export const HEALTH_COLUMNS = [
+  'connections', 'server_connections', 'max_connections',
+  'sessions', 'sessions_abandoned', 'sessions_fatal', 'sessions_killed',
+  'blocked', 'longest_wait_secs', 'idle_in_txn', 'idle_in_transaction_time', 'deadlocks',
+  'active', 'active_time', 'longest_query_secs',
+  'xact_commit', 'xact_rollback', 'blks_hit', 'blks_read', 'temp_bytes',
+  'own_statements', 'stats_reset',
+  'replication_lag_secs', 'wal_bytes', 'xid_age', 'xmin_age', 'size_bytes',
+] as const;
+
+export type HealthColumn = (typeof HEALTH_COLUMNS)[number];
+
+/**
+ * 64-bit and numeric counters travel as strings, the way the sampling
+ * statements cast them: a JavaScript number cannot hold a bigint exactly.
+ */
+export type HealthRow = Record<HealthColumn, string | number | Date | null>;
+
+/**
+ * Insert one health row stamped with the store's clock, and prune.
+ *
+ * The caller wraps this in a transaction. Pruning here, every minute, keeps
+ * each delete to about one row; a daily sweep would delete 1,440 per
+ * database at once.
+ */
+export async function insertHealth(
+  client: PoolClient,
+  databaseId: number,
+  row: HealthRow,
+  days: number,
+): Promise<void> {
+  const params = HEALTH_COLUMNS.map((_, i) => `$${i + 2}`).join(', ');
+  await client.query(
+    `INSERT INTO pgops.health_stats (database_id, captured_at, ${HEALTH_COLUMNS.join(', ')})
+     VALUES ($1, now(), ${params})
+     ON CONFLICT DO NOTHING`,
+    [databaseId, ...HEALTH_COLUMNS.map((c) => row[c])],
+  );
+  await client.query(
+    `DELETE FROM pgops.health_stats
+       WHERE database_id = $1 AND captured_at < now() - ($2 || ' days')::interval`,
+    [databaseId, String(days)],
+  );
+}
+
+/**
+ * Whether this database already has a row from the last 45 seconds.
+ *
+ * The advisory lock stops two replicas sampling at the same instant. This
+ * stops two replicas whose ticks are thirty seconds apart from writing two
+ * rows a minute between them.
+ */
+export async function healthIsFresh(client: PoolClient, databaseId: number): Promise<boolean> {
+  const { rows } = await client.query<{ fresh: boolean }>(
+    `SELECT coalesce(max(captured_at) > now() - interval '45 seconds', false) AS fresh
+       FROM pgops.health_stats WHERE database_id = $1`,
+    [databaseId],
+  );
+  return rows[0]!.fresh;
 }

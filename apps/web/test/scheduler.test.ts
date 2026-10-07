@@ -1,6 +1,8 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CAPTURE_INTERVAL_MS, startScheduler, stopScheduler } from '@/lib/scheduler';
+import {
+  CAPTURE_INTERVAL_MS, HEALTH_INTERVAL_MS, HEALTH_SLOW_PASS_MS, startScheduler, stopScheduler,
+} from '@/lib/scheduler';
 
 afterEach(() => { stopScheduler(); vi.useRealTimers(); });
 
@@ -120,5 +122,143 @@ describe('startScheduler', () => {
     await startScheduler(deps);
     await startScheduler(deps);
     expect(migrate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the health tick', () => {
+  const base = () => ({
+    store: {} as never,
+    names: () => ['prod', 'analytics'],
+    capture: vi.fn().mockResolvedValue({ ok: true }),
+    migrate: vi.fn().mockResolvedValue(1),
+  });
+
+  it('samples every database at boot and every minute after', async () => {
+    vi.useFakeTimers();
+    const health = vi.fn().mockResolvedValue({ ok: true, missing: [] });
+    await startScheduler({ ...base(), health });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(health.mock.calls.map((c) => c[0])).toEqual(['prod', 'analytics']);
+    await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS);
+    expect(health).toHaveBeenCalledTimes(4);
+  });
+
+  it('runs beside a capture that is still in flight', async () => {
+    vi.useFakeTimers();
+    const health = vi.fn().mockResolvedValue({ ok: true, missing: [] });
+    let release!: () => void;
+    const capture = vi.fn().mockImplementation(
+      () => new Promise((r) => { release = () => r({ ok: true }); }),
+    );
+    await startScheduler({ ...base(), names: () => ['prod'], capture, health });
+    await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 3);
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(health).toHaveBeenCalledTimes(4);
+    // Released, or the module's `running` flag stays set and starves every later test.
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('skips a tick that lands while one is in flight', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const health = vi.fn().mockImplementation(
+      () => new Promise((r) => { release = () => r({ ok: true, missing: [] }); }),
+    );
+    await startScheduler({ ...base(), names: () => ['prod'], health });
+    await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 2);
+    expect(health).toHaveBeenCalledTimes(1);
+    release();
+  });
+
+  it('stops with the scheduler', async () => {
+    vi.useFakeTimers();
+    const health = vi.fn().mockResolvedValue({ ok: true, missing: [] });
+    await startScheduler({ ...base(), health });
+    await vi.advanceTimersByTimeAsync(0);
+    stopScheduler();
+    await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 3);
+    expect(health).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs an outage once, not once a minute, and logs the recovery', async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    let down = true;
+    const health = vi.fn().mockImplementation(async () => (
+      down ? { ok: false, reason: 'unreachable', message: 'connection refused' } : { ok: true, missing: [] }
+    ));
+    try {
+      await startScheduler({ ...base(), names: () => ['prod'], health });
+      await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 5);
+      expect(error.mock.calls.filter((c) => String(c[0]).includes('health'))).toHaveLength(1);
+      down = false;
+      await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS);
+      expect(info.mock.calls.filter((c) => String(c[0]).includes('recovered'))).toHaveLength(1);
+    } finally {
+      error.mockRestore();
+      info.mockRestore();
+    }
+  });
+
+  it('survives a health call that rejects', async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const health = vi.fn().mockRejectedValue(new Error('store gone'));
+    try {
+      await startScheduler({ ...base(), names: () => ['prod'], health });
+      await expect(vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 2)).resolves.not.toThrow();
+      expect(health).toHaveBeenCalledTimes(3);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('says so when one pass takes longer than half its interval', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const health = vi.fn().mockImplementation(
+      () => new Promise((r) => { setTimeout(() => r({ ok: true, missing: [] }), HEALTH_SLOW_PASS_MS + 1_000); }),
+    );
+    try {
+      await startScheduler({ ...base(), names: () => ['prod'], health });
+      await vi.advanceTimersByTimeAsync(HEALTH_SLOW_PASS_MS + 2_000);
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes('health pass'))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does nothing when no health function is given', async () => {
+    vi.useFakeTimers();
+    await startScheduler(base());
+    await expect(vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 2)).resolves.not.toThrow();
+  });
+
+  /**
+   * Final review. A row with a part missing is still `ok: true`, and nothing
+   * read `missing`: a statement that failed every minute left its charts
+   * blank for ever and the log silent.
+   */
+  it('names the parts it could not read, once, and says when they come back', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    let missing = ['size', 'replication'];
+    const health = vi.fn().mockImplementation(async () => ({ ok: true, missing }));
+    try {
+      await startScheduler({ ...base(), names: () => ['prod'], health });
+      await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 4);
+      const partial = warn.mock.calls.filter((c) => String(c[0]).includes('could not read'));
+      expect(partial).toHaveLength(1);
+      expect(partial[0]!.join(' ')).toContain('size, replication');
+      missing = [];
+      await vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS);
+      expect(info.mock.calls.filter((c) => String(c[0]).includes('reads every part again'))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      info.mockRestore();
+    }
   });
 });

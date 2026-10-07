@@ -51,7 +51,8 @@ names the index that would serve it.
 captured every 5 minutes, never by resetting shared counters. 24-hour charts
 of execution time and call volume, per database and per statement shape;
 30-day size history per relation; hygiene findings cached on each capture and
-summarised on triage with the age of the reading.
+summarised on triage with the age of the reading. One health row per database
+per minute, kept 90 days, charted per fleet and per database.
 
 **Operations.** HTTP basic auth over every route, a least-privilege role
 documented below, a JSON audit record for every action, secret redaction on
@@ -118,7 +119,7 @@ pgops needs a role with `LOGIN`. These grants cover the reads, terminate and exp
 
 | Grant | Enables |
 |---|---|
-| `pg_read_all_stats` | Reading other sessions' query text. Without it those rows read `insufficient privilege` and everything else works. |
+| `pg_read_all_stats` | Other sessions' query text and state. Without it: `insufficient privilege` rows, and Health stores no session counts. |
 | `pg_signal_backend` | Terminating sessions. Without it a kill returns Postgres's permission error in the page. |
 | `SELECT` on the tables to be planned, or `pg_read_all_data` | Explain and suggested indexes. Postgres checks `SELECT` even for a plan that reads no rows. Each refused plan names the table. |
 | Table ownership, or `MAINTAIN` on Postgres 17 and newer | The analyze action. A table the role cannot analyze is reported as refused, by name, and the rest proceed. |
@@ -136,23 +137,25 @@ requirement.
 | Route | Content | Refresh |
 |---|---|---|
 | `/` | Every database with its worst verdict. An unreachable database shows `UNKNOWN`, never `OK`. | Every 30 s |
-| `/db/<name>` | Triage. One band per gate, escalated checks expanded, cached hygiene findings with their age. | Every 5 s |
+| `/health` | Every database, six charts, last 48 hours. | Every 60 s |
+| `/db/<name>` | Triage. One band per gate, escalated checks expanded, cached hygiene findings. | Every 5 s |
 | `/db/<name>/sessions` | Live sessions, connection sources, SSL breakdown, terminate controls. | Every 5 s |
 | `/db/<name>/locks` | Lock wait graph as a tree. | Every 5 s |
-| `/db/<name>/queries` | Statement statistics, slow queries, 24-hour execution time and call charts, statistics reset. | Every 5 s |
+| `/db/<name>/queries` | Statement statistics, slow queries, 24-hour load charts, statistics reset. | Every 5 s |
 | `/db/<name>/queries/<queryid>` | One statement shape over 24 hours: calls, time, rows, blocks read. | On open |
 | `/db/<name>/queries/explain` | Plan a pasted statement. | On open |
 | `/db/<name>/queries/indexes` | Index hit rate, missing, unused, duplicate and invalid indexes. | On open |
-| `/db/<name>/queries/indexes/bloat` | Index bloat estimate. Separate route because the estimate is expensive. | On open |
-| `/db/<name>/queries/indexes/suggested` | Suggested indexes for the busiest shapes, with the statement to run. | On open |
+| `/db/<name>/queries/indexes/bloat` | Index bloat estimate. | On open |
+| `/db/<name>/queries/indexes/suggested` | Suggested indexes, with the statement to run. | On open |
 | `/db/<name>/queries/tables` | Table hit rate, unused tables, per-table statistics. | On open |
-| `/db/<name>/tables` | Every table, sorted and searched in SQL: size, rows, dead rows, cache hit, last vacuum. Presets for biggest, needs vacuum, worst cache hit, unused. | On open |
-| `/db/<name>/tables/<relation>` | One relation: 30 days of size, its indexes and which are unused, duplicate or invalid, its sequences, its transaction ID age. | On open |
+| `/db/<name>/tables` | Every table, sorted and searched in SQL, with presets. | On open |
+| `/db/<name>/tables/<relation>` | One relation: size over 30 days, indexes, sequences, transaction ID age. | On open |
 | `/db/<name>/cleanup` | Wraparound horizon, replication role and lag, slots, server settings. | Every 5 s |
 | `/db/<name>/cleanup/space` | Database size, size over 30 days, largest relations, 7-day growth. | On open |
 | `/db/<name>/cleanup/space/<relation>` | One relation's size over 30 days. | On open |
 | `/db/<name>/cleanup/maintenance` | Running vacuums with progress, last vacuum and analyze, transaction ID age. Analyze action. | On open |
 | `/db/<name>/cleanup/sequences` | Every sequence against its column's ceiling. | On open |
+| `/db/<name>/health` | One database's stored health by gate, 6 hours to 90 days, with trend. | On open |
 
 Every page under `/db/<name>` carries a status line with the database, role,
 version, SSL state and replica flag as the server reports them, and the age

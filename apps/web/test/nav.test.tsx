@@ -41,7 +41,7 @@ const hrefFor = (gate: (typeof GATE_ORDER)[number]): string => {
  * care about this list, the one that widens it and the one that requires
  * it, read from the same array and cannot drift apart from each other.
  */
-const OBJECT_TABS = ['/db/prod/tables'];
+const OBJECT_TABS = ['/db/prod/tables', '/db/prod/health'];
 
 describe('Nav', () => {
   it('links the cleanup tab', async () => {

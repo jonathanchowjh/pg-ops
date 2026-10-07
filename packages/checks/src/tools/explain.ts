@@ -1,5 +1,5 @@
 import type { CheckContext, Tool } from '../types.js';
-import { guardClient, messageOf } from '../run.js';
+import { guardClient, messageOf, ownSql } from '../run.js';
 import { adviseOn, type IndexAdvice } from './advice.js';
 
 /** One node of `EXPLAIN (FORMAT JSON)` output. Only the keys pgops reads are named. */
@@ -120,22 +120,25 @@ export async function planStatements(ctx: CheckContext, statements: readonly str
   try {
     for (const [i, statement] of statements.entries()) {
       const name = `pgops_explain_${i}`;
-      await client.query('BEGIN READ ONLY');
+      // The envelope is marked as pgops's own. The PREPARE is not: it
+      // carries the operator's statement, which this package never marks
+      // (capture.test.ts pins that at the other call site).
+      await client.query(ownSql('BEGIN READ ONLY'));
       try {
         // Interpolated because SET LOCAL takes no bind parameter; constants.
-        await client.query(`SET LOCAL statement_timeout = ${PLAN_TIMEOUT_MS}`);
-        await client.query(`SET LOCAL lock_timeout = ${LOCK_TIMEOUT_MS}`);
-        await client.query('SET LOCAL plan_cache_mode = force_generic_plan');
+        await client.query(ownSql(`SET LOCAL statement_timeout = ${PLAN_TIMEOUT_MS}`));
+        await client.query(ownSql(`SET LOCAL lock_timeout = ${LOCK_TIMEOUT_MS}`));
+        await client.query(ownSql('SET LOCAL plan_cache_mode = force_generic_plan'));
         await client.query({ name: `pgops_prepare_${i}`, text: `PREPARE ${name} AS ${statement}`, values: [] });
         const counted = await client.query<{ n: number }>(
-          'SELECT cardinality(parameter_types)::int AS n FROM pg_prepared_statements WHERE name = $1',
+          ownSql('SELECT cardinality(parameter_types)::int AS n FROM pg_prepared_statements WHERE name = $1'),
           [name],
         );
         const parameters = counted.rows[0]?.n ?? 0;
         // Never planned with these: force_generic_plan ignores the values.
         const args = parameters > 0 ? `(${Array(parameters).fill('NULL').join(', ')})` : '';
         const explained = await client.query<{ 'QUERY PLAN': { Plan: PlanNode }[] }>(
-          `EXPLAIN (FORMAT JSON, VERBOSE) EXECUTE ${name}${args}`,
+          ownSql(`EXPLAIN (FORMAT JSON, VERBOSE) EXECUTE ${name}${args}`),
         );
         planned.push({ ok: true, plan: explained.rows[0]!['QUERY PLAN'][0]!.Plan, parameters });
       } catch (err) {
@@ -149,7 +152,7 @@ export async function planStatements(ctx: CheckContext, statements: readonly str
             : code === '42501' ? `${messageOf(err)}.${PRIVILEGE_HINT}` : messageOf(err),
         });
       } finally {
-        await client.query('ROLLBACK');
+        await client.query(ownSql('ROLLBACK'));
       }
     }
     release(DISCARD);

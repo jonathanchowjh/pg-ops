@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  formatAge, formatBytes, formatDelta, formatDuration, formatMillis, planLines, plural,
+  formatAge, formatBytes, formatCount, formatDelta, formatDuration, formatMillis, formatUnit, formatUtc,
+  planLines, plural,
 } from '@/lib/format';
 
 describe('formatDuration', () => {
@@ -171,5 +172,37 @@ describe('formatAge', () => {
   /** Clock skew between the server and the statistics it read. */
   it('clamps a negative age to 0s', () => {
     expect(formatAge(-5)).toBe('0s');
+  });
+});
+
+describe('formatUnit', () => {
+  it('formats each unit the health charts use', () => {
+    expect(formatUnit('count', 12.4)).toBe('12');
+    expect(formatUnit('sessions', 0.253)).toBe('0.25');
+    expect(formatUnit('sessions', 14.26)).toBe('14.3');
+    expect(formatUnit('pct', 99.123)).toBe('99.1%');
+    expect(formatUnit('perSec', 0.44)).toBe('0.4/s');
+    expect(formatUnit('perSec', 1234.4)).toBe(`${formatCount(1234)}/s`);
+    expect(formatUnit('bytes', 1024)).toBe(formatBytes(1024));
+    expect(formatUnit('bytesPerSec', 1024)).toBe(`${formatBytes(1024)}/s`);
+    expect(formatUnit('secs', 90)).toBe(formatDuration(90));
+  });
+
+  /**
+   * Found on screen: a quiet database's average active sessions is a few
+   * thousandths, and its axis read "0.00" at the top and "0.00" at the
+   * bottom. A figure that small keeps the digits that distinguish it.
+   */
+  it('keeps the digits of a figure too small for the usual precision', () => {
+    expect(formatUnit('sessions', 0.004)).toBe('0.004');
+    expect(formatUnit('perSec', 0.04)).toBe('0.04/s');
+    expect(formatUnit('sessions', 0)).toBe('0');
+    expect(formatUnit('perSec', 0)).toBe('0/s');
+  });
+});
+
+describe('formatUtc', () => {
+  it('prints month, day, hour and minute in UTC', () => {
+    expect(formatUtc(Date.parse('2026-10-07T02:14:59Z'))).toBe('10-07 02:14');
   });
 });

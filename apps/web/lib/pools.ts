@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import type { CheckContext } from '@pgops/checks';
 // Extensionless — see the comment on the equivalent import in lib/check.ts.
 import { APP_NAME, readDatabases, type DatabaseConfig } from './config';
@@ -47,6 +47,25 @@ const VERSIONS = new Map<string, number>();
 const OWN = new Map<string, number>();
 
 /**
+ * The same count as OWN, never reset. OWN is read-and-reset by the
+ * Throughput line; the health tick needs its own window over the same
+ * statements, and two readers cannot share one read-and-reset counter
+ * without each stealing from the other.
+ */
+const OWN_TOTAL = new Map<string, number>();
+
+/** Statements this process has sent the named database since it started. */
+export function ownStatementsTotal(name: string): number {
+  let url: string | undefined;
+  try {
+    url = configured().find((d) => d.name === name)?.url;
+  } catch {
+    return 0;
+  }
+  return url === undefined ? 0 : OWN_TOTAL.get(url) ?? 0;
+}
+
+/**
  * How many statements this process has issued against `name` since the last
  * call, resetting the count. Read once per sample by `ratesFor`, so the
  * count always covers the same window as the rate it is divided into.
@@ -75,6 +94,47 @@ function configured(): DatabaseConfig[] {
 
 export function databaseNames(): string[] {
   return configured().map((d) => d.name);
+}
+
+/** pg hands the same client object out again and again; each is wrapped once. */
+const COUNTED = new WeakSet<object>();
+const TRANSACTION_CONTROL = /^\s*(BEGIN|COMMIT|ROLLBACK|SET LOCAL)\b/i;
+
+/**
+ * Count statements sent on a checked-out client into OWN_TOTAL.
+ *
+ * `pool.query` is counted where it is wrapped below, but the health tick and
+ * every check with a timeout run on a client from `connect()`, and those
+ * were invisible: the Health page's "statements pgops itself sent" read zero
+ * beside a commit rate that was pgops's own. BEGIN, COMMIT, ROLLBACK and
+ * SET LOCAL are not counted; they are the envelope, not a statement.
+ *
+ * Only OWN_TOTAL. The Throughput line's counter keeps the meaning its own
+ * tests pin.
+ */
+function countClientStatements(pool: Pool, url: string): void {
+  const count = (client: PoolClient): PoolClient => {
+    if (COUNTED.has(client)) return client;
+    COUNTED.add(client);
+    const inner = client.query.bind(client) as (...a: unknown[]) => unknown;
+    client.query = function counted(...a: unknown[]) {
+      const first = a[0];
+      const text = typeof first === 'string' ? first : (first as { text?: unknown } | null)?.text;
+      if (typeof text === 'string' && !TRANSACTION_CONTROL.test(text)) {
+        OWN_TOTAL.set(url, (OWN_TOTAL.get(url) ?? 0) + 1);
+      }
+      return inner(...a);
+    } as typeof client.query;
+    return client;
+  };
+  const innerConnect = pool.connect.bind(pool) as (...args: unknown[]) => unknown;
+  // `pool.query` itself calls the CALLBACK form of connect (the trap
+  // lib/store.ts documents). That path is passed through untouched: its
+  // statement was already counted by the pool.query wrapper.
+  pool.connect = function countedConnect(...args: unknown[]) {
+    if (typeof args[0] === 'function') return innerConnect(...args);
+    return (innerConnect(...args) as Promise<PoolClient>).then(count);
+  } as typeof pool.connect;
 }
 
 function poolFor(db: DatabaseConfig): Pool {
@@ -121,8 +181,10 @@ function poolFor(db: DatabaseConfig): Pool {
   const inner = pool.query.bind(pool) as (...args: unknown[]) => unknown;
   pool.query = function wrapped(...args: unknown[]) {
     OWN.set(db.url, (OWN.get(db.url) ?? 0) + 1);
+    OWN_TOTAL.set(db.url, (OWN_TOTAL.get(db.url) ?? 0) + 1);
     return inner(...args);
   } as typeof pool.query;
+  countClientStatements(pool, db.url);
   POOLS.set(db.url, pool);
   return pool;
 }

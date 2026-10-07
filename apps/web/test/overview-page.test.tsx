@@ -122,6 +122,12 @@ describe('Overview — a verdict is earned, never assumed', () => {
    * Every existing test covered a database that ANSWERED. None covered one
    * that could not be reached, which is the only way to reach the seed.
    */
+  it('links to the fleet health page', async () => {
+    state.mode = 'healthy';
+    rendered = await render(await Overview());
+    expect(rendered.container.querySelector('a[href="/health"]')).not.toBeNull();
+  });
+
   it('does not claim OK for a database where every check failed', async () => {
     state.mode = 'unreachable';
     rendered = await render(await Overview());

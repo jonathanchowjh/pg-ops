@@ -186,9 +186,16 @@ describe('planStatements', () => {
     const r = recordingClient(async () => ({ rows: [] }));
     await planStatements(r.ctx, ['SELECT 1', 'SELECT 2']);
     const strings = r.sent.filter((q): q is string => typeof q === 'string');
-    expect(strings.filter((q) => q === 'BEGIN READ ONLY')).toHaveLength(2);
-    expect(strings.filter((q) => q === 'ROLLBACK')).toHaveLength(2);
-    expect(strings.some((q) => /^(BEGIN|START)(?! READ ONLY)/.test(q) || q === 'COMMIT')).toBe(false);
+    expect(strings.filter((q) => q.startsWith('BEGIN READ ONLY'))).toHaveLength(2);
+    expect(strings.filter((q) => q.startsWith('ROLLBACK'))).toHaveLength(2);
+    expect(strings.some((q) => /^(BEGIN|START)(?! READ ONLY)/.test(q) || q.startsWith('COMMIT'))).toBe(false);
+    // The envelope is pgops's own and says so. The PREPARE carries the
+    // operator's statement and is left exactly as built: this package never
+    // marks an operator's statement.
+    expect(strings.filter((q) => !q.endsWith('/* pgops */'))).toEqual([]);
+    for (const q of r.sent.filter((x): x is { text: string } => typeof x === 'object')) {
+      expect(q.text).not.toContain('/* pgops */');
+    }
     expect(r.sent.filter((q) => typeof q === 'object')).toEqual([
       expect.objectContaining({ name: 'pgops_prepare_0' }), expect.objectContaining({ name: 'pgops_prepare_1' }),
     ]);

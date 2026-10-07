@@ -60,15 +60,16 @@ describe('the tab strip’s liveness model', () => {
   });
 
   /**
-   * The strip is lopsided on purpose and this records by how much, because it
-   * is the whole argument for not yet rendering Now and Explore as two bands
-   * (lib/tabs.ts explains it at length). If a later change moves the hygiene
-   * routes out from under the two polling tabs, this fails — which is the
-   * moment the bands become worth rendering, and the right moment to be asked
-   * about it rather than a number quietly drifting.
+   * This list was pinned at ['Tables'] so that a second explore tab would
+   * fail here and force the banding question to be asked again. Health is
+   * that second tab, and the question was asked (health-over-time design,
+   * 2026-10-07): banding still fails. It would be two explore tabs against
+   * five live ones, with every hygiene page still sitting under a live tab,
+   * so a band labelled "explore" would not contain most of what is explored.
+   * The strip stays unbanded. A THIRD explore tab should fail here too.
    */
-  it('still has only one explore tab, which is why there are no bands yet', () => {
-    expect(TABS.filter((t) => t.mode === 'explore').map((t) => t.label)).toEqual(['Tables']);
+  it('has two explore tabs, and is still not banded', () => {
+    expect(TABS.filter((t) => t.mode === 'explore').map((t) => t.label)).toEqual(['Tables', 'Health']);
   });
 
   /**
@@ -96,6 +97,6 @@ describe('the tab strip’s liveness model', () => {
    * editing this line, which is the point.
    */
   it('carries exactly the non-gate tabs named here', () => {
-    expect(TABS.filter((t) => t.gate === null).map((t) => t.label)).toEqual(['Triage', 'Tables']);
+    expect(TABS.filter((t) => t.gate === null).map((t) => t.label)).toEqual(['Triage', 'Tables', 'Health']);
   });
 });
