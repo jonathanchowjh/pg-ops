@@ -53,7 +53,6 @@ describe('/health', () => {
     expect(view.container.querySelector('a[href="/db/prod/health"]')).not.toBeNull();
   });
 
-  /** Review Focus 3. */
   it('says a database with no rows is collecting, beside one that draws', async () => {
     state.names = ['prod', 'quiet'];
     state.read = {
@@ -85,11 +84,7 @@ describe('/health', () => {
     expect(view.container.querySelector('[role="alert"]')!.textContent).toContain('health_stats');
   });
 
-  /**
-   * Final review. A database that is down writes no rows, so its window
-   * empties; the page then said "Collecting. The first chart appears in a
-   * minute." for a database with months of history.
-   */
+  /** A database that is down writes no rows, so its window empties despite having history. */
   it('does not say "collecting" for a database whose last row is old', async () => {
     state.names = ['prod'];
     const last = Date.parse('2026-10-01T02:14:00Z');

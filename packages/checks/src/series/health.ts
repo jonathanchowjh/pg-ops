@@ -1,5 +1,4 @@
 import type { Pool, PoolClient } from 'pg';
-import type { Series } from '../types.js';
 
 /** Two rows further apart than this are not joined: a missing minute is a gap. */
 export const HEALTH_GAP_SECS = 150;
@@ -11,13 +10,13 @@ export const HEALTH_GAP_SECS = 150;
  */
 export const HEALTH_MIN_BUCKET_SECS = 120;
 
-/** Sampled once a minute. A bucket takes the MAXIMUM, so a spike survives zooming out. */
+/** Sampled once a minute. A bucket takes the maximum, so a spike survives zooming out. */
 const LEVELS = [
   'connections', 'server_connections', 'max_connections', 'blocked', 'longest_wait_secs', 'idle_in_txn',
   'active', 'longest_query_secs', 'replication_lag_secs', 'xid_age', 'xmin_age', 'size_bytes',
 ] as const;
 
-/** Cumulative in Postgres. A bucket takes the SUM of its valid intervals and the seconds they cover. */
+/** Cumulative in Postgres. A bucket takes the sum of its valid intervals and the seconds they cover. */
 const COUNTERS = [
   'sessions', 'sessions_abandoned', 'sessions_fatal', 'sessions_killed', 'idle_in_transaction_time',
   'deadlocks', 'active_time', 'xact_commit', 'xact_rollback', 'blks_hit', 'blks_read', 'temp_bytes',
@@ -36,11 +35,10 @@ export type BucketRow = { name: string; bucket: number; rows: number }
 /**
  * One query for any number of databases.
  *
- * An interval is VALID for a counter when the previous row is within
+ * An interval is valid for a counter when the previous row is within
  * HEALTH_GAP_SECS, `stats_reset` did not change, and the counter did not go
- * backwards. Anything else contributes nothing: not a zero, not a negative
- * rate, not an interpolated guess. The lookback of one gap before `from`
- * gives the first row in the window a predecessor.
+ * backwards. Anything else contributes nothing, not a zero. The lookback of
+ * one gap before `from` gives the first row in the window a predecessor.
  */
 const HISTORY_SQL = `
 WITH raw AS (
@@ -101,10 +99,9 @@ export interface HealthHistory {
   /** Rows inside the window. */
   rows: number;
   /**
-   * The newest row EVER stored for this database, in epoch ms, or null if
-   * there has never been one. An empty window means "pgops has only just
-   * started" for a database with no rows at all, and "this database stopped
-   * being recorded" for one whose last row is old; only this tells them apart.
+   * The newest row ever stored for this database, in epoch ms, or null if
+   * there has never been one. Tells an empty window on a new database apart
+   * from one on a database that stopped being recorded.
    */
   lastAt: number | null;
   points: HealthPoint[];
@@ -168,8 +165,7 @@ export function toHealthPoints(
 
 /**
  * Health for any number of databases over one window, bucketed to at most
- * `points` buckets. ONE query however many names are asked for, which is
- * what lets the fleet page draw sixty databases.
+ * `points` buckets. One history query however many names are asked for.
  */
 export async function readHealthHistory(
   store: Pool | PoolClient,
@@ -202,14 +198,3 @@ export async function readHealthHistory(
     };
   });
 }
-
-export const healthHistory: Series<
-  HealthHistory,
-  { databaseNames: readonly string[]; points: number }
-> = {
-  id: 'healthHistory',
-  title: 'Health over time',
-  read: (ctx, range, opts) => readHealthHistory(ctx.store!, {
-    names: opts.databaseNames, from: range.from, to: range.to, points: opts.points,
-  }),
-};

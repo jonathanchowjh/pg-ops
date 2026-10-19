@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from './render.js';
 import NotFound from '@/app/not-found';
 
-// Per-file requirement — see kill-button.test.tsx.
+// Per-file requirement — see actions.test.tsx.
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const state = vi.hoisted(() => ({ throws: false }));
@@ -27,12 +27,8 @@ afterEach(() => {
 
 describe('The 404', () => {
   /**
-   * `app/db/[name]/layout.tsx` routes an unconfigured name here rather than to
-   * a 500, in its own words because "the operator mistyped, pgops is not
-   * broken". This page was Next's stock 404, so it told that operator they
-   * were wrong and nothing else — no way back, and no answer to the only
-   * question they have, which is what the name should have been. pgops is the
-   * one thing that knows: the names are whatever went into PGOPS_DATABASES.
+   * `app/db/[name]/layout.tsx` routes an unconfigured name here, so the page
+   * answers what the name should have been: the names in PGOPS_DATABASES.
    */
   it('lists the database names that would have worked', async () => {
     rendered = await render(await NotFound());
@@ -43,16 +39,13 @@ describe('The 404', () => {
     const hrefs = Array.from(rendered.container.querySelectorAll('a')).map((a) => a.getAttribute('href'));
     expect(hrefs).toContain('/db/prod');
     expect(hrefs).toContain('/db/analytics');
-    // And a way back, which the stock page also had no version of.
+    // And a way back.
     expect(hrefs).toContain('/');
   });
 
   /**
-   * This page is reached by ANY unmatched URL, including on a console whose
-   * configuration cannot be read at all — where `databaseNames()` throws
-   * rather than returning a list. A 404 that itself 500s is the least useful
-   * page in the product, so the configuration problem is reported here too
-   * rather than being allowed to escape.
+   * Any unmatched URL lands here, including on a console whose configuration
+   * cannot be read, where `databaseNames()` throws. The 404 must not 500.
    */
   it('reports a broken configuration instead of throwing on top of the 404', async () => {
     state.throws = true;

@@ -1,42 +1,23 @@
 import type { Check, Verdict } from '../types.js';
 
 /**
- * The xid at which Postgres refuses new transactions.
- *
- * Exported because `maintenance.ts`'s `autovacuumDanger` counts down from the
- * same horizon — it is the per-relation detail behind this database-wide
- * alarm, and two copies of the number would eventually disagree about which
- * page was telling the truth.
+ * The xid at which Postgres refuses new transactions. The `xid age` flag of
+ * the `tables` read counts towards the same ceiling.
  */
-export const HARD_LIMIT = 2_147_483_647;
+export const XID_WRAPAROUND = 2_147_483_647;
 
 export interface WraparoundRow {
   database: string;
-  /**
-   * `age(xid)` returns `integer` (OID 23, int4) — node-pg's default type
-   * parser hands that back as a JS `number` already, the same as
-   * `connections.ts`'s `max_connections`. No explicit cast or `Number(...)`
-   * conversion is needed, and none is done: per this package's convention,
-   * a row field is typed as what genuinely arrives, not defensively widened
-   * to `string` the way a real int8/bigint column would be.
-   */
+  /** `age(xid)` is int4, which node-pg returns as a JS number. */
   xact_age: number;
-  /**
-   * `current_setting(...)` always returns `text` regardless of the GUC's own
-   * type, so the SQL below casts it to `::int` explicitly — the convention
-   * this package follows (see `connections.ts`'s `max_connections` and
-   * `reserved`) is to resolve numeric settings server-side, in the query,
-   * not with a `Number(...)` conversion in `map`. That keeps NULL-folding
-   * and any version-conditional handling in one place, and keeps row types
-   * honest about what actually arrives over the wire.
-   */
+  /** `current_setting` returns text; cast `::int` in SQL. */
   freeze_max_age: number;
 }
 
 export interface WraparoundEntry {
   database: string;
   xactAge: number;
-  /** Transactions remaining before the server refuses writes. THE alarm. */
+  /** Transactions remaining before the server refuses writes. The alarm. */
   txnsUntilShutdown: number;
   /** How close to a routine forced autovacuum. Informational only. */
   pctToForcedVacuum: number;
@@ -45,31 +26,15 @@ export interface WraparoundEntry {
 export interface WraparoundData { worst: WraparoundEntry[] }
 
 /**
- * Pre-port review A1 — the worst defect found.
+ * Two independent numbers. The alarm is transactions remaining before
+ * wraparound. The ratio to autovacuum_freeze_max_age is information only:
+ * that setting (default 200,000,000) is when Postgres forces a routine
+ * anti-wraparound autovacuum, and busy databases cross it in normal
+ * operation.
  *
- * The shipped check computed `100 * age(datfrozenxid) / autovacuum_freeze_max_age`
- * and criticalled at 90%. But autovacuum_freeze_max_age (default 200,000,000)
- * is the age at which Postgres FORCES a routine anti-wraparound autovacuum. It
- * is a maintenance trigger, not a danger line; busy databases cross it as normal
- * operation. Verified: the shipped `critical` fired at 8.38% of the real horizon.
- *
- * Worse, in the other direction: a database at 2.0 billion — hours from refusing
- * transactions — rendered as "1000% of horizon" on a scale whose critical had
- * already been passed five times over. Nothing was calibrated to the failure the
- * check was named after.
- *
- * So: two independent numbers. The ratio stays, as information. The alarm is
- * transactions remaining, which is what pgHero's transaction_id_danger (#44)
- * measures and the only one that is actionable.
- *
- * `current_setting('autovacuum_freeze_max_age')` reads the server/session
- * GUC. It can be overridden per-database (`ALTER DATABASE ... SET`) and
- * per-table (the `autovacuum_freeze_max_age` storage parameter), so a given
- * table's real forced-vacuum trigger can differ from the global value read
- * here. That's acceptable ONLY because `pctToForcedVacuum` is informational
- * and never reaches `verdict` below — if a future change makes it
- * load-bearing (e.g. driving a threshold), it must first read the
- * effective per-database/per-table setting instead of this global one.
+ * `current_setting('autovacuum_freeze_max_age')` is the global value; it
+ * can be overridden per database and per table. That is acceptable only
+ * because `pctToForcedVacuum` never reaches `verdict`.
  */
 const SQL = `
 SELECT datname AS database,
@@ -83,8 +48,9 @@ LIMIT 10`;
 export const wraparound: Check<WraparoundRow, WraparoundData> = {
   id: 'wraparound',
   gate: 'keep-up',
+  home: 'server',
   title: 'Transaction ID wraparound',
-  class: 'incident',
+  class: 'live',
   sql: SQL,
   map: (rows) => ({
     worst: rows.map((r) => {
@@ -92,7 +58,7 @@ export const wraparound: Check<WraparoundRow, WraparoundData> = {
       return {
         database: r.database,
         xactAge,
-        txnsUntilShutdown: HARD_LIMIT - xactAge,
+        txnsUntilShutdown: XID_WRAPAROUND - xactAge,
         pctToForcedVacuum: Math.round((100 * xactAge) / r.freeze_max_age),
       };
     }),
@@ -112,13 +78,8 @@ export const wraparound: Check<WraparoundRow, WraparoundData> = {
             + 'takes hours, not minutes.' },
   ],
   /**
-   * `txnsUntilShutdown` counts DOWN — smaller is worse, the opposite
-   * direction of `pctToForcedVacuum`. The comparisons below must be `<=`
-   * against the threshold, mirroring `connections.ts`'s `headroom` (also a
-   * count-down metric), not `>=` the way a percentage-style check would
-   * read. Getting this backwards would silently invert the whole check: a
-   * healthy database (billions of transactions left) would alarm, and a
-   * database minutes from shutdown (a small number left) would report `ok`.
+   * `txnsUntilShutdown` counts down, so smaller is worse and the
+   * comparisons are `<=`, not `>=`.
    */
   verdict: (d, t): Verdict => {
     const worst = d.worst[0];

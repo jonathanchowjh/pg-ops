@@ -1,32 +1,14 @@
-// Reads globals.css off disk and renders no DOM, so it does not need jsdom.
-// Forcing `node` matters beyond speed: the `web` project's jsdom environment
-// runs Vite's browser transform, which rewrites the literal
-// `new URL('../app/globals.css', import.meta.url)` below into a
-// server-relative asset URL rather than a `file://` one, and `readFileSync`
-// then throws. Same pattern as guards.test.ts.
+// `node`, not jsdom, for the reason given in scaffold.test.ts.
 // @vitest-environment node
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 /**
- * The palette, measured against the file that actually ships.
- *
- * WHY THIS EXISTS. Colour on this console is not decoration: it is the
- * verdict. A `CRITICAL` badge an operator cannot read at 3am on a laptop in a
- * bright room is the one failure this project cannot argue its way out of,
- * and it is invisible to every other test here — the component tests assert
- * on text and roles, which is correct of them and blind to this.
- *
- * It found a real one. The `CRITICAL` badge in light mode measured **3.99:1**
- * — `oklch(0.577 0.245 27.325)` on its own 10% tint — against the 4.5:1 floor
- * WCAG sets for text at these sizes. On the loudest signal the console has.
- *
- * WHAT IT DELIBERATELY DOES NOT CHECK, because these are judgement and not
- * arithmetic: whether a tint is VISIBLE (the surfaces are intentionally
- * barely there — the badge and the accent bar carry the signal, the tint only
- * groups the panel's parts), and whether a hue is right. Those are what the
- * screenshots are for.
+ * Guard: measures the contrast of the palette in globals.css, the file that
+ * ships. It catches a verdict colour that falls below WCAG's 4.5:1 for text,
+ * which component tests asserting on text and roles cannot see. It does not
+ * judge whether a hue is right.
  */
 
 const CSS = readFileSync(
@@ -37,11 +19,9 @@ const CSS = readFileSync(
 type Rgb = [number, number, number];
 
 /**
- * oklch -> LINEAR sRGB, unclamped. Björn Ottosson's matrices, unchanged.
- *
- * Unclamped on purpose: a channel outside 0..1 here is the only way to tell
- * that a colour is outside the sRGB gamut, which the last test in this file
- * forbids for every token it measures. See there for why that matters.
+ * oklch -> linear sRGB, Björn Ottosson's matrices. Unclamped on purpose: a
+ * channel outside 0..1 is how the last test in this file detects a colour
+ * outside the sRGB gamut.
  */
 function linearSrgb(L: number, C: number, H: number): Rgb {
   const h = (H * Math.PI) / 180;
@@ -58,14 +38,9 @@ function linearSrgb(L: number, C: number, H: number): Rgb {
 }
 
 /**
- * The same colour gamma-encoded and clamped — what a screen actually shows.
- *
- * The clamp only bites on a colour outside the gamut, and the test below
- * makes sure none of the measured tokens is. That test exists because
- * clamping is not what a browser does with one: CSS Color 4 says to gamut-MAP
- * (reduce chroma until it fits), Tailwind emits its own hex fallback computed
- * a third way, and the three disagree by about 0.1 of a ratio. A token inside
- * the gamut removes the disagreement instead of picking a winner.
+ * The same colour gamma-encoded and clamped. The clamp only bites on a
+ * colour outside the gamut, which is not what a browser does with one (CSS
+ * Color 4 gamut-maps); the last test keeps every measured token inside it.
  */
 function srgb(L: number, C: number, H: number): Rgb {
   return linearSrgb(L, C, H).map((c) => {
@@ -88,10 +63,8 @@ function contrast(fg: Rgb, bg: Rgb): number {
 
 /**
  * Tailwind's `bg-x/10`: the token painted at 10% over whatever is behind it.
- *
- * Composited in gamma-encoded sRGB, which is what a browser does for ordinary
- * alpha — not in linear light. Compositing in linear space would give a
- * lighter tint and a ratio this console never actually paints.
+ * Composited in gamma-encoded sRGB, as a browser does for ordinary alpha;
+ * linear space would give a lighter tint than is painted.
  */
 function over(fg: Rgb, bg: Rgb, alpha: number): Rgb {
   return fg.map((c, i) => alpha * c + (1 - alpha) * bg[i]!) as Rgb;
@@ -100,11 +73,8 @@ function over(fg: Rgb, bg: Rgb, alpha: number): Rgb {
 /**
  * The tokens of one theme, as the browser resolves them: the dark block
  * overrides the light one and inherits everything it does not name.
- *
- * `:root {...}` twice in the file — the light block, then the one inside
- * `@media (prefers-color-scheme: dark)`. Parsed rather than imported because
- * the point is to measure THE FILE THAT SHIPS; a table of constants in a test
- * would only ever agree with itself.
+ * `:root {...}` appears twice in the file — the light block, then the one
+ * inside `@media (prefers-color-scheme: dark)`.
  */
 function theme(which: 'light' | 'dark'): Map<string, Rgb> {
   const blocks = [...CSS.matchAll(/:root\s*\{([^}]*)\}/g)].map((m) => m[1]!);
@@ -132,18 +102,15 @@ function pairs(which: 'light' | 'dark') {
   const canvas = get('--background');
   const card = get('--card');
 
-  // Each severity's INK — the colour its badge text and heading are painted
-  // in. One indirection, so the day the badge stops using `--destructive`
-  // this test follows it rather than going quietly out of date.
+  // Each severity's ink: the colour its badge text and heading are painted in.
   const critical = get('--critical-ink');
   const warning = get('--warning-ink');
   const success = get('--success-ink');
 
   return [
     // The badge sits on the canvas on a healthy row and on a card inside an
-    // escalated panel. BOTH are asserted: the canvas is the darker of the two
-    // in light mode, so the tint over it is darker and the ratio lower — the
-    // binding case, and the one an earlier measurement missed.
+    // escalated panel. Both are asserted: in light mode the canvas is the
+    // darker, so the tint over it is darker and the ratio lower.
     ['critical badge on the canvas', critical, over(critical, canvas, tint)],
     ['critical badge on a card', critical, over(critical, card, tint)],
     ['warning badge on the canvas', warning, over(warning, canvas, tint)],
@@ -157,6 +124,12 @@ function pairs(which: 'light' | 'dark') {
     ['caption on the canvas', get('--muted-foreground'), canvas],
     ['caption on a card', get('--muted-foreground'), card],
     ['headings on the canvas', get('--foreground'), canvas],
+    ['caption on a filled row', get('--muted-foreground'), get('--muted')],
+    ['body text on a card', get('--body'), card],
+    ['body text on the sidebar', get('--body'), get('--sidebar')],
+    ['headings on the answer line', get('--foreground'), get('--warning-surface')],
+    ['the warning ink on the canvas', warning, canvas],
+    ['the focus ink on the canvas', get('--focus'), canvas],
   ] as const;
 }
 
@@ -173,11 +146,8 @@ describe.each(['light', 'dark'] as const)('the %s palette', (which) => {
 });
 
 /**
- * The tints are a GROUND, not a highlight — barely there on purpose, because
- * the badge and the accent bar carry the signal and a red wash across a panel
- * would shout over them. This is the other end of that: faint is intended,
- * invisible is not, and a surface that drifted to within a rounding error of
- * the canvas would silently stop grouping anything.
+ * The surface tints are faint on purpose (the badge and the accent bar carry
+ * the signal), but must not drift to indistinguishable from the canvas.
  */
 describe.each(['light', 'dark'] as const)('the %s surfaces', (which) => {
   it('are distinguishable from the canvas without shouting', () => {
@@ -192,18 +162,10 @@ describe.each(['light', 'dark'] as const)('the %s surfaces', (which) => {
 });
 
 /**
- * Every measured token is inside sRGB, so its ratio is not a matter of
- * opinion.
- *
- * Found while checking this test against the built stylesheet:
- * `oklch(0.52 0.22 27.325)` is very slightly outside the gamut — green
- * −0.006. Nobody can see the difference, but three parties resolve it three
- * ways. The browser gamut-maps per CSS Color 4, Tailwind emits a hex fallback
- * from its own conversion, and the arithmetic above clamps; the ratios came
- * out 4.91, 4.91 and 4.80. All three passed, which is exactly why this is
- * worth pinning rather than shrugging at — the next token might not have
- * 0.4 of headroom, and then the test and the screen would disagree about
- * whether the console is readable.
+ * A token outside sRGB is resolved three ways: the browser gamut-maps per
+ * CSS Color 4, Tailwind emits a hex fallback from its own conversion, and
+ * the arithmetic above clamps. The ratios differ by about 0.1, so the test
+ * and the screen could disagree. Keeping tokens inside the gamut removes it.
  */
 describe.each(['light', 'dark'] as const)('the %s tokens', (which) => {
   it('are inside the sRGB gamut, so the measurement is unambiguous', () => {
@@ -220,5 +182,47 @@ describe.each(['light', 'dark'] as const)('the %s tokens', (which) => {
         expect(c, `${m[1]} leaves sRGB — reduce its chroma`).toBeLessThanOrEqual(1 + 1e-6);
       }
     }
+  });
+});
+
+/** The spec's Colour table, in stacking order. A change here is a change to the spec. */
+const CLASS_HUES = {
+  light: ['#2457c7', '#0e9f9f', '#9a5cd0', '#8a909c', '#e2640f'],
+  dark: ['#4288e4', '#1ea68e', '#9566dc', '#8a909c', '#de6b26'],
+} as const;
+const CLASS_ORDER = ['cpu', 'io', 'idle', 'other', 'lock'];
+
+function hex(h: string): Rgb {
+  return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255) as Rgb;
+}
+
+describe.each(['light', 'dark'] as const)('the %s class hues', (which) => {
+  const blocks = [...CSS.matchAll(/:root\s*\{([^}]*)\}/g)].map((m) => m[1]!);
+  const block = which === 'light' ? blocks[0]! : blocks[1]!;
+  const found = [...block.matchAll(/--class-(\w+):\s*(#[0-9a-f]{6})/g)].map((m) => [m[1]!, m[2]!] as const);
+
+  it('are the spec\'s five, declared in stacking order', () => {
+    expect(found.map((f) => f[0])).toEqual(CLASS_ORDER);
+    expect(found.map((f) => f[1])).toEqual([...CLASS_HUES[which]]);
+  });
+
+  /** 3:1, WCAG's floor for a graphical mark, against the panel a strip is drawn on. */
+  it('each read 3:1 against the panel a strip is drawn on', () => {
+    const card = theme(which).get('--card')!;
+    for (const [name, value] of found) {
+      expect(Number(contrast(hex(value), card).toFixed(2)), name).toBeGreaterThanOrEqual(3);
+    }
+  });
+});
+
+/**
+ * Every `<i>` in the app is a dot, a bar or a rule, and a chart's labels sit
+ * inside them: under the browser's own italic they leaned. One rule in the
+ * base layer, not a `not-italic` on each label that someone will forget.
+ */
+describe('the base layer', () => {
+  it('sets <i> upright', () => {
+    const base = /@layer base \{([\s\S]*)\}\s*$/.exec(CSS)?.[1] ?? '';
+    expect(base).toMatch(/(^|\n)\s*i \{\s*font-style: normal;/);
   });
 });

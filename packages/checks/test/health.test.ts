@@ -43,10 +43,11 @@ describe('healthRow', () => {
     expect(row.connections).toBe(12);
   });
 
-  it('nulls every session count when the role cannot see other sessions', () => {
+  it('keeps the connections and nulls what needs a state when the role cannot read a session', () => {
     const row = healthRow({ ...PARTS, activity: { ...PARTS.activity!, hidden: 5 } }, 0);
-    expect(row.connections).toBeNull();
-    expect(row.server_connections).toBeNull();
+    // An unreadable client still shows its database, so it is counted.
+    expect(row.connections).toBe(PARTS.activity!.connections);
+    expect(row.server_connections).toBe(PARTS.activity!.server_connections);
     expect(row.active).toBeNull();
     expect(row.idle_in_txn).toBeNull();
     expect(row.longest_query_secs).toBeNull();
@@ -56,10 +57,9 @@ describe('healthRow', () => {
 });
 
 /**
- * Final review. Size was read in the same statement as the thirteen
- * counters, and pg_database_size stats every relation file: on a database
- * with many relations it timed out every minute and took every rate chart
- * with it, for ever, with nothing logged.
+ * pg_database_size stats every relation file and can time out on a database
+ * with many relations. Read with the counters, it would take every rate
+ * chart with it.
  */
 describe('the size part', () => {
   it('fails alone: the counters still land', () => {
@@ -91,10 +91,10 @@ function fakePool(fail: (sql: string) => unknown) {
 
 describe('sampleHealth', () => {
   /**
-   * Final review. A session-level SET through a transaction-mode pooler
-   * (PgBouncer) lands on a server connection the APPLICATION shares, and the
-   * RESET may land on another: the application's own statements then die at
-   * five seconds. SET LOCAL inside a transaction cannot outlive it.
+   * A session-level SET through a transaction-mode pooler (PgBouncer) lands
+   * on a server connection the application shares, and the RESET may land on
+   * another: the application's own statements then die at five seconds.
+   * SET LOCAL inside a transaction cannot outlive it.
    */
   it('sets its timeout inside a transaction, never on the session', async () => {
     const { pool, sent, released } = fakePool(() => undefined);
@@ -108,9 +108,9 @@ describe('sampleHealth', () => {
   });
 
   /**
-   * Final review. A database that has stopped answering cost five timeouts
-   * of five seconds each, serially, and enough of those made every OTHER
-   * database's rows arrive too far apart to join.
+   * A database that has stopped answering would otherwise cost one timeout
+   * per part, serially, and delay every other database's rows until they
+   * arrive too far apart to join.
    */
   it('stops asking after the first timeout', async () => {
     const { pool, sent } = fakePool((sql) => (
@@ -133,12 +133,9 @@ describe('sampleHealth', () => {
 });
 
 /**
- * Found by reading pg_stat_statements on the dev server after this shipped:
- * BEGIN and COMMIT were the two most-called statements on the database, and
- * the Queries page listed them. They were pgops's own, sent bare around
- * every timed statement, so the ranking's exclusion (which looks for the
- * marker) could not see them. The health tick added twelve a minute per
- * database to a leak the timed checks already had.
+ * A bare BEGIN or COMMIT around a timed statement escapes the ranking's
+ * exclusion, which looks for the marker, and shows up on the Queries page as
+ * one of the most-called statements.
  */
 describe('transaction control is marked as pgops\'s own', () => {
   it('on every statement the health sample sends, including on rollback', async () => {
@@ -153,12 +150,28 @@ describe('transaction control is marked as pgops\'s own', () => {
   it('on every statement a timed check sends', async () => {
     const { pool, sent } = fakePool(() => undefined);
     const check: Check<unknown, number> = {
-      id: 'probe', title: 'Probe', gate: 'work', class: 'incident', timeoutMs: 1_000,
+      id: 'probe', title: 'Probe', gate: 'work', home: 'database', class: 'live', timeoutMs: 1_000,
       sql: 'SELECT 1', map: (rows) => rows.length,
     };
     const res = await runCheck({ target: pool, serverVersion: 170000 }, check);
     expect(res.ok).toBe(true);
-    expect(sent).toHaveLength(4);
+    // BEGIN, the two timeouts, the statement, COMMIT.
+    expect(sent).toHaveLength(5);
+    expect(sent.some((s) => s.startsWith('SET LOCAL lock_timeout = 1000'))).toBe(true);
     expect(sent.filter((s) => !s.endsWith(OWN_SQL_MARKER))).toEqual([]);
+  });
+
+  /** A relation a migration holds must fail a catalog read in a second, not hold it for its statement timeout. */
+  it('waits on a lock for at most a second, and never longer than the statement may run', async () => {
+    const lockTimeout = async (timeoutMs: number): Promise<string | undefined> => {
+      const { pool, sent } = fakePool(() => undefined);
+      const check: Check<unknown, number> = {
+        id: 'probe', title: 'Probe', gate: 'work', home: 'database', class: 'live', timeoutMs, sql: 'SELECT 1', map: (rows) => rows.length,
+      };
+      await runCheck({ target: pool, serverVersion: 170000 }, check);
+      return sent.find((s) => s.startsWith('SET LOCAL lock_timeout'))?.split('\n')[0];
+    };
+    expect(await lockTimeout(10_000)).toBe('SET LOCAL lock_timeout = 1000');
+    expect(await lockTimeout(250)).toBe('SET LOCAL lock_timeout = 250');
   });
 });

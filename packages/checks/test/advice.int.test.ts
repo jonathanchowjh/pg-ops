@@ -121,7 +121,7 @@ describe('adviseOn', () => {
     await withPostgres(async (ctx, pool) => {
       await pool.query(SETUP);
       // `other.orders` holds rows and stats too, so a lookup that ignored the
-      // schema would find SOMETHING for it rather than nothing.
+      // schema would find something for it rather than nothing.
       await pool.query(`CREATE SCHEMA other;
         CREATE TABLE other.orders (status text);
         INSERT INTO other.orders SELECT 'x' FROM generate_series(1, 700);
@@ -139,7 +139,7 @@ describe('adviseOn', () => {
   it('reads a parent table\'s own statistics, not its inheritance tree\'s', async () => {
     await withPostgres(async (ctx, pool) => {
       // The parent holds 1,000 rows over 2 statuses; its child 50,000 over
-      // 5,000. ANALYZE on a parent writes BOTH an inherited=false row (the
+      // 5,000. ANALYZE on a parent writes both an inherited=false row (the
       // parent alone — what a Seq Scan on it reads) and an inherited=true row
       // (the whole tree) per column.
       await pool.query(`CREATE TABLE parent (status text);

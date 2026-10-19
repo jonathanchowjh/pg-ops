@@ -2,22 +2,22 @@
 
 import { useState, type PointerEvent } from 'react';
 import Link from 'next/link';
-import { HealthChart } from './health-chart';
+import { HealthChart, momentAt } from './health-chart';
+import { nearest } from '@/lib/chart';
 import { formatUtc } from '@/lib/format';
 import type { BoardGroup } from '@/lib/health';
 
 const ZOOM_HALF_MS = 3 * 3_600_000;
 
 /**
- * Every chart for one database, under the four gates, with ONE cursor.
+ * Every chart for one database, under the four gates, with one cursor.
  *
- * A client component for the cursor and nothing else. It is handed numbers,
- * timestamps and fixed labels, so nothing here was ever a statement and
- * nothing needs redacting on the way into the page payload.
+ * A client component for the cursor only. It is handed numbers, timestamps
+ * and fixed labels, so nothing needs redacting on the way into the page
+ * payload.
  *
- * The cursor is a moment in time held in state, not a pixel. Every chart
- * shares the window, so each can place the moment on its own axis and read
- * its own bucket; a pixel would be right for one chart's width only.
+ * The cursor is a moment in time, not a pixel: every chart shares the window,
+ * so each places the moment on its own axis and reads its own bucket.
  */
 export function HealthBoard({ name, from, to, groups }: {
   name: string;
@@ -33,14 +33,14 @@ export function HealthBoard({ name, from, to, groups }: {
    * are `touch-pan-y`, as pointermove for a horizontal drag while a vertical
    * drag still scrolls the page.
    */
+  // Every chart shares one bucket axis, so the moment snaps to a bucket here
+  // and the bar below names the bucket the charts read, not the pixel.
+  const axis = groups[0]?.charts[0]?.points;
   const scrub = (e: PointerEvent<HTMLDivElement>) => {
-    const plot = (e.target as Element).closest('[data-plot]');
-    if (plot === null) return;
-    const box = plot.getBoundingClientRect();
-    if (box.width <= 0) return;
-    const across = Math.min(1, Math.max(0, (e.clientX - box.left) / box.width));
-    // Capped just short of `to`, so the right edge reads the last bucket and not one past it.
-    setCursor(Math.min(from + across * (to - from), to - 1));
+    const at = momentAt(e, from, to);
+    if (at === null) return;
+    const i = axis === undefined ? -1 : nearest(axis, at);
+    setCursor(i === -1 ? at : axis![i]!.at);
   };
 
   return (
@@ -68,14 +68,10 @@ export function HealthBoard({ name, from, to, groups }: {
 }
 
 /**
- * Pinned to the bottom of the viewport, where it cannot collide with the
- * sticky header and stays in reach while a chart far down the page is being
- * scrubbed.
+ * Pinned to the bottom of the viewport, clear of the sticky header.
  *
- * The three links go to LIVE pages. pgops does not store what sessions or
- * locks existed at a past moment, so each is labelled "now": the label is
- * the difference between a way to check whether it is still happening and a
- * promise this console cannot keep.
+ * The three links go to live pages. pgops does not store what sessions or
+ * locks existed at a past moment, so each is labelled "now".
  */
 function CursorBar({ name, cursor, onClear }: { name: string; cursor: number; onClear: () => void }) {
   const zoomFrom = new Date(cursor - ZOOM_HALF_MS).toISOString();
@@ -85,8 +81,7 @@ function CursorBar({ name, cursor, onClear }: { name: string; cursor: number; on
     <div className="sticky bottom-0 z-10 -mx-6 flex flex-wrap items-center gap-x-4 gap-y-1 border-t bg-background px-6 py-2 text-sm">
       <span className="font-medium tabular-nums">{formatUtc(cursor)} UTC</span>
       <Link className={link} href={`/db/${name}/health?from=${zoomFrom}&to=${zoomTo}`}>Zoom to ±3 hours</Link>
-      <Link className={link} href={`/db/${name}/sessions`}>Sessions now</Link>
-      <Link className={link} href={`/db/${name}/locks`}>Locks now</Link>
+      <Link className={link} href={`/db/${name}`}>Sessions now</Link>
       <Link className={link} href={`/db/${name}/queries`}>Queries now</Link>
       <button
         type="button" onClick={onClear}

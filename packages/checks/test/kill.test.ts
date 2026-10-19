@@ -2,18 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import type { CheckContext } from '../src/types.js';
 
 /**
- * Fix-round 1: writeAudit is DESIGNED to never reject (see its own doc
- * comment), but kill.ts's finally block no longer TRUSTS that design
- * blindly — an exception thrown from an `await` inside a `finally` block
- * replaces the `try` block's return value, so if writeAudit's contract is
- * ever violated by a future edit, killBackend must not let that turn a
- * genuine kill outcome into a thrown error. This mocks exactly that
- * violation (writeAudit rejecting) to prove the outer catch in kill.ts's
- * finally is the thing standing between it and a masked outcome — pure
- * unit coverage, no Postgres, since the point under test is kill.ts's own
- * control flow, not the SQL. `vi.mock` calls are hoisted by Vitest above
- * every import in this file, so `kill.ts`'s own `import { writeAudit } from
- * './audit.js'` resolves to this mock.
+ * writeAudit is designed never to reject, but a throw from an `await` inside
+ * a `finally` replaces the `try` block's return value. This mocks writeAudit
+ * rejecting to prove killBackend still returns the real kill outcome.
+ * `vi.mock` is hoisted above the imports, so kill.ts resolves to this mock.
  */
 vi.mock('../src/actions/audit.js', () => ({
   writeAudit: vi.fn(async () => {

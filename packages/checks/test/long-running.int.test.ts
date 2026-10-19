@@ -14,21 +14,11 @@ describe('longRunning', () => {
   }, 120_000);
 
   /**
-   * The test above proves the SQL runs against a live server; an empty
-   * `pg_stat_activity` makes it pass whether or not the WHERE/floor logic
-   * is correct. This fixture opens a dedicated connection, reads its own
-   * backend pid, then starts a real `pg_sleep` without awaiting it — the
-   * connection stays 'active' with a real, growing query age for the
-   * duration. `minSecs` is set below the sleep, not the other way around,
-   * so the test doesn't need to sleep longer than necessary to clear a
-   * fixed threshold. `limit` is set generously high (unlike the default 10)
-   * because this SQL, like `blocked`'s, scans the whole shared server, not
-   * just this test's own isolated database — see the comment on the
-   * `blocked` fixture above for why concurrent sibling test files matter
-   * here; a wide `limit` keeps this fixture's own row from being pushed out
-   * by unrelated concurrent activity elsewhere on the same container.
-   * Against a check that always returned `{ queries: [], truncated: false
-   * }`, the final assertion would fail.
+   * The test above passes on an empty `pg_stat_activity` whether or not the
+   * floor logic is correct. This one starts a real `pg_sleep` without
+   * awaiting it, so the connection stays 'active' with a growing query age.
+   * `limit` is high because the SQL scans the whole shared server, and
+   * unrelated activity on the container could push this fixture's row out.
    */
   it('finds a query that has been running past its floor', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -53,15 +43,10 @@ describe('longRunning', () => {
   }, 120_000);
 
   /**
-   * The identity the bulk kill is pinned to, proved by performing the
-   * comparison killBackend performs.
-   *
-   * The unit test covers the mapper over a fixture string. What it cannot
-   * cover is whether the `::text` cast produces something Postgres will
-   * accept BACK as a timestamptz — and that round trip is the entire
-   * PID-reuse guard. Dropping the cast would hand node-pg a `Date`, which
-   * re-serialises through JSON with millisecond truncation, and the
-   * comparison would silently stop matching the session it identifies.
+   * The PID-reuse guard depends on the `::text` cast round-tripping back to a
+   * timestamptz. Dropping the cast would hand node-pg a `Date`, which
+   * re-serialises through JSON with millisecond truncation and stops
+   * matching the session it identifies.
    */
   it('returns an identity Postgres accepts back as a timestamptz', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -80,8 +65,6 @@ describe('longRunning', () => {
         if (!r.ok) throw new Error(r.message);
         const mine = r.data.queries.find((q) => q.pid === sleeperPid);
         expect(mine).toBeDefined();
-        // A string, not a Date: the cast is what makes the round trip below
-        // survive JSON on its way to the browser and back.
         expect(typeof mine!.backendStart).toBe('string');
 
         // The comparison killBackend makes, against the same session.
@@ -96,15 +79,9 @@ describe('longRunning', () => {
     });
   }, 120_000);
 
-  // A7: proves the truncation signal is real against Postgres, not just the
-  // pure `map` unit test. Three concurrently-sleeping backends (on the
-  // pool's own connections) give pg_stat_activity more 'active' rows than
-  // `limit: 1`, so a regression to a bare `LIMIT $2` (no truncation signal)
-  // would make this pass with `truncated` silently `false`. Same pattern as
-  // sessions.int.test.ts's own truncation fixture. Unlike the fixture
-  // above, this one is inherently robust to concurrent sibling test files:
-  // extra unrelated activity elsewhere can only make truncation MORE
-  // certain at `limit: 1`, never less.
+  // Three sleeping backends give pg_stat_activity more 'active' rows than
+  // `limit: 1`. Unrelated activity elsewhere on the server can only make
+  // truncation more certain.
   it('reports truncation when the limit clips the result (A7)', async () => {
     await withPostgres(async (ctx, pool) => {
       const sleepers = Promise.all([
@@ -112,8 +89,7 @@ describe('longRunning', () => {
         pool.query('SELECT pg_sleep(2)'),
         pool.query('SELECT pg_sleep(2)'),
       ]);
-      // Let the sleeping backends actually register as 'active' before the
-      // check's own query (on the pool's 4th connection) runs.
+      // Let the sleepers register as 'active' before the check's own query.
       await new Promise((r) => setTimeout(r, 300));
 
       const result = await runCheck(ctx, longRunning, { minSecs: 0, limit: 1 });

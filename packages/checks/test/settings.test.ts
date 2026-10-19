@@ -3,16 +3,11 @@ import { settings, settingNames, toSettings } from '../src/checks/settings.js';
 
 describe('settingNames', () => {
   /**
-   * The parity contract with `settings.rb`, pinned rather than described.
+   * Parity with pgHero's `settings.rb`: dropping a setting from a group would
+   * otherwise degrade silently, one row fewer.
    *
-   * §8's lesson is that a parity claim nobody can check is the one that rots:
-   * dropping a setting from a group degrades in silence — the page renders,
-   * one row fewer, and no other test in this file notices. This is the only
-   * thing standing between that and a reviewer diffing against pgHero by eye.
-   *
-   * `io_method` is in the list unconditionally. pgHero branches on the server
-   * version because `SHOW` errors on a setting that does not exist;
-   * `pg_settings` returns no row instead, so there is nothing to branch on.
+   * `io_method` is in the list unconditionally: `pg_settings` returns no row
+   * for a setting that does not exist, so there is nothing to branch on.
    */
   it("asks for exactly pgHero 4.0.1's three groups, in pgHero's order", () => {
     expect(settingNames()).toEqual([
@@ -31,11 +26,7 @@ describe('settingNames', () => {
     expect(new Set(asked).size).toBe(asked.length);
   });
 
-  /**
-   * The check takes no options at all, which is the point of removing the
-   * branch: `sql` is a pure function of its opts and cannot reach the server
-   * version, and no page can supply one it does not have.
-   */
+  /** `sql` is a pure function of its opts and cannot reach the server version, so the check takes no options. */
   it('needs nothing from the caller', () => {
     expect(settings.sql).toBeTypeOf('function');
     expect(settingNames).toHaveLength(0);
@@ -46,7 +37,7 @@ describe('toSettings', () => {
   /**
    * Every group carries more than one member, because a grouping bug that
    * puts everything in `main` passes any test where the other groups have a
-   * single expected member and nothing to be wrongly joined by.
+   * single expected member.
    */
   const rows = [
     { name: 'vacuum_cost_limit', value: '200' },
@@ -64,9 +55,8 @@ describe('toSettings', () => {
   });
 
   /**
-   * The rows above are deliberately in neither catalog nor alphabetical
-   * order. `pg_settings` answers in its own order and the SQL adds no
-   * `ORDER BY`, so this is the only thing deciding what an operator reads.
+   * The rows above are in neither catalog nor alphabetical order. The SQL
+   * adds no `ORDER BY`, so `toSettings` alone decides the order.
    */
   it('orders by the pgHero arrays, not by the order the rows arrived', () => {
     const d = toSettings(rows);
@@ -74,11 +64,7 @@ describe('toSettings', () => {
     expect(d.autovacuum[0]!.name).toBe('autovacuum');
   });
 
-  /**
-   * A name with no row is skipped, never rendered blank — which is what keeps
-   * this function free of the version branch. On 17 there is no `io_method`
-   * row and nothing here needs to know why.
-   */
+  /** Skipping a name with no row is what keeps this function free of a version branch: on 17 there is no `io_method` row. */
   it('skips a setting the server did not return rather than rendering it empty', () => {
     const d = toSettings([{ name: 'max_connections', value: '100' }]);
     expect(d.main).toEqual([{ name: 'max_connections', value: '100' }]);

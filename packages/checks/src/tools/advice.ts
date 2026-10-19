@@ -4,27 +4,15 @@ import type { PlanNode } from './explain.js';
 import { ownSql } from '../run.js';
 
 /**
- * Index advice, read from the planner's own plan — P6's answer to the
- * dependency spec 2026-09-03 §7 said pgops would add.
+ * Index advice, read from the planner's plan rather than from a parse of the
+ * statement as pgHero does. A plan names every relation it scans with its
+ * own filter, so joins are advised on, and a statement an index already
+ * serves shows no `Seq Scan` and gets no advice.
  *
- * pgHero parses each statement with `pg_query` (a libpg_query binding) and
- * reasons about the parse tree. pgops asks Postgres to plan it and reads the
- * plan (divergence D1):
- *
- *   - joins: pgHero answers the literal string "JOIN not supported yet"; a
- *     plan names every relation it scans, each with its own filter, so every
- *     side of a join is advised on;
- *   - an index that already serves the statement: the planner uses it, no
- *     `Seq Scan` appears, and there is nothing to advise — no guesswork;
- *   - dependencies: none. `packages/checks` keeps `dependencies: ["pg"]`.
- *
- * The COLUMN CHOICE is still pgHero's heuristic, transcribed below so it
- * diffs against its source: the plan says which relation is scanned and on
- * what, `pg_stats` says how selective each column is, and pgHero's rules pick
- * the columns. What is read from a plan is Postgres's own `ruleutils.c`
- * deparse — a far narrower grammar than operator SQL — and anything not
- * recognised is skipped, so a surprise costs a missed suggestion, never a
- * wrong one.
+ * The column choice is pgHero's heuristic, transcribed below so it diffs
+ * against its source. The filters parsed here are Postgres's `ruleutils.c`
+ * deparse; anything not recognised is skipped, so a surprise costs a missed
+ * suggestion, not a wrong one.
  */
 
 export type Op = '=' | '<>' | '<' | '<=' | '>' | '>=' | '~~' | '~~*' | 'null' | 'not_null';
@@ -38,8 +26,8 @@ const QUALIFIED = new RegExp(String.raw`^(?:(${IDENT})\.)?(${IDENT})$`);
 // ruleutils prints a cast of a column as `(col)::type`.
 const CAST = /^\((.+)\)::[^()]+$/;
 const NULL_TEST = /^(.+) IS (NOT )?NULL$/;
-// `= ANY (...)` — an IN list — arrives as `=` with an ANY right-hand side,
-// and counts as equality (divergence D5; pgHero raises "Not Implemented").
+// `= ANY (...)`, an IN list, arrives as `=` with an ANY right-hand side and
+// counts as equality.
 const COMPARISON = /^(.+?) (=|<>|<=|>=|<|>|~~\*|~~) (.+)$/;
 const SORT_KEY = /^(.+?)( DESC)?(?: NULLS (?:FIRST|LAST))?$/;
 
@@ -80,7 +68,7 @@ function walk(s: string, at: (i: number, depth: number) => number | undefined): 
   }
 }
 
-/** Remove ONE pair of parentheses, and only when it encloses the whole string. */
+/** Remove one pair of parentheses, and only when it encloses the whole string. */
 function unwrap(raw: string): string {
   const s = raw.trim();
   if (!s.startsWith('(') || !s.endsWith(')')) return s;
@@ -120,7 +108,7 @@ export function parseConjunct(part: string, alias: string): Conjunct | null {
   return column === null ? null : { column, op: cmp[2] as Op };
 }
 
-/** A `Sort Key` list; empty if ANY key is not a plain column, as pgHero's `rescue []` does. */
+/** A `Sort Key` list; empty if any key is not a plain column. */
 export function parseSortKeys(keys: unknown, alias: string): SortKey[] {
   if (!Array.isArray(keys)) return [];
   const out: SortKey[] = [];
@@ -138,12 +126,9 @@ function nodesOf(plan: PlanNode): PlanNode[] {
 }
 
 /**
- * Every `Seq Scan` in a plan, with its filter and — for a single-table plan
- * only — the sort above it.
- *
- * A sort is attributed to a scan only when that scan is the plan's ONLY scan,
- * which is pgHero's single-table rule: with two relations, "an index would
- * serve this ORDER BY" is a claim about a join order the planner may not pick.
+ * Every `Seq Scan` in a plan, with its filter and, when it is the plan's
+ * only scan, the sort above it. With two relations, whether an index would
+ * serve the ORDER BY depends on a join order the planner may not pick.
  *
  * `Parallel Seq Scan` is `Seq Scan` with `"Parallel Aware": true` in JSON, so
  * it is included without a case of its own.
@@ -178,11 +163,9 @@ export interface IndexSuggestion {
   using: 'btree' | 'gist';
   columns: string[];
   /**
-   * The statement for the OPERATOR to run, through their own migration
-   * tooling. pgops never runs it: #62 `autoindex` is declined, and this
-   * string is the remedy path that decline points to — the same division as
-   * run.ts's `remedyFor`. guards.test.ts pins this file in the DDL guard for
-   * exactly this string, and says so.
+   * The statement for the operator to run through their own migration
+   * tooling. pgops never runs it. guards.test.ts allows this file in the DDL
+   * guard for this string.
    */
   statement: string;
 }
@@ -192,7 +175,7 @@ export interface IndexAdvice {
   table: string;
   found: boolean;
   suggestion?: IndexSuggestion;
-  /** An existing index already serves the suggestion; `found` stays true, as in pgHero. */
+  /** An existing index already serves the suggestion; `found` stays true. */
   coveredBy?: string;
   explanation?: string;
   rows?: number;
@@ -200,11 +183,11 @@ export interface IndexAdvice {
   rowProgression?: number[];
 }
 
-// `BETWEEN` is in pgHero's list; Postgres deparses it as two conjuncts, so it never arrives here.
+// No `BETWEEN`: Postgres deparses it as two conjuncts.
 const RANGE: ReadonlySet<Op> = new Set<Op>(['>', '>=', '<', '<=', '~~', '~~*']);
 const LIKE: ReadonlySet<Op> = new Set<Op>(['~~', '~~*']);
 
-/** pgHero's `row_estimates`, transcribed — including the approximation its own TODO admits to. */
+/** pgHero's `row_estimates`, transcribed, approximations included. */
 export function rowEstimate(stats: ColumnStats, totalRows: number, rowsLeft: number, op: Op | undefined): number {
   if (op === 'null') return rowsLeft * stats.nullFrac;
   if (op === 'not_null') return rowsLeft * (1 - stats.nullFrac);
@@ -234,9 +217,9 @@ function suggest(scan: Scan, using: 'btree' | 'gist', columns: string[]): IndexS
 }
 
 /**
- * pgHero's covering rule: an existing index of the same method — or, with no
- * sort, any gist or brin, and hash when every condition is equality — whose
- * LEADING columns are the suggestion's.
+ * pgHero's covering rule: an existing index of the same method (or, with no
+ * sort, any gist or brin, and hash when every condition is equality) whose
+ * leading columns are the suggestion's.
  */
 function coveringIndex(s: IndexSuggestion, scan: Scan, existing: readonly ExistingIndex[]): ExistingIndex | undefined {
   const methods = new Set<string>([s.using]);
@@ -259,13 +242,13 @@ function found(advice: IndexAdvice, scan: Scan, facts: RelationFacts, s: IndexSu
     : { ...advice, found: true, suggestion: s };
 }
 
-const byName = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+export const byName = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * pgHero's `best_index_helper`, transcribed for one scan: the column order,
  * the 500-row floor, the stop at fewer than 50 rows or two columns or a range,
  * and the pruning of a trailing column that cuts less than 70%. Kept close to
- * its source so it diffs against it. The departures are the input (D1: a plan,
+ * its source so it diffs against it. The departures are the input (a plan,
  * not a parse tree) and an explanation where pgHero leaves one blank.
  */
 export function chooseIndex(scan: Scan, facts: RelationFacts | undefined): IndexAdvice {
@@ -321,7 +304,7 @@ export function chooseIndex(scan: Scan, facts: RelationFacts | undefined): Index
   }
   const rowProgression = progression.map(Math.round);
 
-  // "If the last indexes don't give us much, don't include" — pgHero's words.
+  // Drop trailing columns that cut less than 70%.
   const reversed = [...progression].reverse();
   for (let i = 0; i < reversed.length - 1; i++) {
     if (reversed[i]! > reversed[i + 1]! * 0.3) finalWhere.pop();
@@ -335,13 +318,13 @@ export function chooseIndex(scan: Scan, facts: RelationFacts | undefined): Index
 
 const RELATIONS = 'unnest($1::text[], $2::text[]) AS r(schema, relname)';
 
-// reltuples is -1 before the first ANALYZE on PG 14+; 0 stands in for pgHero's `to_i`.
+// reltuples is -1 before the first ANALYZE on PG 14+; clamped to 0.
 const ROWS_SQL = ownSql(`SELECT n.nspname::text AS schema, c.relname::text AS relname, greatest(c.reltuples, 0)::float8 AS rows
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN ${RELATIONS} ON r.schema = n.nspname AND r.relname = c.relname`);
 
-// NOT inherited: the scan is of this relation, not of its inheritance tree.
+// Not inherited: the scan is of this relation, not of its inheritance tree.
 const STATS_SQL = ownSql(`SELECT s.schemaname::text AS schema, s.tablename::text AS relname, s.attname::text AS column,
        s.null_frac::float8 AS null_frac, s.n_distinct::float8 AS n_distinct
 FROM pg_stats s
@@ -352,11 +335,10 @@ WHERE NOT s.inherited`);
  * Every valid, non-partial index on the relations named, one key column per
  * array element.
  *
- * The per-column `pg_get_indexdef(oid, k, true)` omits a non-default opclass
- * — a `gist (email gist_trgm_ops)` index reports `email` — so the opclass is
- * joined from pg_opclass through `indclass`, which is 0-based where `k` is
- * 1-based. Divergence D6: an invalid index serves nothing, and a partial one
- * covers only the rows its predicate admits, so neither counts as covering.
+ * The per-column `pg_get_indexdef(oid, k, true)` omits a non-default
+ * opclass, so the opclass is joined from pg_opclass through `indclass`,
+ * which is 0-based where `k` is 1-based. Invalid and partial indexes are
+ * excluded: neither can be relied on to cover a suggestion.
  */
 const INDEXES_SQL = ownSql(`SELECT n.nspname::text AS schema, t.relname::text AS relname, ic.relname::text AS name, am.amname::text AS using,
        array(SELECT pg_get_indexdef(i.indexrelid, k, true)
@@ -379,7 +361,6 @@ const keyOf = (schema: string, table: string) => JSON.stringify([schema, table])
 /** A key column as the covering rule compares it: unquoted, plus its opclass unless default or inet_ops. */
 function normalize(key: string, opclass: string): string {
   const column = WHOLE_IDENT.test(key) ? unquote(key) : key;
-  // pgHero strips " inet_ops" the same way (`v.delete_suffix(" inet_ops")`).
   return opclass === '' || opclass === 'inet_ops' ? column : `${column} ${opclass}`;
 }
 
@@ -412,9 +393,8 @@ async function relationFacts(
 }
 
 /**
- * Advice for every sequential scan in every plan — one array per plan — from
- * ONE catalog read covering all the relations they name, so advising on a
- * hundred query shapes costs three queries, not three hundred.
+ * Advice for every sequential scan in every plan, one array per plan, from
+ * one catalog read (three queries) covering all the relations they name.
  */
 export async function adviseOn(ctx: CheckContext, plans: readonly PlanNode[]): Promise<IndexAdvice[][]> {
   const scans = plans.map(scansOf);

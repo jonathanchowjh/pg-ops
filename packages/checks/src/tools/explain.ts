@@ -13,30 +13,26 @@ export type Planned =
   | { ok: true; plan: PlanNode; parameters: number }
   | { ok: false; code: string; message: string };
 
-/** pgHero's "Too large" cap, adopted: planning is cheap, parsing a megabyte is not. */
+/** Longest statement accepted for planning, in characters. */
 export const MAX_STATEMENT_LENGTH = 10_000;
 
 const PLAN_TIMEOUT_MS = 10_000;
 /**
  * PREPARE takes an AccessShareLock on every relation the statement names, so a
  * migration holding ACCESS EXCLUSIVE would otherwise hold each plan for the
- * whole PLAN_TIMEOUT_MS — per shape, on a page that plans a hundred. A second
- * is enough to know the table is busy; the shape fails as data and the rest
- * are planned.
+ * whole PLAN_TIMEOUT_MS, per shape. With this the shape fails as data and
+ * the rest are planned.
  */
 const LOCK_TIMEOUT_MS = 1_000;
 
 /**
- * The SQLSTATEs whose message is STRUCTURAL — it names the operator's own
- * syntax, relation, column, function or privilege, not a value.
+ * The SQLSTATEs whose message is structural: it names the operator's own
+ * syntax, relation, column, function or privilege, not a value. Only these
+ * messages are shown.
  *
- * pgHero replaces every message it does not recognise with "Error explaining
- * query", because "data can be extracted through the Postgres error message":
- * `SELECT '42x'::int` answers with the value it choked on, and selectivity
- * estimation folds stable functions such as `current_setting(...)` at PLAN
- * time, so a cast error can carry a setting's value out. An allowlist keeps
- * that closed while still telling an operator `relation "ordrs" does not
- * exist` — which pgHero's blanket replacement does not.
+ * Other messages can leak data: `SELECT '42x'::int` answers with the value
+ * it choked on, and stable functions such as `current_setting(...)` are
+ * folded at plan time, so a cast error can carry a setting's value out.
  */
 const STRUCTURAL = new Set([
   '42601', // syntax_error — including "cannot insert multiple commands"
@@ -55,14 +51,38 @@ const STRUCTURAL = new Set([
 
 /**
  * Appended to 42501. EXPLAIN checks SELECT on every table the statement names
- * although it reads no rows, so the least-privilege role the README recommends
- * (pg_read_all_stats) is refused on every application table — and Postgres's
- * message names the table, not the fix. Prose, not a statement to paste:
- * the tables are Postgres's to name, and the DDL guard holds this file to
- * containing none.
+ * although it reads no rows, so a role with only pg_read_all_stats is
+ * refused on every application table. Prose, not a GRANT to paste: the DDL
+ * guard holds this file to containing none.
  */
 const PRIVILEGE_HINT = ' Planning checks SELECT on every table a statement names, though it reads no rows: '
   + 'the pgops role needs SELECT on those tables, or pg_read_all_data for all of them.';
+
+export interface PlanOpts {
+  /** How long a PREPARE may wait for a table's lock. The scheduler passes 100: it must never queue behind a migration. */
+  lockTimeoutMs?: number;
+  /** How long one plan may take. The scheduler passes 1000: nobody is waiting on its plans. */
+  statementTimeoutMs?: number;
+}
+
+/** A positive whole number of milliseconds, else the default: it is interpolated into SET LOCAL. */
+function millis(asked: number | undefined, fallback: number): number {
+  const ms = Math.trunc(Number(asked ?? fallback));
+  return Number.isFinite(ms) && ms > 0 ? ms : fallback;
+}
+
+/** The tables a plan reads or writes: every node that names a relation, schema-qualified, sorted, once each. */
+export function relationsOf(plan: PlanNode): string[] {
+  const out = new Set<string>();
+  const walk = (n: PlanNode): void => {
+    const rel = n['Relation Name'];
+    const schema = n['Schema'];
+    if (typeof rel === 'string' && typeof schema === 'string') out.add(`${schema}.${rel}`);
+    for (const child of n.Plans ?? []) walk(child);
+  };
+  walk(plan);
+  return [...out].sort();
+}
 
 const DISCARD = new Error('pgops: discarding a connection that holds prepared statements');
 
@@ -82,38 +102,38 @@ export function checkStatement(sql: string): string {
 }
 
 /**
- * Plan operator-supplied statements. THE ONLY PATH by which text pgops did not
- * write reaches a monitored database, and every step is a defence. Each was
- * measured on PG 14 and 17 before it was written (P6 plan, "Verified facts").
+ * Plan operator-supplied statements. The only path by which text pgops did
+ * not write reaches a monitored database.
  *
- * 1. `PREPARE` is sent as a NAMED protocol statement. Over the simple protocol
- *    a trailing `; CREATE TABLE …` runs — and an empty `values` array does not
- *    change that, node-postgres still sends a simple query. A named statement
- *    makes Postgres itself refuse ("cannot insert multiple commands into a
- *    prepared statement"): a server-side guarantee, where pgHero's
- *    `explain_safe?` scans the string for `;`. PREPARE also accepts only
- *    plannable statements, so `VACUUM` is a syntax error, not a question.
+ * 1. `PREPARE` is sent as a named protocol statement. Over the simple
+ *    protocol a trailing `; CREATE TABLE …` runs, and an empty `values` array
+ *    does not change that: node-postgres still sends a simple query. With a
+ *    named statement Postgres itself refuses ("cannot insert multiple
+ *    commands into a prepared statement"). PREPARE also accepts only
+ *    plannable statements, so `VACUUM` is a syntax error.
  * 2. `PREPARE` + `EXPLAIN EXECUTE` under `force_generic_plan`, not
  *    `EXPLAIN (GENERIC_PLAN)`. A named protocol statement counts `$1` as its
- *    OWN parameter, so GENERIC_PLAN through one fails ("bind message supplies
- *    0 parameters") — and binding NULLs to satisfy it yields a CUSTOM plan
- *    with the NULL folded in (`One-Time Filter: false`). This route gives a
- *    real generic plan on PG 12+, so a normalized `pg_stat_statements` shape
- *    plans on every supported version; GENERIC_PLAN would floor it at 16.
+ *    own parameter, so GENERIC_PLAN through one fails ("bind message supplies
+ *    0 parameters"), and binding NULLs to satisfy it yields a custom plan
+ *    with the NULL folded in. This route gives a real generic plan on PG 12+;
+ *    GENERIC_PLAN needs 16.
  * 3. `BEGIN READ ONLY`, always rolled back, under a statement timeout and a
  *    short lock timeout. Nothing here executes the statement; READ ONLY is
  *    so that if something ever did, it could not write.
- * 4. The connection is DESTROYED afterwards, never returned to the pool.
+ * 4. The connection is destroyed afterwards, never returned to the pool.
  *    Prepared statements survive ROLLBACK, and node-postgres caches statement
  *    names per connection and throws when one is reused with different text.
- *    A pooled connection carrying them would break the next caller to draw it.
  *
- * A statement that fails to plan is DATA (`ok: false`), so a batch of a
- * hundred query shapes survives one of them being a `SET`. A failure that is
- * not a Postgres error — the connection dying — rejects the whole batch.
+ * A statement that fails to plan is data (`ok: false`), so one bad shape
+ * does not fail a batch. A failure that is not a Postgres error, such as the
+ * connection dying, rejects the whole batch.
  */
-export async function planStatements(ctx: CheckContext, statements: readonly string[]): Promise<Planned[]> {
+export async function planStatements(
+  ctx: CheckContext, statements: readonly string[], opts: PlanOpts = {},
+): Promise<Planned[]> {
   if (statements.length === 0) return [];
+  const stmtMs = millis(opts.statementTimeoutMs, PLAN_TIMEOUT_MS);
+  const lockMs = millis(opts.lockTimeoutMs, LOCK_TIMEOUT_MS);
   const client = await ctx.target.connect();
   const release = guardClient(client);
   const planned: Planned[] = [];
@@ -121,13 +141,12 @@ export async function planStatements(ctx: CheckContext, statements: readonly str
     for (const [i, statement] of statements.entries()) {
       const name = `pgops_explain_${i}`;
       // The envelope is marked as pgops's own. The PREPARE is not: it
-      // carries the operator's statement, which this package never marks
-      // (capture.test.ts pins that at the other call site).
+      // carries the operator's statement, which this package never marks.
       await client.query(ownSql('BEGIN READ ONLY'));
       try {
-        // Interpolated because SET LOCAL takes no bind parameter; constants.
-        await client.query(ownSql(`SET LOCAL statement_timeout = ${PLAN_TIMEOUT_MS}`));
-        await client.query(ownSql(`SET LOCAL lock_timeout = ${LOCK_TIMEOUT_MS}`));
+        // Interpolated because SET LOCAL takes no bind parameter; integers, made so by `millis`.
+        await client.query(ownSql(`SET LOCAL statement_timeout = ${stmtMs}`));
+        await client.query(ownSql(`SET LOCAL lock_timeout = ${lockMs}`));
         await client.query(ownSql('SET LOCAL plan_cache_mode = force_generic_plan'));
         await client.query({ name: `pgops_prepare_${i}`, text: `PREPARE ${name} AS ${statement}`, values: [] });
         const counted = await client.query<{ n: number }>(
@@ -166,18 +185,12 @@ export async function planStatements(ctx: CheckContext, statements: readonly str
 export interface Explanation { plan: PlanNode; parameters: number; advice: IndexAdvice[] }
 
 /**
- * #57 `explain` and #64 `best_index`, in one planning pass.
+ * A statement's plan and its index advice, from one planning pass: the plan
+ * is the advice's input.
  *
- * pgHero's explain page calls `explain` and then `suggested_indexes(queries:
- * [query])` — two answers about one statement. Here the plan IS the advice's
- * input, so planning twice would be waste and could disagree with itself. Two
- * registry entries, one tool: the JOBS precedent, where `captureQueryStats`
- * and `captureSpaceStats` both name `captureOnce`.
- *
- * Divergence D2: no ANALYZE. It EXECUTES the statement, and inside a read-only
- * transaction `pg_terminate_backend(...)` and `pg_sleep(...)` still run as the
- * pgops role. pgHero keeps it off by default; pgops's only route to effects an
- * operator chooses is the audited action ladder.
+ * No ANALYZE. It executes the statement, and inside a read-only transaction
+ * `pg_terminate_backend(...)` and `pg_sleep(...)` still run as the pgops
+ * role.
  */
 export const explain: Tool<{ sql: string }, Explanation> = {
   id: 'explain',

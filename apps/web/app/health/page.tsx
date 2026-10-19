@@ -12,8 +12,7 @@ import {
 const FLEET = HEALTH_CHARTS.filter((c) => c.fleet);
 
 /**
- * Every database, six charts, last 48 hours. The shift check: did anything
- * get worse since yesterday.
+ * Every database's fleet charts over the last FLEET_HOURS.
  *
  * Reads the store and nothing else, so it costs the monitored databases
  * nothing to leave open, and a database that is down still shows its past.

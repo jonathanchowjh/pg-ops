@@ -12,11 +12,9 @@ describe('replicationLag', () => {
   });
 
   /**
-   * THE divergence from pgHero, and the reason this file exists. pgHero
-   * answers 0 for a primary, which reads on a dashboard as "perfectly caught
-   * up" — a claim about replication health made about a server that is not
-   * replicating at all. `null` is "not a meaningful question here"; `0` is
-   * reserved for a standby that genuinely has no lag.
+   * pgHero answers 0 for a primary, which reads as "perfectly caught up" on a
+   * server that is not replicating at all. `null` means the question does not
+   * apply; `0` is reserved for a standby with no lag.
    */
   it('reports no lag figure at all on a primary, rather than zero', () => {
     expect(replicationLag.map([primary]).lagSeconds).toBeNull();
@@ -36,9 +34,8 @@ describe('replicationLag', () => {
   });
 
   /**
-   * `standbys: 0` is "nothing is streaming from me" — a finding. A missing
-   * row is "we could not look". Written `?? null` these stay apart; written
-   * `|| null` a real zero would launder itself into unknown.
+   * `standbys: 0` is a finding; a missing row is "we could not look". `??`
+   * keeps them apart where `||` would turn a real zero into unknown.
    */
   it('keeps a genuine zero standby count distinct from unknown', () => {
     expect(replicationLag.map([{ ...primary, standbys: 0 }]).standbys).toBe(0);
@@ -58,16 +55,10 @@ describe('replicationLag', () => {
 });
 
 /**
- * B4, standby side. `lag_seconds` is 0 when
- * `pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()` — "I have replayed
- * everything I received", which is pgHero's caught-up test and the right one
- * for a healthy standby.
- *
- * It is also exactly what a DEAD walreceiver looks like: nothing arriving,
- * nothing left to replay, so a standby that lost its connection to the
- * primary hours ago reads 0 seconds behind. Beside a standbys check that now
- * judges lag, that reading is the one remaining way for this gate to call a
- * broken standby perfect.
+ * `lag_seconds` is 0 when `pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()`.
+ * A dead walreceiver looks the same: nothing arriving, nothing left to
+ * replay. `receiving` is what tells a caught-up standby from a disconnected
+ * one.
  */
 describe('replicationLag — a standby that is not receiving', () => {
   it('reports whether a walreceiver is running, and only on a standby', () => {
@@ -75,8 +66,6 @@ describe('replicationLag — a standby that is not receiving', () => {
       .toBe(false);
     expect(replicationLag.map([{ in_recovery: true, lag_seconds: 0, standbys: 0, receiving: true }]).receiving)
       .toBe(true);
-    // A primary has no walreceiver to report on, which is not the same as
-    // having a dead one.
     expect(replicationLag.map([{ in_recovery: false, lag_seconds: null, standbys: 2, receiving: null }]).receiving)
       .toBeNull();
   });

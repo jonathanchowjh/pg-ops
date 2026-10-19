@@ -13,11 +13,16 @@ const row = (o: Partial<QueryStatRow>): QueryStatRow => ({
   queryid: '1', query: 'select 1', calls: '10',
   total_ms: 100, mean_ms: 10, stddev_ms: 1,
   rows: '10', shared_blks_hit: '90', shared_blks_read: '10',
-  total_shapes: 1, own_shapes: 0, stats_reset: null, requested_sort: 'total',
+  total_shapes: 1, own_shapes: 0, stats_reset: null, requested_sort: 'total', all_ms: 400,
   ...o,
 });
 
 describe('queryStats.map', () => {
+  it('carries every shape\'s time, for a share', () => {
+    expect(queryStats.map([row({ total_ms: 100, all_ms: 400 })]).allMs).toBe(400);
+    expect(queryStats.map([]).allMs).toBe(0);
+  });
+
   it('converts bigint counters (calls, rows, shared_blks_*) from text to number', () => {
     const d = queryStats.map([row({ calls: '10', rows: '10', shared_blks_hit: '90', shared_blks_read: '10' })]);
     expect(d.rows[0]).toEqual({
@@ -27,11 +32,6 @@ describe('queryStats.map', () => {
     });
   });
 
-  // Convention 1: this package's first genuinely bigint counters. A
-  // realistic-but-large value, well past 2^31 (an int4 overflow line no
-  // longer relevant here) but nowhere near 2^53 (the actual float64
-  // precision line) — proves the conversion is deliberate arithmetic, not
-  // an accidental int4-range assumption smuggled back in.
   it('does not lose precision on a call count too large for int4', () => {
     const d = queryStats.map([row({ calls: '9876543210' })]); // > 2^31, < 2^53
     expect(d.rows[0]!.calls).toBe(9876543210);
@@ -43,8 +43,7 @@ describe('queryStats.map', () => {
   });
 
   it('keeps queryid as a string identifier, never converted to a number', () => {
-    // A real queryid can exceed Number.MAX_SAFE_INTEGER; converting it would
-    // silently corrupt the identity this field exists to carry.
+    // A real queryid can exceed Number.MAX_SAFE_INTEGER.
     const d = queryStats.map([row({ queryid: '9223372036854775807' })]);
     expect(d.rows[0]!.queryid).toBe('9223372036854775807');
   });
@@ -64,11 +63,9 @@ describe('queryStats.map', () => {
     expect(d.rows[0]!.cacheHitPct).toBe(0);
   });
 
-  // Fix round 1: verified empirically against a live PostgreSQL 17.11 that
-  // Postgres redacts a foreign row's `queryid`/`query`, it does not drop the
-  // row — every cost column stays populated. `redacted` must mirror that:
-  // true whenever EITHER signal Postgres uses is present, so it doesn't
-  // silently stop working if a future PG version stops nulling one of them.
+  // Postgres redacts a foreign row's `queryid`/`query` but keeps every cost
+  // column. `redacted` is true when either signal is present, in case a
+  // future version stops nulling one of them.
   it('flags a row redacted when queryid is nulled, even if query text looks normal', () => {
     const d = queryStats.map([row({ queryid: null, query: 'select 1' })]);
     expect(d.rows[0]!.redacted).toBe(true);
@@ -97,13 +94,10 @@ describe('queryStats.map', () => {
     expect(r.cacheHitPct).toBe(80);
   });
 
-  // A4: `sort` must echo what the CALLER asked for (via the `requested_sort`
-  // column bound from `Opts.sort` and read back from the row — `map` itself
-  // has no access to `Opts`), not a constant. A regression back to a
-  // hardcoded `sort: 'total'` — the shape the brief's own draft shipped —
-  // passes every SQL-ordering assertion in query-stats.int.test.ts while
-  // still mislabelling the column header for every other key; this is the
-  // one test that catches that specific regression.
+  // `map` has no access to `Opts`, so `sort` is read back from the
+  // `requested_sort` column. A hardcoded `sort: 'total'` passes every
+  // SQL-ordering assertion in query-stats.int.test.ts while mislabelling the
+  // column header.
   it.each(['total', 'mean', 'calls', 'cache'] as const)(
     'echoes back the requested sort key %s, not a constant',
     (sort) => {
@@ -113,8 +107,6 @@ describe('queryStats.map', () => {
   );
 
   it('falls back to "total" for an unrecognized requested_sort rather than trusting an untyped string', () => {
-    // Defends the `isQuerySort` narrowing itself: a value that could only
-    // arrive from a driver/version mismatch, not from a real caller.
     const d = queryStats.map([row({ requested_sort: 'bogus' })]);
     expect(d.sort).toBe('total');
   });
@@ -130,12 +122,12 @@ describe('queryStats.map', () => {
 
   it('defaults totalShapes to 0, statsResetAt to null, and sort to "total" on an empty result', () => {
     const d = queryStats.map([]);
-    expect(d).toEqual({ rows: [], totalShapes: 0, ownShapes: 0, statsResetAt: null, sort: 'total' });
+    expect(d).toEqual({ rows: [], totalShapes: 0, ownShapes: 0, allMs: 0, statsResetAt: null, sort: 'total' });
   });
 
   it('carries the count of the console\'s own shapes', () => {
     const d = queryStats.map([{ queryid: '1', query: 'SELECT 1', calls: '1', total_ms: 1, mean_ms: 1, stddev_ms: 0,
-      rows: '1', shared_blks_hit: '0', shared_blks_read: '0', total_shapes: 5, own_shapes: 3, stats_reset: null, requested_sort: 'total' }]);
+      rows: '1', shared_blks_hit: '0', shared_blks_read: '0', total_shapes: 5, own_shapes: 3, stats_reset: null, requested_sort: 'total', all_ms: 1 }]);
     expect(d.ownShapes).toBe(3);
   });
 });
@@ -164,16 +156,12 @@ describe('slowQueries', () => {
     queryid: `${calls}-${meanMs}`, query: 'SELECT 1', calls, totalMs: calls * meanMs,
     meanMs, stddevMs: 0, rows: calls, cacheHitPct: 100, redacted: false,
   });
-  // Pick, not the full QueryStatsData: slowQueries reads only `rows` (see
-  // its parameter type), and this fixture has no meaningful
-  // totalShapes/sort/statsResetAt to fabricate for a pure filter test.
   const data = (rows: QueryStatRowData[]): Pick<QueryStatsData, 'rows'> => ({ rows });
 
   /**
-   * pgHero's defaults, verbatim: PGHERO_SLOW_QUERY_CALLS=100 and
-   * PGHERO_SLOW_QUERY_MS=20 (lib/pghero.rb:44-45). Both conditions must
-   * hold — a query called twice that takes a second is a one-off, and a
-   * query called a million times at 1ms is the database working.
+   * pgHero's defaults: PGHERO_SLOW_QUERY_CALLS=100 and PGHERO_SLOW_QUERY_MS=20.
+   * A query called twice that takes a second is a one-off, and one called a
+   * million times at 1ms is the database working.
    */
   it('needs BOTH enough calls and enough mean time', () => {
     const rows = [q(100, 20), q(99, 20), q(100, 19), q(1, 5000), q(1e6, 1)];
@@ -193,10 +181,8 @@ describe('slowQueries', () => {
   });
 
   /**
-   * A row Postgres redacted still carries full cost figures — only queryid
-   * and query text are withheld (see QueryStatRowData.redacted). Dropping it
-   * would hide the operator's slowest query precisely when it is one they
-   * lack privilege to name, which is the case they most need told.
+   * A redacted row still carries full cost figures. Dropping it would hide
+   * the slowest query when the operator lacks privilege to name it.
    */
   it('keeps a redacted row whose cost qualifies', () => {
     const redacted = { ...q(500, 100), queryid: null, query: null, redacted: true };

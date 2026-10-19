@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { GATES, GATE_ORDER, HEALTH_METRICS, type HealthPoint } from '@pgops/checks';
+import { GATES, GATE_ORDER, HEALTH_METRICS, XID_WRAPAROUND, type HealthPoint } from '@pgops/checks';
 
 vi.mock('next/server', () => ({ connection: async () => {} }));
 
-import { HEALTH_CHARTS, WINDOWS, XID_WRAPAROUND, boardGroups, chartFor, parseWindow } from '@/lib/health';
+import { HEALTH_CHARTS, WINDOWS, boardGroups, chartFor, parseWindow } from '@/lib/health';
 import { DAY_MS } from '@/lib/trend';
 
 const blank = (at: number, over: Partial<HealthPoint> = {}): HealthPoint => ({
@@ -26,9 +26,8 @@ describe('HEALTH_CHARTS', () => {
   });
 
   /**
-   * A column captured every minute for ninety days and drawn nowhere is a
-   * cost with no reader. Every figure the series derives must be a chart, a
-   * chart's inner line, or the limit a chart is ruled against.
+   * Every figure the series derives must be a chart, a chart's inner line, or
+   * the limit a chart is ruled against; anything else is captured for no reader.
    */
   it('draws every figure the series derives', () => {
     const drawn = new Set<string>(['maxConnections']);
@@ -104,7 +103,7 @@ describe('parseWindow', () => {
     });
   });
 
-  /** Review Focus 2. Every one of these must fall back, not throw and not render an empty axis. */
+  /** Every one of these must fall back, not throw and not render an empty axis. */
   it('falls back to 48 hours for a window nobody could mean', () => {
     const fallback = { key: '48h', from: NOW - 48 * 3_600_000, to: NOW };
     const bad: Record<string, string | string[]>[] = [

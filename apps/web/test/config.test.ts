@@ -24,11 +24,7 @@ describe('readDatabases', () => {
     ]);
   });
 
-  /**
-   * PGOPS_DATABASES wins. A deployment that sets both is almost certainly
-   * migrating from one to many, and silently serving only the single database
-   * would look like the new configuration was ignored.
-   */
+  /** A deployment that sets both is most likely migrating from one database to many. */
   it('prefers PGOPS_DATABASES when both are set', () => {
     const env = { DATABASE_URL: 'postgres://h/db', PGOPS_DATABASES: '[{"name":"prod","url":"postgres://a/x"}]' };
     expect(readDatabases(env)).toEqual([{ name: 'prod', url: 'postgres://a/x' }]);
@@ -48,11 +44,7 @@ describe('readDatabases', () => {
     expect(() => readDatabases({ PGOPS_DATABASES: '[{"url":"postgres://a/x"}]' })).toThrow(ConfigError);
   });
 
-  /**
-   * Names become URL path segments (/db/[name]). A duplicate would make one of
-   * them unreachable — the kind of misconfiguration that presents as "the eu
-   * database shows prod's numbers", which is far worse than a startup error.
-   */
+  /** Names become URL path segments (/db/[name]); a duplicate makes one unreachable. */
   it('rejects duplicate names', () => {
     const env = { PGOPS_DATABASES: '[{"name":"p","url":"postgres://a/x"},{"name":"p","url":"postgres://b/y"}]' };
     expect(() => readDatabases(env)).toThrow(/duplicate/i);
@@ -89,13 +81,8 @@ describe('PGOPS_CONFIG_FILE', () => {
   });
 
   /**
-   * The discriminating test for the `source` parameter, and the reason it
-   * exists at all. Every validation message in this file used to hardcode
-   * "PGOPS_DATABASES". Reached through a file, each one then pointed an
-   * operator at an environment variable they had not set, to explain a typo
-   * in a file they had — the single worst thing a configuration error can do.
-   * Reverting `source` and hardcoding the string back reddens exactly this
-   * test and leaves the others green.
+   * The test for the `source` parameter: a hardcoded "PGOPS_DATABASES" would
+   * point the operator at a variable they had not set.
    */
   it('names PGOPS_CONFIG_FILE in validation messages reached through the file', () => {
     const path = configFile('[{"name":"bad name","url":"postgres://h/p"}]');

@@ -1,553 +1,134 @@
-import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { CHECKS, SERIES, slowQueries, SLOW_QUERY_DEFAULTS } from '@pgops/checks';
-import { runCheckFor, runSeriesFor } from '@/lib/check';
-import { ratesFor } from '@/lib/rates';
-import { LOAD_HOURS, queryLoadFor } from '@/lib/load';
-import { foldFrom } from '@/lib/fold';
-import { withParam } from '@/lib/url';
-import { LineChart } from '@/components/line-chart';
-import { CheckPanel } from '@/components/check-panel';
-import { ExplainLink } from '@/components/explain-link';
-import { Throughput } from '@/components/throughput';
-import { Badge } from '@/components/ui/badge';
+import { CHECKS, SLOW_QUERY_DEFAULTS } from '@pgops/checks';
+import { Clock } from '@/components/clock';
+import { FindBox, NodeHead, ReadAlert } from '@/components/node-head';
 import { Refresh } from '@/components/refresh';
-import { ConfirmAction } from '@/components/confirm-action';
-import { actionsAllowed } from '@/lib/actions';
-import { safeStatement, Sql } from '@/components/sql';
-import { formatAgo, formatCount, formatMillis, plural } from '@/lib/format';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { cn } from '@/lib/utils';
+import { Scatter } from '@/components/scatter';
+import { redactTree, safeStatement } from '@/components/sql';
+import { RowsView } from '@/components/tree-view';
+import { runCheckFor } from '@/lib/check';
+import { keepQuery, one, openFrom, windowQuery, type Search } from '@/lib/clock';
+import { actionsAllowed } from '@/lib/config';
+import { formatCount, formatMillis, formatRate } from '@/lib/format';
+import type { Mark } from '@/lib/plot';
+import { clockFor, treeFor } from '@/lib/samples';
+import { shapesFor } from '@/lib/shapes';
 
-const SORTS = ['total', 'mean', 'calls'] as const;
-type Sort = (typeof SORTS)[number];
+/** The hottest statements listed, and how many the fold opens to. */
+const HOT = 20;
+const ALL = 200;
+/** The fold's key in `?open=`. */
+const REST = 'rest';
+/** Shapes read live: the population when the store holds no window. */
+const LIVE_SHAPES = 200;
 
-export async function generateMetadata({
-  params,
-}: {
-  params: Promise<{ name: string }>;
-}): Promise<Metadata> {
+export async function generateMetadata({ params }: { params: Promise<{ name: string }> }): Promise<Metadata> {
   const { name } = await params;
   return { title: `${name} · Queries` };
 }
 
-/**
- * The control this page advertised and did not have.
- *
- * `?sort=` has always been read here, and the README has always described
- * this route as "sortable by total, mean or calls" — but nothing on the page
- * could set it. The ordering was reachable only by hand-editing the URL, and
- * an operator who arrived on a non-default one had no way to tell which
- * ordering produced the rows they were looking at, let alone change it.
- *
- * A link, not a button: the sort is already URL state, so it is already
- * shareable, bookmarkable and back-button-able. Making it a control that
- * mutates client state would take those three properties away to add
- * nothing. Always descending — every sort here means "worst first", and an
- * ascending pg_stat_statements ranking answers no question anyone has during
- * an incident.
- */
-function SortableHead({
-  name,
-  sort,
-  chosen,
-  pgops,
-  children,
-}: {
-  name: string;
-  sort: Sort;
-  chosen: Sort;
-  /** Carried through so choosing a sort does not silently reset the fold - foldFrom's rule. */
-  pgops: string | undefined;
-  children: ReactNode;
-}) {
-  const active = sort === chosen;
-  const href = withParam(`/db/${name}/queries`, { sort, pgops }, 'sort', sort);
-  return (
-    <TableHead aria-sort={active ? 'descending' : 'none'}>
-      <Link
-        href={href}
-        className={cn(
-          'underline-offset-4 hover:underline',
-          active ? 'font-semibold text-foreground' : 'text-muted-foreground',
-        )}
-      >
-        {children}
-        {/* A caret, not colour alone, marks the active column. */}
-        {active ? ' \u2193' : ''}
-      </Link>
-    </TableHead>
-  );
-}
+/** A statement as a label on a plot: one line, redacted, then cut. */
+const clip = (text: string): string => {
+  const safe = safeStatement(text);
+  return safe.length > 28 ? `${safe.slice(0, 27)}…` : safe;
+};
 
 /**
- * Ruling 55: `queryStats` is scoped to the CURRENT database by dbid, which is
- * what makes this route coherent — pg_stat_statements is cluster-wide, and an
- * unlabelled cross-database ranking on a per-database page would attribute one
- * database's load to another.
+ * The Queries population: which of many statements matter. Calls a second
+ * against mean time over the window, a dashed line of equal cost, a slow and
+ * busy statement flagged; then the hottest rows on the clock, the rest
+ * behind one fold.
+ *
+ * The window's numbers are the stored snapshots. `queryStats` is the one
+ * live read of `pg_stat_statements` and is the population when the store
+ * holds no window, measured since the statistics were reset, which the page
+ * then says.
  */
-export default async function Queries({
-  params,
-  searchParams,
-}: {
+export default async function Queries({ params, searchParams }: {
   params: Promise<{ name: string }>;
-  searchParams: Promise<{ sort?: string; pgops?: string }>;
+  searchParams: Promise<Search>;
 }) {
-  const { name } = await params;
-  const { sort, pgops } = await searchParams;
-  // The same fold the Sessions and hygiene pages apply to pgops's own
-  // connections and relations, on a new subject: its own statement shapes.
-  // Task 8's finding was that this page's own catalog reads otherwise rank
-  // among the top statement shapes it renders.
-  const fold = foldFrom(`/db/${name}/queries`, { sort, pgops });
-  // Default 'total', as this page shipped in an earlier phase — "worst
-  // queries by total time". A 'mean' default was tried in this branch and
-  // reverted: slowQueries is a CONJUNCTION over two axes (calls >= 100 AND
-  // meanMs >= 20), and no single-axis top-N window can complete a two-axis
-  // conjunctive filter. Sorting by mean orders by one input and is blind to
-  // the other, so the window fills with one-off expensive statements
-  // (migrations, ANALYZE, ad-hoc reports) that fail calls >= 100, while a
-  // 25ms shape called a million times — the archetypal slow-query finding —
-  // can sit outside the window entirely unexamined. `total = calls * mean`
-  // is monotone in BOTH inputs, so every qualifying row necessarily has
-  // total >= 2000ms and a total-sorted window can't exclude it the same way.
-  // The "Slow queries" panel's truncation caveat below is sort-agnostic
-  // (c87b47b) precisely because the panel never checks which sort produced
-  // its rows, so that property holds identically under 'total'.
-  const chosen: Sort = SORTS.includes(sort as Sort) ? (sort as Sort) : 'total';
-  const result = await runCheckFor(name, CHECKS.queryStats, { sort: chosen, showOurs: fold.show });
-  // Task 2: commits, rollbacks, deadlocks and temp spill — differenced
-  // between this poll and the last one. See lib/rates.ts for why the
-  // interval comes from the check's own `sampledAt`, not the host clock.
-  const throughput = await runCheckFor(name, CHECKS.databaseActivity);
-  const rates = ratesFor(name, throughput);
-  // Spec §5.1: P3's only visible deliverable. One indexed lookup per render,
-  // and it must stay that way — this is an INCIDENT page and it polls at 5s.
-  const since = await lastIntervalByQueryid(name, result.ok ? result.data.rows : []);
-  // One indexed read of at most 288 rows — see lib/load.ts. Omitted with no
-  // store, exactly as the since-last-capture column is.
-  const load = await queryLoadFor(name);
-  // Read after runCheckFor has already awaited connection(), so this page is
-  // dynamic before the gate is read and the gate reflects the deployment
-  // rather than being frozen at build time. Not hoisted to module scope; see
-  // lib/check.ts and test/guards.test.ts.
-  const canAct = actionsAllowed(process.env);
+  const [{ name }, sp] = await Promise.all([params, searchParams]);
+  const clock = await clockFor(name, sp);
+  const { grid, read } = clock;
+  const find = one(sp.find);
+  const open = openFrom(sp.open);
+  const rest = open?.has(REST) ?? false;
+  const [known, live] = await Promise.all([
+    shapesFor(name, grid),
+    runCheckFor(name, CHECKS.queryStats, { sort: 'total', limit: LIVE_SHAPES }),
+  ]);
+
+  const tree = treeFor(clock, {
+    tables: [], tablesTotal: null, shapes: known.shapes, open: new Set(), find, flat: rest ? ALL : HOT,
+  });
+
+  const page = (id: string): string => `/db/${name}/queries/${encodeURIComponent(id)}`;
+  const point = (id: string, text: string, rate: number, mean: number, calls: number, share: number | null): Mark => ({
+    id, label: clip(text), x: rate, y: mean, weight: rate * mean, href: page(id),
+    flag: mean >= SLOW_QUERY_DEFAULTS.minMeanMs && calls >= SLOW_QUERY_DEFAULTS.minCalls,
+    lines: [
+      `${formatRate(rate)} calls a second`, `${formatMillis(mean)} mean`,
+      ...(share === null ? [] : [`${(share * 100).toFixed(1)}% of the time`]),
+    ],
+  });
+  const windowed = known.shapes.map((s) =>
+    point(s.key, s.text, s.callsPerSec, s.meanMs, s.calls, known.allMs === null || known.allMs <= 0 ? null : s.totalMs / known.allMs));
+  // Since the reset: the only interval a live counter has.
+  const since = live.ok && live.data.statsResetAt !== null ? (clock.now - Date.parse(live.data.statsResetAt)) / 1000 : null;
+  const lifetime = !live.ok || since === null || !(since > 0) ? [] : live.data.rows.flatMap((r) => (
+    r.redacted || r.queryid === null || r.query === null || r.calls <= 0 ? []
+      : [point(r.queryid, r.query, r.calls / since, r.meanMs, r.calls, live.data.allMs > 0 ? r.totalMs / live.data.allMs : null)]
+  ));
+  const marks = windowed.length > 0 ? windowed : lifetime;
+  const here = windowQuery(grid.winSecs, grid.live ? null : grid.to);
 
   return (
     <>
-      {/* Task 1: the poll lives on the incident pages, not the layout —
-          hygiene routes share that layout and must not inherit a 5s
-          catalog scan. test/guards.test.ts holds this. */}
-      <div className="mb-2 flex justify-end"><Refresh intervalMs={5_000} /></div>
-
-      <CheckPanel title="Throughput" result={throughput}>
-        {() => <Throughput rates={rates} />}
-      </CheckPanel>
-
-      {/*
-       * pgHero #17 slow_queries: NOT a query, a FILTER over #14's rows
-       * (query_stats.select { calls >= slow_query_calls && average_time >=
-       * slow_query_ms }). Reuses `result` — the same fetch the table below
-       * renders — rather than issuing a second pg_stat_statements scan for
-       * rows this page already has (see query-stats.ts's `slowQueries` doc
-       * comment).
-       */}
-      <CheckPanel title="Slow queries" result={result}>
-        {(d) => {
-          const slow = slowQueries(d);
-          // Same truncation `d.rows.length` vs `d.totalShapes` carries below
-          // in "Query statistics" — but there it only clips what's DISPLAYED.
-          // Here it clips what was ever CHECKED: slowQueries only sees
-          // `d.rows`, so a shape outside that LIMIT window was never
-          // evaluated against either bound — not "evaluated and found not
-          // slow", just never looked at. That holds no matter which sort
-          // produced the fetch: `chosen` (below `?sort=`) can be 'total',
-          // 'mean' or 'calls', and this panel never checks which one it got —
-          // and no sort would let it skip this caveat anyway. slowQueries is
-          // a CONJUNCTION over two axes (calls and mean), and no single-axis
-          // top-N window can complete a two-axis conjunctive filter (see
-          // query-stats.ts's `slowQueries` doc comment): every sort leaves
-          // some qualifying shape outside the window it could miss. An
-          // unqualified "no slow queries" would be a claim about the
-          // database this panel cannot actually back, so scope every
-          // sentence to what was fetched whenever fetched < total, exactly
-          // as the neighboring panel already does.
-          const truncated = d.rows.length < d.totalShapes;
-          // Built as one plain string, not nested JSX conditionals — a
-          // newline between two `{}` expression children with no literal
-          // text between them collapses to NOTHING in JSX (not a space), so
-          // interleaving conditionals across lines here risks a silent
-          // "…100shown…" concatenation. A single template literal has no
-          // such hazard.
-          const bound = `${SLOW_QUERY_DEFAULTS.minMeanMs}ms or more over ${SLOW_QUERY_DEFAULTS.minCalls}+ calls`;
-          const scope = truncated
-            ? `the ${formatCount(d.rows.length)} shown (of ${formatCount(d.totalShapes)} total)`
-            : null;
-          const sentence =
-            slow.length === 0
-              ? scope
-                ? `No shape among ${scope} averages ${bound}. A shape outside that set was not examined.`
-                : `No shape averages ${bound}.`
-              : scope
-                ? `${formatCount(slow.length)} of ${scope} shapes average ${bound}.`
-                : `${formatCount(slow.length)} of ${formatCount(d.rows.length)} shapes average ${bound}.`;
-          return (
-            <p className={slow.length === 0 ? 'text-sm text-muted-foreground' : 'text-sm'}>{sentence}</p>
-          );
-        }}
-      </CheckPanel>
-
-      <Load load={load} />
-
-      <CheckPanel title="Query statistics" result={result}>
-        {(d) => {
-          // WHICH shapes the panel above is counting.
-          //
-          // That panel says "1 of 53 shapes average 20ms or more over 100+
-          // calls" and this table then listed all 53 with nothing to say
-          // which one it meant — the operator was told a number and left to
-          // re-derive the filter by eye, across two columns, on an incident
-          // page. The sentence and the row are the same fact and were three
-          // inches apart with no thread between them.
-          //
-          // A Set of the row OBJECTS, not of queryids. `slowQueries` filters
-          // `d.rows`, so the qualifying rows are the very same references and
-          // membership is exact. Matching on queryid would be wrong here for
-          // a reason this file already documents two comments below:
-          // pg_stat_statements is keyed by (userid, dbid, queryid, toplevel)
-          // and this check does not aggregate over userid, so one queryid can
-          // legitimately name two rows — and only one of them may qualify.
-          const slow = new Set(slowQueries(d));
-          return (
-          <>
-            <p className="mb-2 text-sm text-muted-foreground">
-              {plural(d.totalShapes, 'statement shape')}
-              {/* `?sort=` is reachable with no control on the page for it, so an
-                  operator who lands on a non-default URL has no other way to
-                  tell which ordering produced these rows — except on an EMPTY
-                  list, where there is nothing that was ordered: `map` in
-                  query-stats.ts falls back to `sort: 'total'` when there are
-                  zero rows (there is no `requested_sort` to read back), and
-                  that fallback is a real value on `d.sort` whether or not the
-                  caller actually asked for 'total'. Suppressing the label here
-                  keeps that fallback unobserved, rather than asserting an
-                  ordering that never happened. */}
-              {d.rows.length > 0 ? ` · sorted by ${d.sort}` : ''}
-              {d.statsResetAt ? ` · stats reset ${formatAgo(d.statsResetAt)}` : ''}
-              {/* There is no `truncated` flag on QueryStatsData: totalShapes is
-                  every shape visible to this role BEFORE the LIMIT, so a short
-                  rows array against a larger totalShapes IS the truncation. */}
-              {d.rows.length < d.totalShapes ? ` · showing ${d.rows.length}` : ''}
-              {' · total time includes time spent waiting on locks'}
+      <NodeHead title="Queries" crumb={[{ label: name, href: `/db/${name}` }]}>
+        {live.ok ? <span className="font-mono text-xs text-body tabular-nums">{formatCount(live.data.totalShapes)} shapes</span> : null}
+        <FindBox find={find} label="find a statement" winSecs={grid.winSecs} end={grid.live ? null : grid.to} />
+        <Link href={`/db/${name}/explain`} className="rounded-[5px] border bg-card px-2 py-0.5 text-xs/[18px] text-foreground hover:bg-muted">
+          Explain a statement
+        </Link>
+      </NodeHead>
+      <ReadAlert read={read} />
+      <Clock
+        grid={grid} now={clock.now} day={clock.day} events={clock.events}
+        keep={keepQuery(find, open === null ? null : [...open])} initialCursor={clock.pinAt}
+      >
+        {grid.live ? <div className="flex justify-end pt-1.5"><Refresh intervalMs={5_000} /></div> : null}
+        <section className="my-3 rounded-md border bg-card">
+          <h2 className="px-3 pt-2 text-[13px]/[18px] font-semibold text-foreground">
+            Every statement
+            <small className="ml-1.5 font-normal text-muted-foreground">
+              up and to the right costs more; a dashed line is equal cost
+              {windowed.length === 0 && lifetime.length > 0 ? '; since the statistics were reset' : ''}
+            </small>
+          </h2>
+          {live.ok || marks.length > 0 ? (
+            <Scatter
+              marks={marks}
+              x={{ label: 'calls a second', unit: 'rate' }} y={{ label: 'mean time', unit: 'millis' }}
+              iso={[
+                { product: 10, label: '0.01 not idle' }, { product: 100, label: '0.1 not idle' }, { product: 1000, label: '1 session not idle' },
+              ]}
+            />
+          ) : (
+            <p className="px-3 py-3 text-muted-foreground">
+              The statement statistics could not be read: {live.message}
+              {live.remedy === undefined ? null : <code className="ml-2 font-mono text-foreground">{live.remedy}</code>}
             </p>
-            {since.kind === 'unavailable' && (
-              /* Said out loud, not shown as an absent column. A store that is
-                 configured and failing is a different fact from no store, and
-                 the operator is the only one who can act on it. */
-              <p className="mb-2 text-sm">
-                History is configured but could not be read, so no
-                since-last-capture figures are shown: {since.message}
-              </p>
-            )}
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <SortableHead name={name} sort="calls" chosen={chosen} pgops={pgops}>calls</SortableHead>
-                  <SortableHead name={name} sort="total" chosen={chosen} pgops={pgops}>total</SortableHead>
-                  <SortableHead name={name} sort="mean" chosen={chosen} pgops={pgops}>mean</SortableHead>
-                  {since.kind === 'ok' && <TableHead>Since last capture</TableHead>}
-                  <TableHead>query</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {/* I3: keyed by `queryid` alone, this produced DUPLICATE keys on
-                    a real database. pg_stat_statements is keyed by (userid, dbid,
-                    queryid, toplevel); the check filters dbid and toplevel but not
-                    userid, and does not aggregate — so two roles running the same
-                    normalized statement return two rows carrying the same queryid
-                    (reproduced on PG 17: `postgres` and a `reporting` role running
-                    the same statement, 3 rows, 1 duplicated queryid). Both rows
-                    mount, but this page re-renders every 5s via router.refresh(),
-                    and React calls reconciliation across updates with duplicate
-                    keys unsupported — on the page that ranks queries by cost,
-                    calls/total/mean can attach to the wrong row. The index alone
-                    would be stable enough; queryid is kept in front of it so the
-                    key still changes when the ranking genuinely changes. */}
-                {d.rows.map((q, i) => {
-                  /* A9: bound once, and named `statement` rather than
-                     `query`. The redaction guard in test/guards.test.ts
-                     fails any JSX expression containing the word `query`
-                     outside `<Sql>`, so `statement={q.query}` would trip it
-                     — the same way `plural(n, 'query')` did in A17. The
-                     guard is not the thing to edit. */
-                  const statement = q.redacted ? null : q.query;
-                  return (
-                  <TableRow key={`${q.queryid ?? 'null'}-${i}`} className={slow.has(q) ? 'bg-warning/5' : undefined}>
-                    {/* A9: the calls count has given up its link. The
-                        statement below carries it now — two links per row to
-                        one destination is the echo this console cuts, and of
-                        the two the statement is what an operator is actually
-                        pointing at when they want this shape's history. */}
-                    <TableCell>{formatCount(q.calls)}</TableCell>
-                    {/* totalMs/meanMs are MILLISECONDS. These went through
-                        formatDuration(ms / 1000), which floors to whole
-                        seconds — so every mean under a second rendered "0s",
-                        on the column this page ranks by. formatMillis keeps
-                        the unit the data is actually in. */}
-                    <TableCell>{formatMillis(q.totalMs)}</TableCell>
-                    <TableCell>{formatMillis(q.meanMs)}</TableCell>
-                    {since.kind === 'ok' && (
-                      <TableCell>
-                        {/* An em dash, not a blank: this shape has no interval
-                            between the last two captures — it was not seen, or
-                            the interval spanned a discontinuity and was
-                            dropped. Blank would read as zero. */}
-                        {since.byQueryid.has(q.queryid ?? '')
-                          ? (() => {
-                              const n = since.byQueryid.get(q.queryid ?? '')!.calls;
-                              return `${formatCount(n)} ${n === 1 ? 'call' : 'calls'}`;
-                            })()
-                          : '—'}
-                      </TableCell>
-                    )}
-                    <TableCell className="max-w-3xl">
-                      {/* `redacted` means Postgres withheld the text from this
-                          role — the ROW still counts, so say so rather than
-                          rendering an empty cell that reads as "no query". */}
-                      {slow.has(q) ? (
-                        <Badge variant="warning" className="mr-2 align-middle">SLOW</Badge>
-                      ) : null}
-                      {/* `queryid` is NULLABLE — pg_stat_statements has no
-                          id for a statement it could not normalise, and the
-                          check passes that null through. A link to
-                          /queries/null would 404 into a page that can only
-                          ever say "no history", so a row without one gets no
-                          link — but it still gets Explain, because the two
-                          destinations are independent and a row must not
-                          lose both because it lost one. */}
-                      {statement === null ? (
-                        <span className="text-xs italic">insufficient privilege</span>
-                      ) : (
-                        <>
-                          {q.queryid === null ? (
-                            <Sql>{statement}</Sql>
-                          ) : (
-                            <Link
-                              href={`/db/${name}/queries/${q.queryid}`}
-                              className="underline-offset-2 hover:underline"
-                            >
-                              <Sql>{statement}</Sql>
-                            </Link>
-                          )}
-                          {/* REDACTED before it is handed over, not after.
-                              ExplainLink is a client component, so this prop
-                              is serialised into the RSC payload embedded in
-                              this page BEFORE the component runs — it cannot
-                              redact its own input, and "the explain route
-                              redacts what it echoes back" (what this comment
-                              used to say) protects the wrong end. A real
-                              password reached the HTML of this route and
-                              routes.int.test.ts caught it. */}
-                          <span className="ml-2">
-                            <ExplainLink name={name} statement={safeStatement(statement)} />
-                          </span>
-                        </>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-            {d.ownShapes > 0 ? (
-              <p className="mt-3 text-sm text-muted-foreground">
-                {fold.show
-                  ? `Including ${formatCount(d.ownShapes)} of pgops's own statement shapes. `
-                  : `${formatCount(d.ownShapes)} of pgops's own statement shapes hidden. `}
-                <Link href={fold.href} className="underline underline-offset-4">{fold.show ? 'hide them' : 'show them'}</Link>
-              </p>
-            ) : null}
-          </>
-          );
-        }}
-      </CheckPanel>
-
-      {/*
-        A10: below the data, behind a disclosure.
-        
-        With actions enabled these two were the FIRST thing on the page: a
-        bordered box of two captions and two danger strings, about seventy
-        words about destroying statistics, above every number the page
-        exists to show. An operator opening Queries mid-incident met a
-        destructive control before a single reading.
-        
-        A reset is a thing you do having read the page, so it belongs after
-        it — and one deliberate click away, the same shape Settings uses on
-        the Cleanup page, so the danger strings are not prose the page
-        carries at rest.
-      */}
-      {canAct ? (
-        <details className="mt-4">
-          <summary className="cursor-pointer text-sm text-muted-foreground">Reset statistics</summary>
-          <StatisticsControls name={name} />
-        </details>
-      ) : null}
+          )}
+        </section>
+        {read !== null && !read.ok ? null : (
+          <RowsView
+            database={name} tree={redactTree(tree)} show={{ kind: 'statements' }} actions={actionsAllowed(process.env)}
+            moreHref={`${here}${keepQuery(find, [REST])}`}
+          />
+        )}
+      </Clock>
     </>
-  );
-}
-
-/**
- * How busy this database has been for a day, in one line.
- *
- * THE ONE THING ON THIS PAGE THAT IS NOT ABOUT A SHAPE. Every other number
- * here ranks statements against each other, which answers "what is worst" and
- * not "is this unusual" — and during an incident the second question is the
- * one that decides whether the ranking matters at all. A shape at the top of
- * the table is either the reason the database is busy or simply the busiest
- * thing on an ordinary Tuesday, and the chart is what tells the two apart.
- *
- * TWO LINES, BECAUSE ONE CANNOT ANSWER THE QUESTION. Execution time alone
- * rises for two unrelated reasons — the database got slower, or it got more
- * traffic — and those have opposite fixes. Read beside calls the pair is
- * unambiguous: time up with calls flat is work that got slower, both up is
- * load that arrived, and time up with calls DOWN is the worst of the three,
- * because it means each remaining statement is taking longer while clients
- * are already giving up. `query_load` has stored `calls` since migration 004
- * and `StoredLoad` has always carried it; only the second chart was missing.
- *
- * Silent when there is no store, like the since-last-capture column, and
- * silent when the store is broken because the sentence above the table
- * already says so — see lib/load.ts.
- */
-function Load({ load }: { load: Awaited<ReturnType<typeof queryLoadFor>> }) {
-  if (!load.ok) return null;
-  if (load.points.length < 2) {
-    return (
-      <p className="mb-3 text-sm text-muted-foreground">
-        Not enough history for a load chart yet — it needs two captures, five
-        minutes apart.
-      </p>
-    );
-  }
-  // Side by side, and on the same window, so the two lines can be compared
-  // at a glance rather than by scrolling between them — which is the whole
-  // reason the second one is here.
-  return (
-    <div className="mb-3 grid gap-x-8 gap-y-4 lg:grid-cols-2">
-      <div>
-        {/* No box: a box means look here (check-panel.tsx), and this is a
-            reading. A hairline under the title, like every other section that
-            reports rather than warns. */}
-        <h2 className="mb-2 border-b pb-2 font-medium">Execution time per capture interval</h2>
-        <LineChart
-          points={load.points.map((p) => ({ at: p.capturedAt, value: p.totalExecTime }))}
-          label={`total execution time across every statement, over ${LOAD_HOURS} hours`}
-          format={formatMillis}
-        />
-      </div>
-      <div>
-        <h2 className="mb-2 border-b pb-2 font-medium">Calls per capture interval</h2>
-        <LineChart
-          points={load.points.map((p) => ({ at: p.capturedAt, value: p.calls }))}
-          label={`calls across every statement, over ${LOAD_HOURS} hours`}
-          format={formatCount}
-        />
-      </div>
-    </div>
-  );
-}
-
-/**
- * Delta for each shape between the two most recent captures.
- *
- * Three outcomes, not two. I9 (final review): this returned `null` for both
- * "no store configured" and "the store is broken", so a deployment whose
- * store had filled its disk rendered BYTE-IDENTICALLY to one with no store at
- * all — while the scheduler failed every five minutes into a stderr stream
- * nobody is watching. `runSeriesFor` distinguishes `missing-store` from every
- * other reason precisely so this does not have to blur it.
- *
- * I2 (final review): bounded to the two most recent captures and to the
- * shapes this page actually renders. Spec §5.1 requires one indexed lookup
- * per render on a page that polls at 5s; unbounded, this read every snapshot
- * in a twenty-minute window with its full query text attached.
- */
-type Since =
-  | { kind: 'absent' }
-  | { kind: 'unavailable'; message: string }
-  | { kind: 'ok'; byQueryid: Map<string, { calls: number; totalExecTime: number }> };
-
-async function lastIntervalByQueryid(
-  name: string,
-  rows: readonly { queryid: string | null }[],
-): Promise<Since> {
-  const queryids = rows.map((r) => r.queryid).filter((q): q is string => q !== null);
-  const result = await runSeriesFor(
-    name, SERIES.historicalQueryStats,
-    // Two captures at a five-minute cadence sit inside twenty minutes with
-    // room for one missed tick; `maxSnapshots` is what actually bounds the
-    // read, and the window is the outer guard.
-    { from: new Date(Date.now() - 20 * 60_000), to: new Date() },
-    { databaseName: name, maxSnapshots: 2, queryids },
-  );
-  if (!result.ok) {
-    return result.reason === 'missing-store'
-      ? { kind: 'absent' }
-      : { kind: 'unavailable', message: result.message };
-  }
-  const byQueryid = new Map<string, { calls: number; totalExecTime: number }>();
-  for (const shape of result.points) {
-    const last = shape.intervals.at(-1);
-    if (last) byQueryid.set(shape.queryid, { calls: last.calls, totalExecTime: last.totalExecTime });
-  }
-  return { kind: 'ok', byQueryid };
-}
-
-/**
- * #20 and #31, side by side on purpose.
- *
- * They are easy to confuse and one is far broader. `pg_stat_statements_reset`
- * clears the statement statistics this page is built on;
- * `pg_stat_reset` clears the table, index and function statistics that
- * /queries/indexes and /queries/tables are built on. Putting them in one place
- * with distinct wording is what teaches the difference; two controls on two
- * routes would let an operator meet either one without ever learning there
- * were two.
- *
- * Both are tier 2 (web spec §7.1) and take the database name typed back.
- * Neither is a catastrophe — statistics rebuild — but both throw away history
- * that cannot be recovered, and #32 lastStatsReset is the only evidence
- * afterwards that it happened.
- */
-function StatisticsControls({ name }: { name: string }) {
-  const db = encodeURIComponent(name);
-  return (
-    <div className="mt-2 flex flex-wrap items-start gap-3 rounded-md border p-3">
-      <div>
-        <p className="mb-1 text-xs text-muted-foreground">
-          Clears pg_stat_statements for this database — the statement
-          statistics this page ranks.
-        </p>
-        <ConfirmAction
-          label="Reset query statistics"
-          endpoint={`/api/db/${db}/reset-query-stats`}
-          confirmWith={name}
-          danger="Every call count, total time and cache figure on this page starts again from zero. Other databases on this server are unaffected."
-        />
-      </div>
-      <div>
-        <p className="mb-1 text-xs text-muted-foreground">
-          Clears this database&apos;s table and index statistics — what the
-          Indexes and Tables pages read.
-        </p>
-        <ConfirmAction
-          label="Reset database statistics"
-          endpoint={`/api/db/${db}/reset-stats`}
-          confirmWith={name}
-          danger="Index usage, unused-index and table-hit-rate figures all start again from zero, and captured history spanning this point is dropped rather than charted."
-        />
-      </div>
-    </div>
   );
 }

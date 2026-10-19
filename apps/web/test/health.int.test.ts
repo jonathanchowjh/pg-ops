@@ -12,11 +12,9 @@ async function until(what: string, fn: () => Promise<boolean>, timeoutMs = 60_00
 }
 
 /**
- * The only test that runs the health feature the way it ships: a production
- * build, the real instrumentation hook, a real store. Everything else tests
- * a layer with the layers around it mocked, and until this existed nothing
- * would have noticed the boot wiring, the migration or either page failing
- * in a built console.
+ * The only test that runs the health feature as it ships: a production build,
+ * the real instrumentation hook, a real store. It covers the boot wiring, the
+ * migration and both pages.
  */
 describe('health over time, in a built console', () => {
   it('captures at boot, charts both pages, and stays out of the statement ranking', async () => {
@@ -71,12 +69,12 @@ describe('health over time, in a built console', () => {
         expect((await fetch(`${baseUrl}/db/primary`)).status).toBe(200);
 
         // The pages above ran timed checks through the layout. None of the
-        // transaction control pgops sent may be left bare in the ranking.
+        // transaction control pgops sent may be left unmarked in the ranking.
         const { rows: bare } = await store.query<{ query: string }>(
           `SELECT query FROM pg_stat_statements WHERE query ~* '^\\s*(BEGIN|COMMIT|ROLLBACK)\\s*$'`,
         );
         expect(bare).toEqual([]);
-        // And the test is looking at a ranking that does hold pgops's marked ones.
+        // And the ranking does hold pgops's marked ones, so the check above is not vacuous.
         const { rows: marked } = await store.query<{ n: string }>(
           `SELECT count(*)::text AS n FROM pg_stat_statements WHERE query ~* '^\\s*BEGIN\\s*/\\* pgops \\*/'`,
         );

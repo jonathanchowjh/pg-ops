@@ -5,11 +5,8 @@ import { withPostgres } from './harness.js';
 
 describe('replicationLag', () => {
   /**
-   * The harness runs a single-node primary, so this proves the primary branch
-   * and the divergence that matters: `lagSeconds` is NULL, not 0. It cannot
-   * prove the standby branch — there is no second node to stream to — and
-   * that limitation is stated rather than papered over with a structural
-   * assertion about the SQL text.
+   * The harness runs a single-node primary, so this proves only the primary
+   * branch: `lagSeconds` is NULL, not 0.
    */
   it('reads a real primary as a primary, with no lag figure', async () => {
     await withPostgres(async (ctx) => {
@@ -23,10 +20,8 @@ describe('replicationLag', () => {
 });
 
 /**
- * B4, standby side. The rig is a primary, so `receiving` must be NULL here —
- * a primary has no walreceiver to report on, which is a different fact from
- * having a dead one. That distinction is the whole point of the column, and
- * this is the only assertion a single-node rig can make about it.
+ * A primary has no walreceiver to report on, which is a different fact from
+ * having a dead one, so `receiving` must be NULL here.
  */
 describe('replicationLag — the walreceiver column', () => {
   it('reports no walreceiver state at all on a primary', async () => {

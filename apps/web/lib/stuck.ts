@@ -13,10 +13,8 @@ export interface Stuck {
   /**
    * Why the lock graph could not be read, or null when it was.
    *
-   * The page needs this because the ABSENCE of a "blocked by" marker is
-   * ambiguous on its own: a table with no markers is either a database with
-   * nothing blocked or a database whose lock graph we could not see, and this
-   * console's standing rule is that those two never render the same. The
+   * Without it, a table with no "blocked by" markers could be a database
+   * with nothing blocked or one whose lock graph we could not see. The
    * reason travels rather than a boolean so the page can print it.
    */
   locksUnavailable: FailureReason | null;
@@ -26,24 +24,15 @@ export interface Stuck {
  * The verdict a long-running panel should show when every query in it is a
  * lock waiter.
  *
- * The LEVEL stays: these sessions are stuck and the panel must stay loud. The
- * NOTE changes, because the check's own note names the longest-running pid —
- * which, when they are all waiters, is the one pid the panel's own body says
- * never to terminate. Measured on a live chain: the badge read "pid 4512
- * running 100s" directly above "Terminating one frees nothing."
+ * The level stays: these sessions are stuck. The note changes, because the
+ * check's own note names the longest-running pid, which is a waiter the
+ * panel's body says not to terminate. The new note counts the waiters and
+ * names the root, the one pid an operator can act on.
  *
- * The new note counts the waiters and names the ROOT, which is the one pid on
- * this page an operator can act on.
- *
- * `count` is the caller's to supply, and `stuckFrom` passes the WAIT GRAPH's
- * count (`blockingCounts`' `totalWaiters`), not the panel's own row count. A
- * waiter that has not yet crossed the long-running floor, or a truncated
- * long-running page, would otherwise leave a waiter off this panel's list
- * while the Locks page still counts it against the same root — this note
- * already names that root, a pid that may not even appear among the panel's
- * rows, so it is speaking about the graph and must agree with what Locks
- * shows for it. Anything else is this task's own defect one level up: the
- * console giving two answers to one question.
+ * `stuckFrom` passes the wait graph's count (from `blockingCounts`), not the
+ * panel's own row count. A waiter below the long-running floor, or a
+ * truncated long-running page, would otherwise make this note disagree with
+ * what the Locks page shows for the same root.
  */
 function waitingVerdict(verdict: Verdict, count: number, root: number | undefined): Verdict {
   if (root === undefined) return verdict;
@@ -53,12 +42,10 @@ function waitingVerdict(verdict: Verdict, count: number, root: number | undefine
 /**
  * The join two catalogs need and no single check can make: a session
  * blocked on a lock is `active` in pg_stat_activity, so every waiter is
- * also a long-running query. Only a page that holds both results can say
- * which. This is that page's logic, shared, so triage and Sessions agree.
+ * also a long-running query. Shared so triage and Sessions agree.
  *
- * When the lock check failed, this degrades to the old behaviour — every
- * long-runner treated as slow — rather than to a claim that nothing is
- * blocked.
+ * When the lock check failed, every long-runner is treated as slow, rather
+ * than claiming nothing is blocked.
  */
 export function stuckFrom(
   longRunning: CheckResult<LongRunningData>,
@@ -94,23 +81,13 @@ export function stuckFrom(
 
 /**
  * Every pid the lock graph accounts for: roots, waiters at any depth, and
- * cycle back-edges.
+ * cycle back-edges. The triage page folds on this. A back-edge is included
+ * although `countDistinctWaiters` skips it: this is a membership test, not a
+ * count.
  *
- * A17 folds the triage page on this. `blockedByRoot` answers "which root is
- * this waiter behind", which is the wrong question for a panel that may be
- * about the ROOT itself — Sessions by state judges the idle-in-transaction
- * blocker, Oldest snapshot names whichever session pins the horizon — so
- * membership needs its own walk.
- *
- * A cycle back-edge is included although `countDistinctWaiters` skips it:
- * that pid is genuinely in the chain, and this is a membership test, not a
- * count, so seeing it twice costs nothing.
- *
- * Empty when the check did not run, and empty when it ran and found nothing.
- * The first is the one that matters: a fold keyed on a reading this console
- * could not take would quietly demote four real verdicts on the strength of
- * a graph nobody saw, which is the false-negative the whole console is built
- * against.
+ * Empty when the check did not run, as well as when it ran and found
+ * nothing, so a fold never demotes a verdict on the strength of a graph
+ * nobody saw.
  */
 export function chainPids(locks: CheckResult<LocksData>): Set<number> {
   const pids = new Set<number>();

@@ -11,13 +11,13 @@ function ctxReturning(rows: unknown[]): CheckContext {
 }
 
 const reporting: Check<{ n: number }, number> = {
-  id: 'reporting', gate: 'work', title: 'Reporting', class: 'hygiene',
+  id: 'reporting', gate: 'work', home: 'database', title: 'Reporting', class: 'captured',
   sql: 'SELECT 1 AS n',
   map: (rows) => rows.length,
 };
 
 const escalating: Check<{ n: number }, number> = {
-  id: 'escalating', gate: 'work', title: 'Escalating', class: 'incident',
+  id: 'escalating', gate: 'work', home: 'database', title: 'Escalating', class: 'live',
   sql: 'SELECT 1 AS n',
   map: (rows) => rows.length,
   verdict: () => ({ level: 'warn' }),

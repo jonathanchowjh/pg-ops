@@ -6,6 +6,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### The entity console, Stages 1 and 2
+
+The console is one tree per database on one clock: tables the trunk, the
+statements on a table its branches, the sessions running a statement its
+leaves. Every chart measures sessions not idle, and one cursor pins every
+page to a moment.
+
+- **The tree.** `/db/<name>` places each session on its table by its locks,
+  and a statement nobody is running by a generic plan the scheduler makes a
+  few at a time under a 100 ms lock timeout; one no plan has placed yet says
+  "not placed". The clock's window is in the URL and its cursor is client
+  state: hover, pin, step and drag-select never ask the server.
+- **The sampler.** One read of the sessions per database every 15 seconds,
+  skipped when a page's poll has already filled the bucket, rolled up per
+  minute for the database, each table and each statement, with chain and
+  unreachable events; the capture adds vacuum and analyze. Without a store
+  it keeps 15 minutes in memory.
+- **Populations and node pages.** `/tables`, `/queries` and `/indexes` are a
+  scatter of the whole population and then its rows; `/indexes` answers
+  which indexes can be dropped. `/tables/<relation>` and
+  `/queries/<queryid>` are one node each, on the clock. The catalog is three
+  fused reads the capture stores whole, read live when the store is off or
+  its capture is stale, and a table held by a migration fails the read in a
+  second rather than holding it ten.
+- **Removed:** the triage page, `/sessions`, `/locks`, `/queries/tables`,
+  `/queries/indexes/**`, `/cleanup/maintenance`, `/cleanup/space` and
+  `/cleanup/sequences`, the sub-navs, the hygiene cache and the checks the
+  catalog reads absorbed. No redirects.
+- **Store migrations 006 to 008.** 006 adds the samples, their minute
+  rollups and the events; 007 the captured catalog and its hourly table and
+  index counters; 008 drops `pgops.check_results`. 008 is not additive: in
+  a rolling deploy, a replica still on an older build loses its hygiene
+  cache as soon as a newer one migrates the store.
+
 The incident path: the console now acts the way a DBA works during a lock
 incident, and reads the way one watches a fleet between incidents.
 
@@ -59,6 +93,17 @@ why several entries below are defects no test could see.
 
 - The tab strip has a seventh tab, Health, and a second tab that does not
   poll.
+- **One chart, and it can be read.** Every plot's height now follows its
+  width (two to five, within limits) instead of a fixed 144px that a desktop
+  stretched to four times as wide as tall. The value axis is ruled at round
+  numbers in the unit's own terms — whole minutes and hours for a duration,
+  256 KB rather than 250 KB for bytes — up to the first one past the peak,
+  with a label on every line; a series that never left zero keeps its
+  baseline and nothing above. A hover snaps to the nearest reading, marks it
+  on the line, and the readout says when it was and, where there is a second
+  series, what that read too. The Queries, statement, table and space charts
+  were a second component with no hover at all; they now use the health chart,
+  so one cursor behaves the same everywhere. `LineChart` is gone.
 - **One incident is one card.** A seeded lock chain used to light four
   separate triage panels about the same pid, in three different bands. Each
   panel now folds to a line pointing at the Lock wait graph when the pid it

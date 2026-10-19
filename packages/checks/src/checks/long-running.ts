@@ -1,56 +1,36 @@
 import type { Check, Verdict } from '../types.js';
+import { escalate } from './shared.js';
 
 export interface LongRunningRow {
-  /** int4, unadorned — node-pg's default parser hands pid back as a `number` already. */
   pid: number;
-  /** `::text` cast below — genuinely arrives as text, so `map` converts it. */
+  /** Cast `::text`; `map` converts it. */
   running_secs: string;
   query: string | null;
   /**
-   * `::text`, exactly as sessions.ts casts it, and for the same reason: this
-   * value round-trips through JSON to the browser and back into
-   * `$2::timestamptz` as killBackend's PID-reuse guard. A `Date` would be
-   * re-serialised on the way with millisecond truncation and stop matching
-   * the session it identifies.
+   * `::text`: this value round-trips through JSON to the browser and back
+   * into `$2::timestamptz` as killBackend's PID-reuse guard. A `Date` would
+   * be truncated to milliseconds and stop matching the session.
    *
    * Nullable because pg_stat_activity.backend_start is null for some backend
-   * types. `killBackend` accepts null and reads it as "kill on pid alone".
+   * types. A null never matches killBackend's guard, so such a backend is
+   * not terminated.
    */
   backend_start: string | null;
   /**
-   * `count(*) OVER ()` (int4, cast `::int` below), computed over every row
-   * that matched WHERE, BEFORE `ORDER BY`/`LIMIT` clip the result — same
-   * technique, and the same reason, as sessions.ts's own `total_matching`.
-   * `limit` here is a runtime `LongRunningOpts` value, not a module
-   * constant, so `map` — pure over `rows` alone, per the `Check` interface,
-   * with no access to `Opts` — cannot detect truncation any other way.
-   * locks.ts's LIMIT-N+1-then-slice technique doesn't apply here for the
-   * same reason it doesn't apply to sessions.ts: that trick only works when
-   * the limit is a fixed constant baked into the SQL, not a caller-supplied
-   * option `map` never sees.
+   * `count(*) OVER ()`, the count before LIMIT. `map` cannot see the runtime
+   * `limit`, so this is how it detects truncation.
    */
   total_matching: number;
 }
 
 export interface LongRunning {
   pid: number;
-  /**
-   * How long this query has been running. The WHERE clause below restricts
-   * this SQL to `state = 'active'`, so — unlike sessions.ts's `queryAgeSecs`,
-   * which is deliberately ambiguous for an idle session (A9) — every row
-   * this check returns genuinely IS a query in flight right now, and
-   * `runningSecs` means exactly what it says.
-   */
+  /** How long this query has been running. Every row is `state = 'active'`. */
   runningSecs: number;
   query: string | null;
   /**
-   * Session identity, captured at selection — see LongRunningRow.
-   *
-   * Here rather than derived later because that is the whole PID-reuse guard:
-   * killBackend compares this, inside the same statement as the terminate,
-   * against one snapshot of pg_stat_activity. A bulk kill that re-derived it
-   * server-side would compare the server's current idea of the session
-   * against itself and always agree.
+   * Session identity captured at selection, for killBackend's PID-reuse
+   * guard. It must not be re-derived at kill time.
    */
   backendStart: string | null;
 }
@@ -59,43 +39,16 @@ export interface LongRunningOpts { minSecs?: number; limit?: number }
 
 export interface LongRunningData {
   queries: LongRunning[];
-  /**
-   * True when the LIMIT dropped rows. Convention 6 (and A7, the same defect
-   * on sessions.ts): a partial list an operator knows is partial is useful;
-   * one they believe is complete is worse than nothing. A caller with a
-   * runtime `limit` cannot otherwise tell "there were exactly this many" from
-   * "there were more and this is a clipped page".
-   */
+  /** True when the LIMIT dropped rows. */
   truncated: boolean;
 }
 
-/**
- * The SQL floor, the warn threshold and the Sessions page's "Nothing running
- * past …" sentence are three separate places that need to agree on the same
- * number. Naming it once and importing it everywhere those three read it is
- * what keeps them from drifting apart — a page that stated a floor the SQL
- * didn't actually use would be lying about what it filtered.
- */
-export const LONG_RUNNING_FLOOR_SECS = 60;
+/** Shared by the SQL floor and the warn threshold, which must agree. */
+const LONG_RUNNING_FLOOR_SECS = 60;
 
 /**
- * The floor is a parameter rather than a hardcoded 5 seconds: pgHero's
- * long_running_query_sec defaults to 60 (capability #9) and the shipped
- * code's 5 put ordinary reporting queries on the triage screen under a
- * green check.
- *
- * `ORDER BY query_start ASC` (oldest query_start first) is severity-
- * meaningful, not merely deterministic — the same principle as locks.ts's
- * `ORDER BY xact_start ASC`: the query that has been running longest is the
- * one worth seeing first when `limit` caps the result below the true count.
- * `pid` is a final tiebreak for two statements with the same query_start
- * (same convention as sessions.ts's own `ORDER BY ..., pid`), so a poll
- * against an unchanged database returns the same page rather than an
- * arbitrary reshuffle among tied rows.
- *
- * `total_matching` (see LongRunningRow) carries the pre-LIMIT row count on
- * every returned row, which is what lets `map` set `truncated` without
- * needing the `limit` value itself.
+ * Oldest `query_start` first, so the longest-running queries survive the
+ * LIMIT; `pid` breaks ties so an unchanged database returns the same page.
  */
 const SQL = (o: LongRunningOpts) => ({
   text: `
@@ -117,19 +70,14 @@ const SQL = (o: LongRunningOpts) => ({
 export const longRunning: Check<LongRunningRow, LongRunningData, LongRunningOpts> = {
   id: 'longRunning',
   gate: 'work',
+  home: 'session',
   title: 'Long-running queries',
-  class: 'incident',
+  class: 'live',
   sql: SQL,
   map: (rows) => {
-    // Every row carries the same pre-LIMIT count (an unpartitioned window
-    // function) — any row's value would do; `rows[0]` with a `?? 0`
-    // fallback matches sessions.ts's own convention for "possibly no rows
-    // at all".
     const totalMatching = rows[0]?.total_matching ?? 0;
     return {
       queries: rows.map((r) => ({
-        // r.pid already arrives as a number (see LongRunningRow) — no
-        // Number(...) needed there; running_secs genuinely arrives as text.
         pid: r.pid,
         runningSecs: Number(r.running_secs),
         query: r.query,
@@ -152,31 +100,9 @@ export const longRunning: Check<LongRunningRow, LongRunningData, LongRunningOpts
             + 'maintenance — a vacuum, or a concurrent index build — first; those '
             + 'look identical here and must not be killed.' },
   ],
-  /**
-   * Neither lookup uses a non-null assertion — same reasoning as
-   * connections.ts's own comment on this: a level's threshold is data this
-   * check may not have been given, not a guarantee the type system can see.
-   *
-   * I5: these were strict `>` and are now `>=`. This check was the outlier —
-   * `blocked`, `locks` and `slots` already used `>=`, and `sessionStates`
-   * used both inside one function. A threshold is the value AT WHICH the
-   * condition becomes a problem, which is also how every `because` string in
-   * this package is worded: the warn threshold's own text says pgHero "uses
-   * 60s as the DEFINITION of long-running", not "past 60s". A query running
-   * exactly 60.0s is therefore long-running, not almost long-running. The
-   * flip point is pinned by long-running.test.ts's own boundary sweep, which
-   * spec §9 requires and which nothing provided before.
-   */
+  /** Exactly 60.0s is long-running; long-running.test.ts holds the boundary. */
   verdict: (d, t): Verdict => {
     const longest = d.queries[0]?.runningSecs ?? 0;
-    const crit = t.find((x) => x.level === 'critical');
-    const warn = t.find((x) => x.level === 'warn');
-    if (crit && longest >= crit.value) {
-      return { level: 'critical', note: `pid ${d.queries[0]?.pid} running ${Math.round(longest)}s` };
-    }
-    if (warn && longest >= warn.value) {
-      return { level: 'warn', note: `pid ${d.queries[0]?.pid} running ${Math.round(longest)}s` };
-    }
-    return { level: 'ok' };
+    return escalate(longest, t, `pid ${d.queries[0]?.pid} running ${Math.round(longest)}s`);
   },
 };

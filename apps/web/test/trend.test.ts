@@ -22,11 +22,10 @@ describe('dailyPeaks', () => {
   });
 
   /**
-   * Final review. Peaks were taken per UTC calendar day, so a 7-day window
-   * ending at 01:00 UTC spanned eight days whose first and last were
-   * fragments. The last fragment was one hour of overnight trough, the note
-   * read "−60 over 8 days", and a real rise became "Not rising." Periods are
-   * now 24 hours counted back from the window's end, so every one is whole.
+   * Periods are 24 hours counted back from the window's end, so every one is
+   * whole. Per UTC calendar day, a 7-day window ending at 01:00 UTC spans
+   * eight days whose first and last are fragments, and a one-hour trough
+   * fragment hides a real rise.
    */
   it('counts 24-hour periods back from the end of the window, never calendar fragments', () => {
     const to = 10 * DAY_MS + 3_600_000; // 01:00 UTC
@@ -55,9 +54,8 @@ describe('fitPeaks', () => {
   });
 
   /**
-   * Why peaks and not raw points. Connections follow the working day: a fit
-   * through every reading sees the overnight trough and reports a slope set
-   * by what time the window happens to start.
+   * Connections follow the working day: a fit through every reading sees the
+   * overnight trough and reports a slope set by when the window starts.
    */
   it('ignores the daily trough: the fit follows the peaks', () => {
     const line = fitPeaks(dailyPeaks(series(10, (d, h) => (h === 12 ? 80 + d : 5)), 10 * DAY_MS))!;

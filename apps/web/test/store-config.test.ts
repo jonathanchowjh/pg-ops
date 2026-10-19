@@ -2,7 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
 import { OWN_SQL_MARKER } from '@pgops/checks';
-import { storePool, storeUrl } from '@/lib/store';
+import { storeUrl } from '@/lib/config';
+import { onEveryStatement, storePool } from '@/lib/pools';
 
 describe('storeUrl', () => {
   it('is null when PGOPS_STORE_URL is unset — no store, no DDL, no scheduler', () => {
@@ -18,68 +19,60 @@ describe('storeUrl', () => {
   });
 
   it('never falls back to DATABASE_URL', () => {
-    // The parent spec's fallback would have pgops issue CREATE SCHEMA against
-    // a production database on the documented simplest deployment. Cut.
+    // A fallback would have pgops issue CREATE SCHEMA against a production database.
     expect(storeUrl({ DATABASE_URL: 'postgres://prod/app' })).toBeNull();
   });
 });
 
 describe('storePool', () => {
-  // The cache is module-level state. Without this, each test's meaning
-  // depends on what ran before it, and a test leaves STORE pointing at an
-  // un-ended pool for whatever runs next. `storePool({})` is the reset,
-  // because an unset PGOPS_STORE_URL now retires the cached pool.
+  // The cache is process-wide state. `storePool({})` is the reset: an unset
+  // PGOPS_STORE_URL retires the cached pool.
   beforeEach(() => { storePool({}); });
   afterEach(() => { storePool({}); });
 
   it('retires the cached pool when PGOPS_STORE_URL is unset', () => {
     const first = storePool({ PGOPS_STORE_URL: 'postgres://x/first' });
     expect(storePool({})).toBeNull();
-    // Leaving it open orphaned a Pool with live sockets — the same leak the
-    // changed-URL case below covers, one branch over.
+    // Left open, it would be an orphaned Pool with live sockets.
     expect(first!.ended).toBe(true);
+  });
+
+  it('bounds every statement, so a store that hangs falls back like one that fails', () => {
+    const pool = storePool({ PGOPS_STORE_URL: 'postgres://x/bounded' })!;
+    const opts = pool.options as { statement_timeout?: number; lock_timeout?: number };
+    expect(opts.statement_timeout).toBe(10_000);
+    expect(opts.lock_timeout).toBe(2_000);
+  });
+
+  it('is one pool per process, however many copies of the module Next bundles', async () => {
+    const first = storePool({ PGOPS_STORE_URL: 'postgres://x/one' });
+    vi.resetModules();
+    // A second evaluation of the module, as the instrumentation and page bundles each have.
+    const again = await import('@/lib/pools');
+    expect(again.storePool({ PGOPS_STORE_URL: 'postgres://x/one' })).toBe(first);
   });
 
   it('evicts and ends the superseded pool when PGOPS_STORE_URL changes', () => {
     const first = storePool({ PGOPS_STORE_URL: 'postgres://x/first' });
     const second = storePool({ PGOPS_STORE_URL: 'postgres://x/second' });
 
-    // A changed URL must not silently hand back the pool built for the old
-    // one — that would make the `env` parameter a lie.
     expect(second).not.toBe(first);
 
-    // Observable state, not a mock: neither pool ever connects (no query is
-    // run here), so pg-pool's end() has nothing left to wait on and flips
-    // `ended` synchronously — see node_modules/pg-pool's `_pulseQueue`. A
-    // build that forgets to end the superseded pool leaves this `false`.
+    // Neither pool ever connects, so pg-pool's end() flips `ended`
+    // synchronously (see pg-pool's `_pulseQueue`).
     expect(first!.ended).toBe(true);
     expect(second!.ended).toBe(false);
   });
 });
 
 /**
- * A8's gap, found by driving Stage 5.
+ * `queryStats` excludes statements carrying `OWN_SQL_MARKER`. The store's
+ * statements do not go through `runCheck`, so the store pool marks them
+ * itself; otherwise, when `PGOPS_STORE_URL` points at a database pgops also
+ * monitors, the store's own statements rank on the Queries page.
  *
- * A8 stopped the console reporting its own polling as the database's load by
- * marking every statement `runCheck` issues with `OWN_SQL_MARKER`, which the
- * `queryStats` check then excludes. The STORE's statements never went through
- * `runCheck`, so none of them were marked.
- *
- * That only matters when `PGOPS_STORE_URL` points at a database pgops also
- * monitors — and `storePool`'s own comment already says the documented
- * single-database dev setup does exactly that. Measured on the dev console
- * with a freshly reset `pg_stat_statements`: three store READS appeared
- * unmarked on every page load, and over an hour of captures the store's
- * `INSERT INTO pgops.queries` was the NUMBER ONE statement by total time on
- * the Queries page. The console's headline answer to "what is slow here" was
- * the console describing itself.
- *
- * `application_name: pgops-store` already solved the sibling problem for the
- * Sessions list. This is the same idea for `pg_stat_statements`.
- *
- * Tested by spying on `Pool.prototype` BEFORE the pool is built, because the
- * wrapper captures the inner method at construction — so the spy becomes the
- * inner call and the assertion is on what the store would really send.
+ * `Pool.prototype` is spied on before the pool is built, because the wrapper
+ * captures the inner method at construction.
  */
 describe('storePool — the store marks its own statements', () => {
   beforeEach(() => { storePool({}); });
@@ -87,18 +80,28 @@ describe('storePool — the store marks its own statements', () => {
 
   const ENV = { PGOPS_STORE_URL: 'postgres://x/y' };
 
-  it('appends the marker to a statement issued on the pool', async () => {
-    const inner = vi.spyOn(Pool.prototype, 'query').mockResolvedValue({ rows: [] } as never);
+  /**
+   * Through pg's real `Pool.query`, which checks a client out with the
+   * callback form of `connect`. Exactly once: wrapping `pool.query` as well
+   * as the client sent the marker twice.
+   */
+  it('appends the marker once to a statement issued on the pool', async () => {
+    const query = vi.fn((_text: unknown, _values: unknown, cb: (e: unknown, r: unknown) => void) => {
+      cb(undefined, { rows: [] });
+    });
+    const client = { query, release: () => {}, once: () => {}, removeListener: () => {} };
+    vi.spyOn(Pool.prototype, 'connect').mockImplementation(((cb?: unknown) => {
+      (cb as (e: unknown, c: unknown, d: unknown) => void)(undefined, client, () => {});
+      return undefined;
+    }) as never);
     const pool = storePool(ENV)!;
     await pool.query('SELECT 1');
-    expect(inner).toHaveBeenCalled();
-    expect(inner.mock.calls[0]![0]).toBe(`SELECT 1\n${OWN_SQL_MARKER}`);
+    expect(query.mock.calls[0]![0]).toBe(`SELECT 1\n${OWN_SQL_MARKER}`);
   });
 
   /**
-   * The form the store actually uses everywhere: `client.query(text, values)`
-   * on a checked-out client. Wrapping only `pool.query` would have marked
-   * nothing the store does, which is the whole defect.
+   * The form the store actually uses: `client.query(text, values)` on a
+   * checked-out client. Wrapping only `pool.query` would mark nothing.
    */
   it('appends the marker to a statement issued on a checked-out client', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [] });
@@ -107,7 +110,7 @@ describe('storePool — the store marks its own statements', () => {
     const client = await pool.connect();
     await client.query('INSERT INTO pgops.databases (name) VALUES ($1)', ['prod']);
     expect(query.mock.calls[0]![0]).toBe(`INSERT INTO pgops.databases (name) VALUES ($1)\n${OWN_SQL_MARKER}`);
-    // The values must survive untouched — marking is a text change only.
+    // Marking is a text change only.
     expect(query.mock.calls[0]![1]).toEqual(['prod']);
   });
 
@@ -145,24 +148,10 @@ describe('storePool — the store marks its own statements', () => {
 });
 
 /**
- * The regression the first version of the wrapper shipped, found by driving
- * the UI and not by any of 612 passing tests.
- *
- * `pool.connect` has TWO forms: `connect(): Promise<PoolClient>` and
- * `connect(cb)`, which returns `void`. The first wrapper only handled the
- * promise and did `innerConnect(...args).then(...)` unconditionally — so the
- * callback form threw `Cannot read properties of undefined (reading 'then')`.
- *
- * That is not an exotic path. `pg`'s own `Pool.query` calls
- * `this.connect(callback)` internally, so wrapping `connect` broke every
- * `pool.query` on the store pool, and the Queries page read:
- *
- *   History is configured but could not be read, so no since-last-capture
- *   figures are shown: Cannot read properties of undefined (reading 'then')
- *
- * The tests above could not catch it because every one of them used the
- * promise form — the wrapper was only ever asked the question it could
- * answer.
+ * `pool.connect` has two forms: `connect(): Promise<PoolClient>` and
+ * `connect(cb)`, which returns `void`. `pg`'s own `Pool.query` calls
+ * `this.connect(callback)` internally, so a wrapper that handles only the
+ * promise form breaks every `pool.query` on the store pool.
  */
 describe('storePool — connect keeps both of its forms', () => {
   beforeEach(() => { storePool({}); });
@@ -189,19 +178,13 @@ describe('storePool — connect keeps both of its forms', () => {
     // pg's contract for this form: void, not a promise.
     expect(returned).toBeUndefined();
     expect(got).toBeDefined();
-    // The `done` callback must travel through untouched — pg's own
-    // Pool.query releases the client with it.
+    // pg's own Pool.query releases the client with `done`.
     expect(gotDone).toBe(done);
     void got!.query('SELECT 1');
     expect(query.mock.calls[0]![0]).toBe(`SELECT 1\n${OWN_SQL_MARKER}`);
   });
 
-  /**
-   * An error from the pool must reach the callback as an error, not as a
-   * crash inside the wrapper — this is the path a store whose database is
-   * down takes, and the console's whole claim is that it degrades to
-   * "unavailable" rather than falling over.
-   */
+  /** The path a store whose database is down takes: the error must reach the callback, not crash the wrapper. */
   it('passes a connection error through the callback form', () => {
     const boom = new Error('ECONNREFUSED');
     vi.spyOn(Pool.prototype, 'connect').mockImplementation(((cb?: unknown) => {
@@ -215,5 +198,43 @@ describe('storePool — connect keeps both of its forms', () => {
       (e) => { seen = e; },
     );
     expect(seen).toBe(boom);
+  });
+});
+
+/**
+ * Both pools reach the database through onEveryStatement's connect. A
+ * refusal of `localhost` on both stacks arrives as an AggregateError with
+ * an empty message: it logged nothing, and in dev React's stream could not
+ * revive it and the page never finished.
+ */
+describe('onEveryStatement and a refused connect', () => {
+  const refused = (): Error => Object.assign(new AggregateError([
+    Object.assign(new Error('connect ECONNREFUSED ::1:1'), { code: 'ECONNREFUSED' }),
+    Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' }),
+  ], ''), { code: 'ECONNREFUSED' });
+  const pool = (): Pool => ({
+    connect: (cb?: (err: unknown) => void) => {
+      if (cb) { cb(refused()); return undefined; }
+      return Promise.reject(refused());
+    },
+  }) as unknown as Pool;
+  const plain = (err: unknown): void => {
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(AggregateError);
+    expect((err as Error).message).toBe('connect ECONNREFUSED ::1:1; connect ECONNREFUSED 127.0.0.1:1');
+    // What classify reads to call the database unreachable.
+    expect((err as { code?: string }).code).toBe('ECONNREFUSED');
+  };
+
+  it('rejects a promise connect with a plain Error that names the refusal and keeps its code', async () => {
+    const p = pool();
+    onEveryStatement(p, (a) => a);
+    plain(await p.connect().then(() => null, (err: unknown) => err));
+  });
+
+  it('hands a callback connect the same', async () => {
+    const p = pool();
+    onEveryStatement(p, (a) => a);
+    plain(await new Promise((resolve) => { p.connect((err) => resolve(err)); }));
   });
 });

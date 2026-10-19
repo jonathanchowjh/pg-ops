@@ -12,10 +12,7 @@ describe('toGrowthPoints', () => {
     expect(p!.growthBytes).toBe(8_000);
   });
 
-  /**
-   * A relation that shrank is a reading, not an error. VACUUM FULL, a dropped
-   * index, a partition detached — all real, all negative, none of them zero.
-   */
+  /** A relation can really shrink: VACUUM FULL, a dropped index, a detached partition. */
   it('keeps a negative growth negative rather than clamping it', () => {
     const [p] = toGrowthPoints([{
       relation: 'public.t', firstBytes: 8_000, lastBytes: 2_000,
@@ -25,9 +22,8 @@ describe('toGrowthPoints', () => {
   });
 
   /**
-   * One capture is not a trend. `growthBytes` is arithmetically 0 here and the
-   * surface must not draw that as "did not grow" — `points` is what tells the
-   * two apart, so it is passed through rather than inferred from the dates.
+   * With one capture `growthBytes` is arithmetically 0, which must not be
+   * drawn as "did not grow"; `points` is what tells the two apart.
    */
   it('passes the capture count through, so one point is distinguishable from no growth', () => {
     const [single] = toGrowthPoints([{

@@ -18,15 +18,10 @@ function fakeCtx(): CheckContext {
 }
 
 /**
- * Why this field exists, verified rather than assumed:
- * `audit.ts`'s `currentActor()` builds the record's `user` as
- * `${os user}@${process.env.HOSTNAME || hostname()}`. Docker sets HOSTNAME to
- * the container ID, and Next's standalone server.js reads the same variable to
- * choose its bind address, so the P1b Dockerfile pins it to 0.0.0.0. In a
- * container, therefore, every kill would be audited as `node@0.0.0.0` — a
- * record naming neither the human who did it nor a host anyone can resolve.
- * The web layer knows the basic-auth username; this is how it gets into the
- * log that exists to attribute destructive actions.
+ * `currentActor()` builds `user` as `${os user}@${HOSTNAME || hostname()}`,
+ * and the Dockerfile pins HOSTNAME to 0.0.0.0 for Next's bind address, so in
+ * a container every kill would be audited as `node@0.0.0.0`. `actor` is how
+ * the web layer's basic-auth username reaches the audit log.
  */
 describe('killBackend — the audited actor', () => {
   it('records the caller-supplied actor when one is given', async () => {
@@ -51,14 +46,7 @@ describe('killBackend — the audited actor', () => {
     expect(written[0]).not.toHaveProperty('user');
   });
 
-  /**
-   * Review finding: `'' ?? currentActor()` keeps the empty string — `??`
-   * only falls through on `null`/`undefined`, not on falsy-but-present
-   * values — so an `actor: ''` used to produce a record with `user: ''`,
-   * against this field's own documented contract ("absent means absent").
-   * An empty string is not a real actor any more than `undefined` is; both
-   * must leave `user` for writeAudit's `currentActor()` fallback.
-   */
+  /** `'' ?? currentActor()` keeps the empty string, which would record `user: ''`. */
   it('leaves `user` for writeAudit to derive when actor is the empty string', async () => {
     written.length = 0;
     await killBackend(

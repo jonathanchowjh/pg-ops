@@ -26,9 +26,8 @@ describe('deltas', () => {
   });
 
   it('DROPS the interval when a counter decreased — never clamps it to zero', () => {
-    // An LRU eviction: pg_stat_statements.max is 5000 and this shape was
-    // evicted, then re-added starting from zero. Indistinguishable from a
-    // reset for that row, and handled identically.
+    // An LRU eviction: the shape was evicted from pg_stat_statements, then
+    // re-added from zero. Indistinguishable from a reset for that row.
     const out = deltas([point(0, 100), point(5, 4), point(10, 20)]);
     expect(out).toHaveLength(1);
     expect(out[0]!.from).toEqual(at(5));
@@ -36,14 +35,18 @@ describe('deltas', () => {
   });
 
   it('DROPS the interval when stats_reset advanced, even if counters rose', () => {
-    // The dangerous case: someone reset, and the counters happen to have
-    // climbed past their old values before the next capture. Counter
-    // comparison alone would miss it and chart a spike.
+    // The counters climbed past their old values before the next capture,
+    // so counter comparison alone would miss the reset and chart a spike.
     const out = deltas([
       point(0, 100, at(0)),
       point(5, 400, at(3)),
     ]);
     expect(out).toEqual([]);
+  });
+
+  it('DROPS the interval that spans pgops\'s own reset, which stats_reset does not show', () => {
+    // A hot shape climbed past its old count within the interval: only the event says.
+    expect(deltas([point(0, 100), point(5, 130), point(10, 160)], [at(7).getTime()]).map((i) => i.from)).toEqual([at(0)]);
   });
 
   it('never emits a spike for a discontinuity — a gap is honest, a spike is a lie', () => {
@@ -59,14 +62,9 @@ describe('deltas', () => {
 });
 
 /**
- * The sibling of run.test.ts's "runCheck's arity is part of its type (I1)".
- *
- * `npm run typecheck:test` — not vitest — is what actually checks this:
- * vitest strips types without checking them, so a body that never runs still
- * proves everything. If the overload split were reverted to
- * `opts: Opts = undefined as Opts`, the erroneous call below would compile,
- * the `@ts-expect-error` would become an unused directive, and tsc would fail
- * on that line instead. Either way the guard trips.
+ * `npm run typecheck:test`, not vitest, is what checks this: the body never
+ * runs. If the call below ever compiles, the `@ts-expect-error` becomes an
+ * unused directive and tsc fails on that line.
  */
 describe('runSeries’ arity is part of its type (I4)', () => {
   it('rejects an options-bearing series called without its options, at compile time', () => {
@@ -82,20 +80,10 @@ describe('runSeries’ arity is part of its type (I4)', () => {
 });
 
 /**
- * The seam, not either side of it.
- *
- * `store.int.test.ts` proves `readQueryStats` honours `maxSnapshots` and
- * `queryids`; `queries-page.test.tsx` proves the page renders a delta. Both
- * passed while `historicalQueryStats.read` called `readQueryStats` with four
- * arguments where it takes five, so neither bound reached the store and the
- * queries page — an INCIDENT page polling at 5s — read every snapshot for
- * every shape on every render. A test on each side of a boundary is not a
- * test of the boundary.
- *
- * Asserting on the bound PARAMETERS rather than on returned rows is what
- * makes this cheap enough to live in the unit suite: the defect is entirely
- * "the options did not travel", and that is visible in the values list
- * without a database. `series.int.test.ts` holds the behavioural half.
+ * Catches `historicalQueryStats.read` dropping its bounds on the way to
+ * `readQueryStats`, which makes the queries page read every snapshot for
+ * every shape on every render. Asserts on the bound parameters, so it needs
+ * no database; `series.int.test.ts` holds the behavioural half.
  */
 describe('historicalQueryStats forwards its read bounds to the store', () => {
   it('passes maxSnapshots and queryids through to the query', async () => {

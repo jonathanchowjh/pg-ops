@@ -27,8 +27,7 @@ describe('activity.map', () => {
   });
 
   /**
-   * The defect this test exists for: `active` used to be the sum of the wait
-   * buckets that fitted under the limit, so a truncated list understated it.
+   * `active` must not be the sum of the buckets that fitted under the limit.
    * Here 900 backends are active and one shape row came back out of 400.
    */
   it('keeps active exact and says so when a list was cut short', () => {

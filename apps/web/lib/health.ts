@@ -1,11 +1,9 @@
-import { connection } from 'next/server';
 import {
-  GATES, GATE_ORDER, readHealthHistory, type Gate, type HealthHistory, type HealthMetric, type HealthPoint,
+  GATES, GATE_ORDER, XID_WRAPAROUND, readHealthHistory, type Gate, type HealthHistory, type HealthMetric, type HealthPoint,
 } from '@pgops/checks';
 import type { HealthChartPoint } from '@/components/health-chart';
-import { isMissingRequestStore } from './check';
+import { readStore } from './check';
 import { formatBytes, formatUnit, formatUtc, plural, type Unit } from './format';
-import { storePool } from './store';
 import { DAY_MS, MIN_TREND_DAYS, dailyPeaks, daysUntil, fitPeaks, valueAt } from './trend';
 
 export const FLEET_HOURS = 48;
@@ -16,9 +14,6 @@ export const FLEET_HOURS = 48;
  */
 export const FLEET_POINTS = 120;
 export const HEALTH_POINTS = 180;
-
-/** Postgres stops assigning transaction IDs shortly before this. */
-export const XID_WRAPAROUND = 2_147_483_647;
 
 export const HISTORY_OFF =
   'History is off. Set PGOPS_STORE_URL to a Postgres database pgops may create its own schema in, then restart.';
@@ -31,10 +26,9 @@ const RECENT_MS = 5 * 60_000;
  *
  * "Collecting" is true only when pgops has just started for this database:
  * it has never stored a row, or its newest is minutes old and the window
- * ends now. A database that is DOWN also has an empty window, because an
- * unreachable database writes no rows, and telling its operator the first
- * chart is a minute away would be false for as long as it stays down. So is
- * a window from the URL that covers a stretch nothing was recorded in.
+ * ends now. A database that is down also has an empty window, because an
+ * unreachable database writes no rows. So does a window from the URL that
+ * covers a stretch nothing was recorded in.
  */
 export function emptyReason(lastAt: number | null, windowTo: number, now: number): string {
   if (lastAt === null) return COLLECTING;
@@ -47,7 +41,7 @@ export type HealthRead =
   | { ok: false; kind: 'off' | 'error'; message: string };
 
 /**
- * Stored health for some databases over a window. Reads the STORE and
+ * Stored health for some databases over a window. Reads the store and
  * nothing else: no monitored database is contacted, which is why the fleet
  * page can poll and a database that is down still shows its past.
  */
@@ -57,21 +51,9 @@ export async function healthFor(
   to: Date,
   points: number,
 ): Promise<HealthRead> {
-  try {
-    await connection();
-  } catch (err) {
-    if (!isMissingRequestStore(err)) {
-      const detail = err instanceof Error ? err.message : String(err);
-      return { ok: false, kind: 'error', message: `pgops console error — ${detail}` };
-    }
-  }
-  const store = storePool(process.env);
-  if (store === null) return { ok: false, kind: 'off', message: HISTORY_OFF };
-  try {
-    return { ok: true, histories: await readHealthHistory(store, { names, from, to, points }) };
-  } catch (err) {
-    return { ok: false, kind: 'error', message: err instanceof Error ? err.message : String(err) };
-  }
+  const read = await readStore((store) => readHealthHistory(store, { names, from, to, points }));
+  if (read.ok) return { ok: true, histories: read.value };
+  return { ok: false, kind: read.kind, message: read.kind === 'off' ? HISTORY_OFF : read.message };
 }
 
 const NO_READING = 'No reading in this window.';
@@ -232,11 +214,9 @@ export interface HealthWindow {
 /**
  * The window a URL asks for.
  *
- * A URL is typed by hand, pasted from chat and bookmarked for months, so
- * anything that is not a window somebody could mean falls back to the
- * default instead of throwing or drawing an empty axis: unparseable dates,
- * a backwards or too-short range, one longer than retention, one that ends
- * in the future.
+ * Anything that is not a usable window falls back to the default instead of
+ * throwing or drawing an empty axis: unparseable dates, a backwards or
+ * too-short range, one longer than retention, one that ends in the future.
  */
 export function parseWindow(
   sp: Record<string, string | string[] | undefined>,

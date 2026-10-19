@@ -11,19 +11,17 @@ function fakeCtx(impl: () => Promise<{ rows: unknown[] }>): CheckContext {
 }
 
 const doubler: Check<{ n: string }, number> = {
-  id: 'doubler', gate: 'work',
+  id: 'doubler', gate: 'work', home: 'database',
   title: 'Doubler',
-  class: 'incident',
+  class: 'live',
   sql: 'SELECT 1 AS n',
   map: (rows) => Number(rows[0]?.n ?? 0) * 2,
 };
 
 describe('ownSql', () => {
-  // The marker is a SUFFIX. PostgreSQL 18 excludes a leading comment from the
-  // text pg_stat_statements stores, so a prefix is not merely relocated there
-  // — it is gone, and query-stats' fold of pgops's own rows silently stops
-  // folding. These three assertions are what stop the marker drifting back to
-  // the front: run.ts's own comment carries the measurement.
+  // The marker is a suffix. PostgreSQL 18 excludes a leading comment from the
+  // text pg_stat_statements stores, so a prefix would be gone and query-stats
+  // would stop folding pgops's own rows.
   it('puts the marker at the end, on its own line', () => {
     expect(ownSql('SELECT 1')).toBe(`SELECT 1\n${OWN_SQL_MARKER}`);
   });
@@ -34,10 +32,8 @@ describe('ownSql', () => {
   });
 
   it("keeps the marker out of a statement's trailing line comment", () => {
-    // Appending on the SAME line would put the marker inside this `--`
-    // comment, where Postgres never sees it as a comment of its own and
-    // `query LIKE '%' || marker` can never match. Several of this package's
-    // SQL constants really do end on a `--` line.
+    // Appending on the same line would put the marker inside the `--`
+    // comment. Several of this package's SQL constants end on a `--` line.
     const marked = ownSql('SELECT 1 -- why this column');
     expect(marked.split('\n').at(-1)).toBe(OWN_SQL_MARKER);
   });
@@ -45,14 +41,11 @@ describe('ownSql', () => {
 
 describe('runCheck', () => {
   it('ends every check statement with the pgops marker', async () => {
-    // `(..._args: unknown[])`, not a bare `()`: fakeCtx's own parameter type
-    // narrows to a 0-arg function, but `impl` here keeps ITS OWN inferred
-    // type for the `.mock.calls[0]?.[0]` read below — a 0-arg callback
-    // would type `mock.calls[0]` as the empty tuple `[]`, which cannot be
-    // indexed at all, under this project's strict typecheck:test.
+    // `(..._args: unknown[])`, not `()`: a 0-arg callback types
+    // `mock.calls[0]` as the empty tuple, which cannot be indexed.
     const impl = vi.fn(async (..._args: unknown[]) => ({ rows: [] }));
     await runCheck(fakeCtx(impl), {
-      id: 'x', title: 'x', gate: 'work', class: 'incident', sql: 'SELECT 1', map: () => ({}),
+      id: 'x', title: 'x', gate: 'work', home: 'database', class: 'live', sql: 'SELECT 1', map: () => ({}),
     } as never);
     expect(impl.mock.calls[0]?.[0]).toBe('SELECT 1\n/* pgops */');
   });
@@ -60,7 +53,7 @@ describe('runCheck', () => {
   it('marks a parameterised statement too, leaving its values alone', async () => {
     const impl = vi.fn(async (..._args: unknown[]) => ({ rows: [] }));
     await runCheck(fakeCtx(impl), {
-      id: 'x', title: 'x', gate: 'work', class: 'incident',
+      id: 'x', title: 'x', gate: 'work', home: 'database', class: 'live',
       sql: (o: { n: number }) => ({ text: 'SELECT $1', values: [o.n] }), map: () => ({}),
     } as never, { n: 7 });
     expect(impl.mock.calls[0]?.[0]).toBe('SELECT $1\n/* pgops */');
@@ -117,18 +110,10 @@ describe('runCheck', () => {
   });
 
   it('never rejects on a real connection refusal against an unreachable server', async () => {
-    // 'localhost' resolves dual-stack (::1 and 127.0.0.1) on most hosts; nothing
-    // listens on port 1 on either. This is a real pg.Pool, not a hand-rolled fake.
-    //
-    // The assertion is content-based, not length-based, on purpose: on a dual-stack
-    // host the driver raises a real AggregateError, and messageOf() unwraps it to a
-    // sub-error message containing ECONNREFUSED; on a single-stack host (no ::1 —
-    // common in minimal CI containers) there is only one candidate, so the driver
-    // raises a plain Error whose own .message already contains ECONNREFUSED. Either
-    // way the operator-facing message names the real failure. A length check would
-    // pass even with the unwrap deleted, since String(anAggregateError) is the
-    // non-empty string "AggregateError" — see the deterministic test below for the
-    // assertion that actually pins the unwrap.
+    // A real pg.Pool; nothing listens on port 1. On a dual-stack host the
+    // driver raises an AggregateError, on a single-stack host a plain Error.
+    // Either way the message must name ECONNREFUSED; the test below pins the
+    // unwrap deterministically.
     const pool = new Pool({ host: 'localhost', port: 1, connectionTimeoutMillis: 500 });
     try {
       const r = await runCheck({ target: pool, serverVersion: 170000 }, doubler);
@@ -140,12 +125,10 @@ describe('runCheck', () => {
   });
 
   it('unwraps a dual-stack AggregateError instead of reporting its own empty/generic message', async () => {
-    // Pinned from a real dial (see the test above, run on a dual-stack host):
-    // `new Pool({ host: 'localhost', port: 1 }).query(...)` rejects with an
-    // AggregateError whose own `.message` is '' and whose `.errors` are plain
-    // Errors carrying ECONNREFUSED for ::1 and 127.0.0.1. This test fabricates
-    // that exact measured shape so the unwrap branch has deterministic coverage
-    // that does not depend on this host's network stack or CI's IPv6 support.
+    // The shape a real dual-stack dial rejects with: an AggregateError whose
+    // own `.message` is '' and whose `.errors` carry ECONNREFUSED for ::1 and
+    // 127.0.0.1. Fabricated so the unwrap does not depend on the host's
+    // network stack.
     const aggregate = Object.assign(
       new AggregateError(
         [
@@ -168,31 +151,21 @@ describe('runCheck', () => {
 });
 
 /**
- * I1 (final review). `runCheck`'s third parameter used to carry
- * `= undefined as Opts`, and a parameter with a default is optional — so
- * `runCheck(ctx, sessions)` compiled, `check.sql(undefined)` then
- * dereferenced `undefined`, and because `runCheck` never rejects the
- * TypeError surfaced as an ordinary failed check ("Cannot read properties
- * of undefined (reading 'limit')") on the page an operator was reading
- * during an incident. Two overloads now separate the two cases: a check
- * whose `Opts` is `void` takes two arguments, any other check requires
- * three.
+ * A check whose `Opts` is `void` takes two arguments; any other check
+ * requires three, or `check.sql(undefined)` would dereference `undefined`.
  *
- * This body is never CALLED — it exists to be typechecked. The proof is
+ * The body is never called; it exists to be typechecked. The proof is
  * `npm run typecheck:test`: if the overloads stop rejecting the two-argument
- * call, the `@ts-expect-error` below becomes an unused directive and tsc
- * fails on that line itself. A test that only ran under vitest would prove
- * nothing here, since vitest strips types without checking them.
+ * call, the `@ts-expect-error` becomes an unused directive and tsc fails.
+ * Vitest strips types without checking them.
  */
 describe('runCheck’s arity is part of its type (I1)', () => {
   it('rejects an options-bearing check called without its options, at compile time', () => {
     const neverCalled = async (ctx: CheckContext): Promise<void> => {
       // @ts-expect-error — sessions declares SessionOpts; omitting it must not compile.
       await runCheck(ctx, sessions);
-      // ...and supplying them still does.
       await runCheck(ctx, sessions, { limit: 10 });
-      // A void-Opts check keeps its two-argument call — the overload split
-      // must not force a meaningless third argument on every other check.
+      // A void-Opts check keeps its two-argument call.
       await runCheck(ctx, blocked);
     };
     expect(typeof neverCalled).toBe('function');
@@ -200,23 +173,13 @@ describe('runCheck’s arity is part of its type (I1)', () => {
 });
 
 /**
- * `queryWithTimeout` (internal to run.ts, exercised here only through
- * `runCheck` + `timeoutMs`) must destroy a pooled connection rather than
- * return it to the pool as healthy when ROLLBACK itself fails after the
- * check's own query already failed — otherwise the next check to draw that
- * connection gets "current transaction is aborted, commands ignored until
- * end of transaction block", the exact poisoned-pooled-connection failure
- * this function exists to prevent.
+ * When ROLLBACK fails after the check's own query failed, `queryWithTimeout`
+ * must destroy the pooled connection, or the next check to draw it gets
+ * "current transaction is aborted".
  *
- * A real `pg_terminate_backend`-against-a-live-connection integration test
- * (timeout.int.test.ts) cannot pin this specifically: once a connection's
- * socket actually dies, node-postgres's own Client sets `_queryable =
- * false`, and pg-pool's `_release` checks that flag independently of
- * whatever argument our code passes to `release()` — so a real dead socket
- * gets evicted from the pool either way, fixed code or not. A fake client
- * whose `ROLLBACK` rejects while everything else about it looks healthy is
- * what isolates the one thing this fix actually controls: the argument
- * `release()` is called with.
+ * An integration test cannot pin this: pg-pool evicts a really dead socket
+ * whatever argument `release()` is given. A fake client whose `ROLLBACK`
+ * rejects while the rest looks healthy isolates that argument.
  */
 describe('queryWithTimeout: pool hygiene when ROLLBACK itself fails', () => {
   const timedCheck: Check<{ n: string }, number> = { ...doubler, timeoutMs: 100 };
@@ -237,8 +200,7 @@ describe('queryWithTimeout: pool hygiene when ROLLBACK itself fails', () => {
 
     const r = await runCheck(ctx, timedCheck);
 
-    // The check's own query error is what the operator sees — a rollback
-    // failure on top of it must never replace or hide that message.
+    // The operator sees the check's own query error, not the rollback failure.
     expect(r).toMatchObject({ ok: false, reason: 'error', message: 'query failed' });
     expect(releaseCalls).toHaveLength(1);
     expect(releaseCalls[0]).toBeInstanceOf(Error);
@@ -267,20 +229,14 @@ describe('queryWithTimeout: pool hygiene when ROLLBACK itself fails', () => {
 });
 
 /**
- * `crossed` — the threshold a verdict actually crossed, resolved once here so
- * every surface can explain itself without asking.
- *
- * `Threshold.because` is required and non-empty by contract, and reached no
- * pixel of the console: the UI showed a red badge and a number and never said
- * why the number was bad. Resolving it at each of the nine call sites that
- * render a panel would have made "forgot to explain this one" a thing a page
- * written later could do.
+ * `crossed` is the threshold a verdict crossed, resolved once in `runCheck`
+ * so every surface can show why a number is bad.
  */
 describe('runCheck resolves the threshold a verdict crossed', () => {
   const graded: Check<{ n: string }, number> = {
-    id: 'graded', gate: 'work',
+    id: 'graded', gate: 'work', home: 'database',
     title: 'Graded',
-    class: 'incident',
+    class: 'live',
     sql: 'SELECT 1 AS n',
     map: (rows) => Number(rows[0]?.n ?? 0),
     thresholds: [
@@ -300,26 +256,16 @@ describe('runCheck resolves the threshold a verdict crossed', () => {
   it('picks the critical threshold, not merely the first one that exists', async () => {
     const r = await run('25');
     if (!r.ok) throw new Error('expected ok');
-    // The bug this pins: `thresholds[0]` would pass the warn case above and
-    // then explain a CRITICAL connection pool with the warn sentence — the
-    // more alarming badge next to the calmer reason.
+    // `thresholds[0]` would pass the warn case above and then explain a
+    // critical reading with the warn sentence.
     expect(r.crossed?.because).toBe('twenty is an incident');
   });
 
-  /**
-   * `ok` crossed nothing, so there is nothing to explain. Resolving a
-   * threshold here would attach a critical rationale to a healthy reading —
-   * the same "we looked and it is fine" over-claim as substituting an `ok`
-   * verdict for a check that has no opinion.
-   */
   it('resolves nothing for a healthy reading', async () => {
     const r = await run('3');
     if (!r.ok) throw new Error('expected ok');
-    // Asserted directly, not via toMatchObject: an expected `undefined` there
-    // is satisfied by an absent key AND by a present one, so the version of
-    // this test written that way survived a mutation that resolved the WARN
-    // threshold for a healthy reading — it would have explained a green
-    // panel with the sentence justifying an escalation.
+    // Asserted directly, not via toMatchObject, which would not catch a
+    // threshold being resolved for a healthy reading.
     expect(r.crossed).toBeUndefined();
   });
 
@@ -331,14 +277,7 @@ describe('runCheck resolves the threshold a verdict crossed', () => {
   });
 });
 
-/**
- * Every threshold that escalates should be able to say what to do about it.
- *
- * Not a style rule: `because` is enforced non-empty for the same reason, and
- * the pair is what turns a red badge into something an operator woken at 3am
- * can act on. A new check landing without one is the failure mode this
- * catches — the sentence is easy to leave for later and later never comes.
- */
+/** Guard: catches a new check landing with a threshold that cannot say why it escalates or what to do about it. */
 describe('every shipped threshold carries advice', () => {
   it('has a non-empty because and remedy on every threshold in CHECKS', async () => {
     const { CHECKS } = await import('../src/registry.js');

@@ -1,35 +1,35 @@
 import type { PoolClient } from 'pg';
+import type { CounterPoint } from '../series/query-stats.js';
 
-export interface Retention { queryStatsDays: number; spaceStatsDays: number; healthStatsDays: number }
+export interface Retention {
+  queryStatsDays: number; spaceStatsDays: number; healthStatsDays: number;
+  /** Raw session samples: the window a past cursor can name a pid in. */
+  sampleDays: number;
+  /** Minute rollups and events: the window the clock can draw at all. */
+  rollupDays: number;
+}
 
 /**
- * pgHero's own defaults. Query stats are dense and short-lived interest;
+ * pgHero's defaults for query and space stats. Query stats are dense and short-lived interest;
  * space grows slowly and the interesting window is a quarter.
  */
-export const RETENTION: Retention = { queryStatsDays: 14, spaceStatsDays: 90, healthStatsDays: 90 };
+export const RETENTION: Retention = {
+  queryStatsDays: 14, spaceStatsDays: 90, healthStatsDays: 90, sampleDays: 2, rollupDays: 14,
+};
 
 /**
  * Rows per statement, for every batched write here.
  *
- * The wire protocol caps one Bind at 65,535 parameters — 9 per row for
- * query_stats, so 7,281 rows. I3 (final review): unchunked, an operator who
- * raised `pg_stat_statements.max` to 10,000 (documented tuning, and something
- * pgHero itself suggests) got a rejected Bind, a rolled-back transaction, one
- * stderr line nobody reads, and NO snapshot ever stored again — while
- * capture.ts's docblock promises "every top-level shape, unbounded".
+ * The wire protocol caps one Bind at 65,535 parameters: 9 per row for
+ * query_stats, so 7,281 rows. Unchunked, a database with more shapes than
+ * that would have every capture rejected.
  */
 const CHUNK_ROWS = 1_000;
 
-export interface QueryStatsSnapshot {
+/** One shape's counters at one capture, as stored. */
+export interface QueryStatsSnapshot extends CounterPoint {
   databaseId: number;
   queryId: number;
-  capturedAt: Date;
-  calls: number;
-  totalExecTime: number;
-  rows: number;
-  sharedBlksHit: number;
-  sharedBlksRead: number;
-  statsReset: Date | null;
 }
 
 export interface SpaceSnapshot {
@@ -37,6 +37,31 @@ export interface SpaceSnapshot {
   relation: string;
   capturedAt: Date;
   sizeBytes: number;
+}
+
+/**
+ * One multi-row INSERT per CHUNK_ROWS rows. `table` and `columns` are
+ * interpolated, so they are only ever literals from this file; every value
+ * is bound.
+ */
+async function insertRows(
+  client: PoolClient,
+  table: string,
+  columns: readonly string[],
+  rows: readonly unknown[][],
+): Promise<void> {
+  for (let i = 0; i < rows.length; i += CHUNK_ROWS) {
+    const chunk = rows.slice(i, i + CHUNK_ROWS);
+    const tuples = chunk.map((_, r) =>
+      `(${columns.map((_c, c) => `$${r * columns.length + c + 1}`).join(', ')})`);
+    // Spread row by row, not `flat()`, which would also open an array value.
+    const values: unknown[] = [];
+    for (const row of chunk) values.push(...row);
+    await client.query(
+      `INSERT INTO ${table} (${columns.join(', ')}) VALUES ${tuples.join(', ')} ON CONFLICT DO NOTHING`,
+      values,
+    );
+  }
 }
 
 export async function upsertDatabase(client: PoolClient, name: string): Promise<number> {
@@ -52,22 +77,12 @@ export async function upsertDatabase(client: PoolClient, name: string): Promise<
 /**
  * Upsert every shape in one round trip and return queryid -> id.
  *
- * `queryid` is passed and bound as TEXT, then cast in SQL: it is a 64-bit
- * hash, and JavaScript's number cannot hold every 64-bit value exactly — the
- * same rule query-stats.ts already follows. Identity only; never arithmetic.
+ * `queryid` is bound as text and cast in SQL: it is a 64-bit hash, which a
+ * JavaScript number cannot hold exactly.
  *
- * This used to be one statement PER SHAPE, awaited in a loop, which made the
- * multi-row INSERT below pointless: a 5,000-shape database still issued ~5,000
- * sequential round trips per capture, inside one open store transaction that
- * also holds the pruning DELETEs. `unnest` over two arrays sends the whole set
- * as two bind parameters, and `RETURNING` hands back the ids the snapshot rows
- * need — so the saving the comment below claims is now actually delivered.
- *
- * Inputs are deduplicated by queryid first. `ON CONFLICT DO UPDATE` raises
- * "cannot affect row a second time" if one statement touches the same row
- * twice, and capture already groups by queryid — this makes the guarantee
- * local to the function that depends on it rather than an assumption about
- * its caller.
+ * Inputs are deduplicated by queryid first, because `ON CONFLICT DO UPDATE`
+ * raises "cannot affect row a second time" if one statement touches the
+ * same row twice.
  */
 export async function upsertQueries(
   client: PoolClient,
@@ -95,143 +110,32 @@ export async function upsertQueries(
   return out;
 }
 
-/**
- * One check's outcome, flattened for storage. `level` and `note` come from
- * the check's `Verdict` and are null for the 15 hygiene checks that report a
- * reading without judging it; `message` is the failure text and is null
- * whenever `ok` is true.
- */
-export interface StoredCheckWrite {
-  checkId: string;
-  ok: boolean;
-  level: string | null;
-  note: string | null;
-  message: string | null;
-}
-
-/**
- * Multi-row INSERTs rather than one per shape: a 5,000-shape database would
- * otherwise issue 5,000 round trips every five minutes against a database
- * pgops is supposed to be leaving alone.
- *
- * ON CONFLICT DO NOTHING because the primary key is (database_id, query_id,
- * captured_at) and a retried tick must not fail on a snapshot already stored.
- */
+/** ON CONFLICT DO NOTHING, so a retried tick does not fail on a snapshot already stored. */
 export async function insertQueryStats(
   client: PoolClient,
   snapshots: QueryStatsSnapshot[],
 ): Promise<void> {
-  for (let i = 0; i < snapshots.length; i += CHUNK_ROWS) {
-    await insertQueryStatsChunk(client, snapshots.slice(i, i + CHUNK_ROWS));
-  }
-}
-
-async function insertQueryStatsChunk(
-  client: PoolClient,
-  snapshots: QueryStatsSnapshot[],
-): Promise<void> {
-  if (snapshots.length === 0) return;
-  const values: unknown[] = [];
-  const tuples = snapshots.map((s, i) => {
-    const b = i * 9;
-    values.push(s.databaseId, s.queryId, s.capturedAt, s.calls, s.totalExecTime,
-      s.rows, s.sharedBlksHit, s.sharedBlksRead, s.statsReset);
-    return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, $${b + 7}, $${b + 8}, $${b + 9})`;
-  });
-  await client.query(
-    `INSERT INTO pgops.query_stats
-       (database_id, query_id, captured_at, calls, total_exec_time, rows,
-        shared_blks_hit, shared_blks_read, stats_reset)
-     VALUES ${tuples.join(', ')}
-     ON CONFLICT DO NOTHING`,
-    values,
-  );
+  await insertRows(client, 'pgops.query_stats',
+    ['database_id', 'query_id', 'captured_at', 'calls', 'total_exec_time', 'rows',
+      'shared_blks_hit', 'shared_blks_read', 'stats_reset'],
+    snapshots.map((s) => [s.databaseId, s.queryId, s.capturedAt, s.calls, s.totalExecTime,
+      s.rows, s.sharedBlksHit, s.sharedBlksRead, s.statsReset]));
 }
 
 export async function insertSpaceStats(
   client: PoolClient,
   snapshots: SpaceSnapshot[],
 ): Promise<void> {
-  for (let i = 0; i < snapshots.length; i += CHUNK_ROWS) {
-    await insertSpaceStatsChunk(client, snapshots.slice(i, i + CHUNK_ROWS));
-  }
-}
-
-async function insertSpaceStatsChunk(
-  client: PoolClient,
-  snapshots: SpaceSnapshot[],
-): Promise<void> {
-  if (snapshots.length === 0) return;
-  const values: unknown[] = [];
-  const tuples = snapshots.map((s, i) => {
-    const b = i * 4;
-    values.push(s.databaseId, s.relation, s.capturedAt, s.sizeBytes);
-    return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4})`;
-  });
-  await client.query(
-    `INSERT INTO pgops.space_stats (database_id, relation, captured_at, size_bytes)
-     VALUES ${tuples.join(', ')}
-     ON CONFLICT DO NOTHING`,
-    values,
-  );
-}
-
-/**
- * One hygiene pass's results for one database, upserted.
- *
- * `capturedAt` is passed in rather than taken here so every row of one pass
- * carries the same instant, and so that instant comes from the STORE's clock
- * — the same rule `captureOnce` follows for snapshots, and for the same
- * reason: several replicas may capture the same database, and a process-side
- * timestamp under clock skew would make "how old is this reading" wrong on
- * the page that renders it.
- *
- * A failed check is written like any other, carrying `ok: false` and its
- * message. Skipping it would leave the previous pass's verdict in place,
- * reading as current.
- *
- * One statement, values flattened into `$n` placeholders — the same shape as
- * the inserts above, and for the same reason: never interpolated. The row
- * count here is the number of hygiene checks (21 today), which is nowhere
- * near a Bind's parameter ceiling, so unlike `insertQueryStats` this needs no
- * chunking.
- */
-export async function recordCheckResults(
-  client: PoolClient,
-  databaseId: number,
-  capturedAt: Date,
-  results: readonly StoredCheckWrite[],
-): Promise<void> {
-  if (results.length === 0) return;
-  const values: unknown[] = [];
-  const tuples = results.map((r) => {
-    values.push(databaseId, r.checkId, capturedAt, r.ok, r.level, r.note, r.message);
-    const n = values.length;
-    return `($${n - 6}, $${n - 5}, $${n - 4}, $${n - 3}, $${n - 2}, $${n - 1}, $${n})`;
-  });
-  await client.query(
-    `INSERT INTO pgops.check_results
-       (database_id, check_id, captured_at, ok, level, note, message)
-     VALUES ${tuples.join(', ')}
-     ON CONFLICT (database_id, check_id) DO UPDATE SET
-       captured_at = EXCLUDED.captured_at,
-       ok          = EXCLUDED.ok,
-       level       = EXCLUDED.level,
-       note        = EXCLUDED.note,
-       message     = EXCLUDED.message`,
-    values,
-  );
+  await insertRows(client, 'pgops.space_stats',
+    ['database_id', 'relation', 'captured_at', 'size_bytes'],
+    snapshots.map((s) => [s.databaseId, s.relation, s.capturedAt, s.sizeBytes]));
 }
 
 /**
  * The whole database's work in one capture interval.
  *
- * `totalExecTime` and `calls` are already differenced and already summed —
- * see `queryLoadRow` in capture.ts, which applies the discontinuity rule per
- * shape before adding them up. Nothing here interprets them.
- *
- * `ON CONFLICT DO NOTHING`, like the snapshot inserts: a retried tick must
- * not fail on an interval already recorded.
+ * `totalExecTime` and `calls` are already differenced and summed by
+ * `queryLoadRow` in capture.ts.
  */
 export async function insertQueryLoad(
   client: PoolClient,
@@ -248,23 +152,14 @@ export async function insertQueryLoad(
 }
 
 /**
- * Pruning is called by `captureOnce` inside the SAME transaction as the
- * inserts, so retention cannot drift from capture — a separate schedule is a
- * second thing to get wrong, and the failure mode (a store that grows without
- * bound) is silent until the disk fills.
+ * Called by `captureOnce` inside the same transaction as the inserts, so
+ * retention cannot drift from capture.
  *
- * FOUR tables. `pgops.queries` holds one row per distinct shape ever
- * seen and nothing ever deleted from it, so the claim above was true of only
- * two of the three growing tables: a database with churning generated SQL
- * accumulated normalised text forever. Orphans were invisible because every
- * read joins through `query_stats`, which is exactly what made it silent.
- * Deleted last, so the snapshot delete above has already removed the rows that
- * make a shape an orphan.
+ * `pgops.queries` is pruned last: a shape is an orphan once the snapshot
+ * delete has removed its last `query_stats` row.
  *
- * `query_load` follows `query_stats`'s retention rather than carrying its own:
- * it is the same measurement at a coarser grain, and a load chart that
- * outlived the per-shape rows behind it would show a spike with nothing to
- * open.
+ * `query_load` follows `query_stats`'s retention, so a load chart never
+ * outlives the per-shape rows behind it.
  */
 export async function prune(
   client: PoolClient,
@@ -290,6 +185,35 @@ export async function prune(
     `DELETE FROM pgops.queries q
        WHERE q.database_id = $1
          AND NOT EXISTS (SELECT 1 FROM pgops.query_stats s WHERE s.query_id = q.id)`,
+    [databaseId],
+  );  // The clock's tables. Session rows go with their bucket, by cascade. A
+  // statement's text is an orphan once no rollup names it.
+  await client.query(
+    `DELETE FROM pgops.sample_buckets
+       WHERE database_id = $1 AND bucket < now() - ($2 || ' days')::interval`,
+    [databaseId, String(retention.sampleDays)],
+  );
+  await client.query(
+    `DELETE FROM pgops.load_minutes
+       WHERE database_id = $1 AND minute < now() - ($2 || ' days')::interval`,
+    [databaseId, String(retention.rollupDays)],
+  );
+  await client.query(
+    `DELETE FROM pgops.events
+       WHERE database_id = $1 AND at < now() - ($2 || ' days')::interval`,
+    [databaseId, String(retention.rollupDays)],
+  );
+  for (const hourly of ['pgops.table_hours', 'pgops.index_hours']) {
+    await client.query(
+      `DELETE FROM ${hourly} WHERE database_id = $1 AND hour < now() - ($2 || ' days')::interval`,
+      [databaseId, String(retention.rollupDays)],
+    );
+  }
+  await client.query(
+    `DELETE FROM pgops.sample_statements s
+       WHERE s.database_id = $1
+         AND NOT EXISTS (SELECT 1 FROM pgops.load_minutes m
+                          WHERE m.database_id = s.database_id AND m.kind = 'q' AND m.key = s.key)`,
     [databaseId],
   );
 }
@@ -320,9 +244,8 @@ export type HealthRow = Record<HealthColumn, string | number | Date | null>;
 /**
  * Insert one health row stamped with the store's clock, and prune.
  *
- * The caller wraps this in a transaction. Pruning here, every minute, keeps
- * each delete to about one row; a daily sweep would delete 1,440 per
- * database at once.
+ * The caller wraps this in a transaction. Pruning every minute keeps each
+ * delete to about one row.
  */
 export async function insertHealth(
   client: PoolClient,
@@ -358,4 +281,160 @@ export async function healthIsFresh(client: PoolClient, databaseId: number): Pro
     [databaseId],
   );
   return rows[0]!.fresh;
+}
+
+export type CapturedRead = 'tables' | 'indexes' | 'sequences';
+
+/** One captured read as the capture hands it over. `rows` are the check's own, each with a `name`. */
+export interface CapturedWrite {
+  read: CapturedRead;
+  ok: boolean;
+  message: string | null;
+  rows: readonly { name: string }[];
+  total: number;
+  statsReset: number | null;
+  freezeMaxAge: number | null;
+}
+
+/**
+ * What each table did since the capture before, added to its hour, with the
+ * newest gauges. `$1` the database, `$2` this capture's moment, `$3` the
+ * rows, `$4` their statistics reset.
+ *
+ * A difference counts only against a capture that is recent and counted
+ * from the same reset. Fifteen minutes is two missed captures: past that
+ * the difference is hours of work and belongs to no one hour. A counter
+ * that went backwards with no reset to explain it adds nothing either.
+ * `COALESCE(o.x, n.x)` makes every such case a difference of zero.
+ */
+const TABLE_HOURS_SQL = `
+INSERT INTO pgops.table_hours AS h
+  (database_id, hour, relation, inserted, updated, deleted, index_rows, scan_rows, live_rows, dead_rows, vacuum_trigger)
+SELECT $1, date_trunc('hour', $2::timestamptz), n.name,
+       GREATEST(n.inserted - COALESCE(o.inserted, n.inserted), 0),
+       GREATEST(n.updated  - COALESCE(o.updated,  n.updated),  0),
+       GREATEST(n.deleted  - COALESCE(o.deleted,  n.deleted),  0),
+       GREATEST(COALESCE(n."idxRows", 0) - COALESCE(o.idx_rows, n."idxRows", 0), 0),
+       GREATEST(n."seqRows" - COALESCE(o.seq_rows, n."seqRows"), 0),
+       n."liveRows", n."deadRows", n."vacuumTrigger"
+  FROM jsonb_to_recordset($3::jsonb) AS n(
+         name text, inserted bigint, updated bigint, deleted bigint, "idxRows" bigint, "seqRows" bigint,
+         "liveRows" bigint, "deadRows" bigint, "vacuumTrigger" double precision)
+  LEFT JOIN LATERAL (
+    SELECT (c.data->>'inserted')::bigint AS inserted, (c.data->>'updated')::bigint AS updated,
+           (c.data->>'deleted')::bigint  AS deleted,  (c.data->>'idxRows')::bigint AS idx_rows,
+           (c.data->>'seqRows')::bigint  AS seq_rows
+      FROM pgops.captured c
+      JOIN pgops.captures k ON k.database_id = c.database_id AND k.read = c.read
+     WHERE c.database_id = $1 AND c.read = 'tables' AND c.name = n.name
+       AND k.stats_reset IS NOT DISTINCT FROM $4::timestamptz
+       AND k.captured_at > $2::timestamptz - interval '15 minutes'
+  ) o ON true
+ON CONFLICT (database_id, relation, hour) DO UPDATE SET
+  inserted   = h.inserted   + EXCLUDED.inserted,
+  updated    = h.updated    + EXCLUDED.updated,
+  deleted    = h.deleted    + EXCLUDED.deleted,
+  index_rows = h.index_rows + EXCLUDED.index_rows,
+  scan_rows  = h.scan_rows  + EXCLUDED.scan_rows,
+  live_rows = EXCLUDED.live_rows, dead_rows = EXCLUDED.dead_rows, vacuum_trigger = EXCLUDED.vacuum_trigger`;
+
+/**
+ * A vacuum or an analyze the catalog reports and the capture before did
+ * not, stamped with the catalog's own moment, so a five-minute cadence
+ * costs the mark no precision. `$1` the database, `$2` the rows, `$3` the
+ * retention in days: the first capture of a table would otherwise mark a
+ * vacuum from last year.
+ */
+const TABLE_EVENTS_SQL = `
+INSERT INTO pgops.events (database_id, at, kind, relation)
+SELECT $1, to_timestamp(v.at / 1000.0), v.kind, n.name
+  FROM jsonb_to_recordset($2::jsonb) AS n(name text, "lastVacuum" double precision, "lastAnalyze" double precision)
+  LEFT JOIN pgops.captured c ON c.database_id = $1 AND c.read = 'tables' AND c.name = n.name
+  CROSS JOIN LATERAL (VALUES
+    ('vacuum',  n."lastVacuum",  (c.data->>'lastVacuum')::double precision),
+    ('analyze', n."lastAnalyze", (c.data->>'lastAnalyze')::double precision)
+  ) AS v(kind, at, was)
+ WHERE v.at IS NOT NULL
+   AND v.at > COALESCE(v.was, 0)
+   AND to_timestamp(v.at / 1000.0) > now() - ($3 || ' days')::interval
+ON CONFLICT DO NOTHING`;
+
+/**
+ * The statistics reset, when its moment has moved since the capture before.
+ * The reset route writes one too, at the store's now; a mark within a minute
+ * of this one is that one.
+ */
+const RESET_EVENT_SQL = `
+INSERT INTO pgops.events (database_id, at, kind, relation)
+SELECT $1, $2::timestamptz, 'reset', ''
+ WHERE $2::timestamptz IS NOT NULL
+   AND $2::timestamptz IS DISTINCT FROM
+       (SELECT k.stats_reset FROM pgops.captures k WHERE k.database_id = $1 AND k.read = 'tables')
+   AND NOT EXISTS (SELECT 1 FROM pgops.events e
+                    WHERE e.database_id = $1 AND e.kind = 'reset'
+                      AND e.at BETWEEN $2::timestamptz - interval '1 minute' AND $2::timestamptz + interval '1 minute')
+ON CONFLICT DO NOTHING`;
+
+/** Scans since the capture before, for the indexes that had any. The same two guards as the tables'. */
+const INDEX_HOURS_SQL = `
+INSERT INTO pgops.index_hours AS h (database_id, hour, index_name, scans)
+SELECT $1, date_trunc('hour', $2::timestamptz), n.name, n.scans - (c.data->>'scans')::bigint
+  FROM jsonb_to_recordset($3::jsonb) AS n(name text, scans bigint)
+  JOIN pgops.captured c ON c.database_id = $1 AND c.read = 'indexes' AND c.name = n.name
+  JOIN pgops.captures k ON k.database_id = c.database_id AND k.read = c.read
+ WHERE k.stats_reset IS NOT DISTINCT FROM $4::timestamptz
+   AND k.captured_at > $2::timestamptz - interval '15 minutes'
+   AND n.scans > (c.data->>'scans')::bigint
+ON CONFLICT (database_id, index_name, hour) DO UPDATE SET scans = h.scans + EXCLUDED.scans`;
+
+/**
+ * Store one captured read: its hours and events first, because each reads
+ * the capture before this one, then the rows, replaced whole. The caller
+ * holds the transaction.
+ *
+ * A read that failed changes nothing but the header's `ok` and `message`.
+ * The rows before it stand with their own `captured_at`: a scan that timed
+ * out is not an empty catalog.
+ */
+export async function writeCaptured(
+  client: PoolClient,
+  databaseId: number,
+  capturedAt: Date,
+  w: CapturedWrite,
+  rollupDays: number,
+): Promise<void> {
+  if (!w.ok) {
+    await client.query(
+      `INSERT INTO pgops.captures (database_id, read, captured_at, ok, message, total)
+       VALUES ($1, $2, $3, false, $4, 0)
+       ON CONFLICT (database_id, read) DO UPDATE SET ok = false, message = EXCLUDED.message`,
+      [databaseId, w.read, capturedAt, w.message],
+    );
+    return;
+  }
+  const rows = JSON.stringify(w.rows);
+  const reset = w.statsReset === null ? null : new Date(w.statsReset);
+  if (w.read === 'tables') {
+    await client.query(TABLE_HOURS_SQL, [databaseId, capturedAt, rows, reset]);
+    await client.query(TABLE_EVENTS_SQL, [databaseId, rows, String(rollupDays)]);
+    await client.query(RESET_EVENT_SQL, [databaseId, reset]);
+  }
+  if (w.read === 'indexes') await client.query(INDEX_HOURS_SQL, [databaseId, capturedAt, rows, reset]);
+
+  await client.query(
+    `INSERT INTO pgops.captures (database_id, read, captured_at, ok, message, total, stats_reset, freeze_max_age)
+     VALUES ($1, $2, $3, true, NULL, $4, $5, $6)
+     ON CONFLICT (database_id, read) DO UPDATE SET
+       captured_at = EXCLUDED.captured_at, ok = true, message = NULL, total = EXCLUDED.total,
+       stats_reset = EXCLUDED.stats_reset, freeze_max_age = EXCLUDED.freeze_max_age`,
+    [databaseId, w.read, capturedAt, w.total, reset, w.freezeMaxAge],
+  );
+  await client.query('DELETE FROM pgops.captured WHERE database_id = $1 AND read = $2', [databaseId, w.read]);
+  // One statement and one parameter, however many rows: the bind limit that CHUNK_ROWS is for does not apply.
+  await client.query(
+    `INSERT INTO pgops.captured (database_id, read, name, data)
+     SELECT $1, $2, e->>'name', e FROM jsonb_array_elements($3::jsonb) AS e
+     ON CONFLICT DO NOTHING`,
+    [databaseId, w.read, rows],
+  );
 }

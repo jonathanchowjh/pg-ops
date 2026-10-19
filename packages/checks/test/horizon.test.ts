@@ -11,17 +11,8 @@ const hzRow = (over: Partial<HorizonRow> = {}): HorizonRow => ({
 });
 
 /**
- * Review round 1, GAP 1: `truncated` was never exercised anywhere in this
- * package's test suite. `horizon.test.ts` tested only `verdict`; the
- * integration test's one scenario never produced eleven holders; and
- * `cleanup-page.test.tsx` sets `HorizonData` literally through its mock,
- * which bypasses `map` entirely. Mutating `map` to `truncated: false`
- * unconditionally passed every test that existed before these three.
- *
- * Same technique as long-running.ts's own truncation tests: the pre-LIMIT
- * count travels on every row via `total` (`count(*) OVER ()`), so `map`
- * — pure over `rows` alone — detects truncation from that column, never
- * from the LIMIT constant itself.
+ * The pre-LIMIT count travels on every row via `total` (`count(*) OVER ()`),
+ * so `map` detects truncation from that column, never from the LIMIT constant.
  */
 describe('horizon.map', () => {
   it('signals truncation when the pre-LIMIT count exceeds the returned rows', () => {
@@ -48,7 +39,7 @@ describe('horizon', () => {
 
   it('is ok when the horizon has barely moved, however long it has been open', () => {
     // Eleven minutes on a quiet database is ~22 transactions of pinned garbage.
-    // The axis is xid distance, not wall-clock: see this task's docblock.
+    // The axis is xid distance, not wall-clock.
     const v = horizon.verdict!({ holders: [holder({ xminAge: 22, ageSecs: 660 })], truncated: false }, t);
     expect(v).toEqual({ level: 'ok' });
   });
@@ -61,13 +52,9 @@ describe('horizon', () => {
   });
 
   /**
-   * THE DEFECT THIS TASK WAS REWRITTEN FOR. The earlier draft asserted `ok`
-   * here. A slot cannot be timed in seconds, which is exactly why it must be
-   * judged on the axis it CAN be measured on — otherwise the one holder most
-   * likely to pin the horizon for months is the one holder the console calls
-   * fine. "We cannot measure this the way we measure the others" must never
-   * render as "this is fine", the same rule the README states for a check that
-   * could not run at all.
+   * A slot cannot be timed in seconds, so it must be judged on xid distance.
+   * Otherwise the holder most likely to pin the horizon for months is the one
+   * the console calls fine.
    */
   it('judges a slot on transactions, though it can never know its seconds', () => {
     const d = { holders: [holder({ kind: 'slot', who: 'sub_1', xminAge: 900_000_000, ageSecs: null, detail: 'inactive' })], truncated: false };
@@ -87,7 +74,7 @@ describe('horizon', () => {
     };
     const v = horizon.verdict!(d, t);
     expect(v.level).toBe('critical');
-    // The WORST holder is named, not the first one in the list.
+    // The worst holder is named, not the first one in the list.
     expect(v.note).toContain('gid-1');
   });
 
@@ -100,18 +87,9 @@ describe('horizon', () => {
   });
 
   /**
-   * Review round 1, GAP 2: every existing test value sits well clear of
-   * both threshold lines (22, 60,000,000, 300,000,000 against 50e6/200e6),
-   * so swapping `>=` for `>` at either threshold survived the whole suite
-   * above. `>=` versus `>` is otherwise invisible to it; only pinning the
-   * flip point itself catches that.
-   *
-   * The threshold is INCLUSIVE — the same register long-running.ts's own
-   * boundary sweep documents (see its I5 comment): a threshold is the value
-   * AT WHICH a holder becomes a problem, worded that way in every
-   * `because` string in this package, so a holder sitting exactly on
-   * 50,000,000 or 200,000,000 transactions is already warn/critical, not
-   * one transaction short of it.
+   * The other tests' values sit well clear of both lines, so only this one
+   * tells `>=` from `>`. The threshold is inclusive: it is the value at which
+   * a holder becomes a problem.
    */
   it('flips at each threshold itself, not one transaction past it', () => {
     const at = (xminAge: number) =>

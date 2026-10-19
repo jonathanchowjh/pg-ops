@@ -1,13 +1,11 @@
 /**
  * Migration 001 — the initial pgops schema.
  *
- * A TypeScript module exporting a string, NOT a .sql file. `packages/checks`
- * builds with plain `tsc`, which copies no non-TS assets: a .sql file would
- * simply be absent from dist/, and the store would fail to migrate in the
- * built image with nothing catching it before runtime.
+ * A TypeScript module exporting a string, not a .sql file: `packages/checks`
+ * builds with plain `tsc`, which would not copy a .sql file into dist/.
  *
- * This directory is the ONLY place in the product permitted to contain DDL,
- * asserted by a guard in apps/web/test/guards.test.ts.
+ * This directory is the only place in the product permitted to contain DDL;
+ * apps/web/test/guards.test.ts holds this.
  */
 export const SQL = `
 CREATE SCHEMA IF NOT EXISTS pgops;

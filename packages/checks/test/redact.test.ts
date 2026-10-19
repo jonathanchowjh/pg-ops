@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { redactSecrets } from '../src/redact.js';
+import { normalise, redactSecrets, statementShape } from '../src/redact.js';
 
 describe('redactSecrets', () => {
   it('masks the password in a postgres URL', () => {
@@ -17,8 +17,7 @@ describe('redactSecrets', () => {
   });
 
   it('masks the SQL spelling, which has no separator at all', () => {
-    // The statement this actually has to catch: caught in flight in
-    // pg_stat_activity.query and rendered straight onto the cockpit (I3).
+    // Caught in flight in pg_stat_activity.query and rendered on screen.
     expect(redactSecrets("ALTER USER app PASSWORD 'hunter2'")).toBe("ALTER USER app PASSWORD ***");
     expect(redactSecrets("CREATE ROLE r LOGIN ENCRYPTED PASSWORD 'hunter2'")).not.toContain('hunter2');
     expect(redactSecrets('ALTER USER app PASSWORD "hunter2"')).not.toContain('hunter2');
@@ -29,56 +28,46 @@ describe('redactSecrets', () => {
       .toBe('ALTER USER app PASSWORD ***');
   });
 
-  /**
-   * The three literal forms a final-review fuzz run got REAL secrets out of.
-   * Pinned: each one reached the cockpit screen and the snapshot file.
-   */
   describe('SQL literal forms that leaked (final review)', () => {
     it("masks a password containing a doubled quote ('hun''ter2')", () => {
-      // The old rule's `[^']*'` stopped at the first INNER quote: it masked
-      // `'hun'` and printed the tail — `PASSWORD ***'ter2'`.
+      // A `[^']*'` rule stops at the first inner quote and prints the tail:
+      // `PASSWORD ***'ter2'`.
       const out = redactSecrets("ALTER USER app PASSWORD 'hun''ter2'");
       expect(out).toBe('ALTER USER app PASSWORD ***');
       expect(out).not.toContain('ter2');
     });
 
     it("masks a backslash-escaped quote in an E'' escape string", () => {
-      // The other way to put a quote in a password — and the form the `E` prefix
-      // exists for. Same tail-leak shape as the doubled-quote case.
+      // Same tail-leak shape as the doubled-quote case.
       const out = redactSecrets("CREATE ROLE r LOGIN ENCRYPTED PASSWORD E'hun\\'ter2'");
       expect(out).toBe('CREATE ROLE r LOGIN ENCRYPTED PASSWORD ***');
       expect(out).not.toContain('ter2');
     });
 
     it('masks a dollar-quoted literal (PASSWORD $$hunter2$$ / $tag$…$tag$)', () => {
-      // Dollar-quoting is valid for PASSWORD and had zero coverage.
       expect(redactSecrets('ALTER USER app PASSWORD $$hunter2$$')).toBe('ALTER USER app PASSWORD ***');
       expect(redactSecrets('ALTER USER app PASSWORD $pw$hunter2$pw$')).toBe('ALTER USER app PASSWORD ***');
       expect(redactSecrets('ALTER USER app PASSWORD $$hunter2$$')).not.toContain('hunter2');
     });
 
     it('masks a literal clipped by track_activity_query_size (no closing delimiter)', () => {
-      // pg_stat_activity.query is CLIPPED at 1024 bytes by default, so the
-      // statement the cockpit renders often has no closing quote at all.
+      // pg_stat_activity.query is clipped at 1024 bytes by default, so the
+      // rendered statement may have no closing quote.
       expect(redactSecrets("ALTER USER app PASSWORD 'hunter2")).toBe('ALTER USER app PASSWORD ***');
       expect(redactSecrets('ALTER USER app PASSWORD $$hunter2')).toBe('ALTER USER app PASSWORD ***');
       expect(redactSecrets('ALTER USER app PASSWORD "hunter2')).toBe('ALTER USER app PASSWORD ***');
     });
   });
 
-  /**
-   * The other half of the contract: the tool's core job is SHOWING you the
-   * query. A redaction rule that mangles ordinary SQL destroys that, and does it
-   * on the screen the operator is reading during an outage.
-   */
+  /** The tool's job is showing the query; a redaction rule must not mangle ordinary SQL. */
   describe('does not over-redact ordinary SQL', () => {
     it('leaves credential-free text untouched', () => {
       expect(redactSecrets('SELECT 1 FROM users')).toBe('SELECT 1 FROM users');
     });
 
     it('leaves a `::` type-cast alone — it is not a key/value separator', () => {
-      // The key=value rule treated the first `:` of `::` as a separator and
-      // rendered `SELECT secret:*** FROM vault` on screen.
+      // Treating the first `:` of `::` as a separator renders
+      // `SELECT secret:*** FROM vault`.
       expect(redactSecrets('SELECT secret::text FROM vault')).toBe('SELECT secret::text FROM vault');
       expect(redactSecrets('SELECT token::uuid, api_key::text FROM keys')).toBe(
         'SELECT token::uuid, api_key::text FROM keys',
@@ -86,8 +75,8 @@ describe('redactSecrets', () => {
     });
 
     it('masks a quoted key=value secret that contains a space', () => {
-      // The value rule matched `\\S+`, so it stopped at the first space and
-      // printed the rest of the password: `password = *** two'`.
+      // A `\\S+` value rule stops at the first space and prints the rest of
+      // the password: `password = *** two'`.
       expect(redactSecrets("password = 'hunter two'")).toBe('password = ***');
       expect(redactSecrets("password='hunter two'")).toBe('password=***');
       expect(redactSecrets('password = "hunter two"')).toBe('password = ***');
@@ -110,8 +99,7 @@ describe('redactSecrets', () => {
   });
 
   it('leaves prose about passwords readable — only quoted literals are masked', () => {
-    // Over-redacting an error message ("password authentication failed for user
-    // app") would cost the operator the diagnosis during an incident.
+    // Over-redacting an error message would cost the operator the diagnosis.
     expect(redactSecrets('password authentication failed for user "app"')).toBe(
       'password authentication failed for user "app"',
     );
@@ -119,73 +107,121 @@ describe('redactSecrets', () => {
 
   describe('coverage: gaps in comment-documented behavior', () => {
     it('unquoted key=value stops at space and leaves trailing content intact', () => {
-      // Rule 2 comment: "An UNQUOTED value still ends at the first space:
-      // nothing in the text says where it stops, and eating to end-of-line would
-      // redact ordinary SQL along with it."
-      // Production change that would break: changing \S+ to .* in rule 2.
+      // Breaks if rule 2's \S+ becomes .*, which would redact ordinary SQL
+      // to end of line.
       const result = redactSecrets('password=hunter2 AND user=x');
       expect(result).toBe('password=*** AND user=x');
       expect(result).toContain('AND user=x');
     });
 
     it('dollar-quote tag back-reference prevents matching at competing tags', () => {
-      // Rule 4 comment: "The tag is back-referenced (`\3`), so `$pw$…$pw$` ends at
-      // its own tag and not at some other `$…$`."
-      // Production change that would break: removing \3 back-reference in rule 4.
+      // Breaks if rule 4 loses its \3 back-reference: `$tag$…$tag$` must end
+      // at its own tag, not at some other `$…$`.
       const result = redactSecrets('ALTER USER app PASSWORD $tag$a$other$b$tag$');
       expect(result).toBe('ALTER USER app PASSWORD ***');
       expect(result).not.toContain('a$other$b');
     });
 
     it('doubled-quote in key=value form (rule 2) is handled correctly', () => {
-      // Rule 2 uses (?:[^'\n]|'')* like rule 3, but only rule 3 has a doubled-quote
-      // test. Regression in rule 2 would go unnoticed.
-      // Production change that would break: removing (?:[^'\n]|'')* from rule 2.
+      // Breaks if (?:[^'\n]|'')* is removed from rule 2.
       const result = redactSecrets("password='hun''ter2' AND x=1");
       expect(result).toBe("password=*** AND x=1");
       expect(result).not.toContain('ter2');
     });
 
     it('multi-line: unterminated literal masks only its own line', () => {
-      // Rules use [^'\n] (not [^']) so an unterminated literal masks at most to
-      // end of its line, never swallowing to a later stray apostrophe.
-      // Production change that would break: changing [^'\n] to [^'] in the patterns.
+      // Breaks if [^'\n] becomes [^']: an unterminated literal would swallow
+      // to a later stray apostrophe.
       const result = redactSecrets("ALTER USER app PASSWORD 'hunter2\nSELECT 1 FROM 'users'");
       expect(result).toContain("ELECT 1 FROM 'users'");
       expect(result).not.toContain('hunter2');
     });
 
     it('all keyword forms are positively redacted: passwd', () => {
-      // Only password and token tested in existing suite. Regression in KEYS
-      // alternation would be unnoticed.
-      // Production change that would break: removing passwd from KEYS.
       expect(redactSecrets('passwd=secret123')).not.toContain('secret123');
       expect(redactSecrets('passwd=secret123')).toContain('***');
     });
 
     it('all keyword forms are positively redacted: pwd', () => {
-      // Production change that would break: removing pwd from KEYS.
       expect(redactSecrets('pwd=hunter2')).not.toContain('hunter2');
       expect(redactSecrets('pwd=hunter2')).toContain('***');
     });
 
     it('all keyword forms are positively redacted: secret', () => {
-      // Production change that would break: removing secret from KEYS.
       expect(redactSecrets('secret=abc123')).not.toContain('abc123');
       expect(redactSecrets('secret=abc123')).toContain('***');
     });
 
     it('all keyword forms are positively redacted: api_key', () => {
-      // Production change that would break: removing api_key from KEYS alternation.
       expect(redactSecrets('api_key=key123')).not.toContain('key123');
       expect(redactSecrets('api_key=key123')).toContain('***');
     });
 
     it('all keyword forms are positively redacted: api-key (hyphen spelling)', () => {
-      // KEYS allows both underscore and hyphen: api[_-]?key. Both must work.
-      // Production change that would break: removing [_-]? from KEYS.
       expect(redactSecrets('api-key=key123')).not.toContain('key123');
       expect(redactSecrets('api-key=key123')).toContain('***');
     });
+  });
+});
+
+describe('normalise', () => {
+  it('makes every literal a placeholder, as pg_stat_statements prints a shape', () => {
+    expect(normalise("SELECT * FROM u WHERE email = 'jo@x.com' AND ssn = '123-45-6789'"))
+      .toBe('SELECT * FROM u WHERE email = $1 AND ssn = $2');
+    expect(normalise("INSERT INTO u (email, password) VALUES ('a@b','hunter2')"))
+      .toBe('INSERT INTO u (email, password) VALUES ($1,$2)');
+    expect(normalise("SET access_token = 'eyJabc'")).toBe('SET access_token = $1');
+    expect(normalise("UPDATE t SET client_secret='s3cr3t' WHERE id = 42")).toBe('UPDATE t SET client_secret=$1 WHERE id = $2');
+  });
+
+  it('numbers on from the highest placeholder already there', () => {
+    expect(normalise("SELECT $1, 'x', $3")).toBe('SELECT $1, $4, $3');
+  });
+
+  it('reads every spelling of a string as one literal', () => {
+    expect(normalise("SELECT 'it''s', E'a\\'b', B'101', X'ff', N'n', U&'d\\0061'")).toBe('SELECT $1, $2, $3, $4, $5, $6');
+    expect(normalise("SELECT $$a'b$$, $fn$ x $$ y $fn$")).toBe('SELECT $1, $2');
+  });
+
+  it('casts the placeholder of a typed literal, which a type before a placeholder would not parse as', () => {
+    expect(normalise("SELECT now() - interval '1 day', date '2026-01-01', timestamp with time zone 'x' FROM t"))
+      .toBe('SELECT now() - $1::interval, $2::date, $3::timestamp with time zone FROM t');
+    expect(normalise("SELECT x FROM t WHERE a LIKE 'b%' AND c = 'd'")).toBe('SELECT x FROM t WHERE a LIKE $1 AND c = $2');
+  });
+
+  it('masks a literal cut short by track_activity_query_size to the end', () => {
+    expect(normalise("SELECT * FROM u WHERE token = 'eyJhbGciOiJIUzI1")).toBe('SELECT * FROM u WHERE token = $1');
+  });
+
+  it('leaves identifiers, quoted identifiers and their digits alone', () => {
+    expect(normalise('SELECT "pass""word", t1.c2, a$b FROM s1.t1')).toBe('SELECT "pass""word", t1.c2, a$b FROM s1.t1');
+  });
+
+  it('replaces every kind of number, and a number is never half an identifier', () => {
+    expect(normalise('SELECT 1, 1.5, .5, 1e3, 0xff, 1_000 FROM t2 LIMIT 10 OFFSET 20'))
+      .toBe('SELECT $1, $2, $3, $4, $5, $6 FROM t2 LIMIT $7 OFFSET $8');
+  });
+
+  it('keeps what is part of the statement\'s shape and not data: a type\'s size, a sort by position', () => {
+    expect(normalise("SELECT x::numeric(10, 2), y::varchar(20), z::character varying(5) FROM t ORDER BY 1 DESC, 2"))
+      .toBe('SELECT x::numeric(10, 2), y::varchar(20), z::character varying(5) FROM t ORDER BY 1 DESC, 2');
+    expect(normalise('SELECT a, count(*) FROM t GROUP BY 1 HAVING count(*) > 5')).toBe('SELECT a, count(*) FROM t GROUP BY 1 HAVING count(*) > $1');
+  });
+
+  it('drops a line comment, so the text flattens to one line without losing its tail, and keeps a block comment', () => {
+    expect(normalise("SELECT id -- 'the key'\nFROM t /* app:web */ WHERE id = 7")).toBe('SELECT id \nFROM t /* app:web */ WHERE id = $1');
+    expect(normalise("SELECT '-- not a comment', 1")).toBe('SELECT $1, $2');
+  });
+});
+
+describe('statementShape', () => {
+  it('is the shape on one line, with what redaction catches outside a literal masked', () => {
+    expect(statementShape("SELECT *\n  FROM u -- pw 'x'\n WHERE password = 'hunter2'")).toBe('SELECT * FROM u WHERE password = $1');
+    expect(statementShape('/* postgres://app:hunter2@db/x */ SELECT 1')).toBe('/* postgres://app:***@db/x */ SELECT $1');
+  });
+
+  it('leaves a placeholder after a credential key readable: it is not a secret', () => {
+    expect(redactSecrets('WHERE password = $1')).toBe('WHERE password = $1');
+    expect(redactSecrets('password=hunter2')).not.toContain('hunter2');
   });
 });

@@ -14,20 +14,14 @@ function req(method: string, path: string): NextRequest {
 }
 
 /**
- * `NextResponse.next({ request: { headers } })` does not literally hand a
- * rewritten Request to anything this test can see — Next's own source
- * (server/web/spec-extension/response.js, `handleMiddlewareField`) encodes
- * the forwarded header set onto the RESPONSE `proxy()` returns:
- * `x-middleware-override-headers` is a comma-separated list of the header
- * NAMES that were set on the forwarded request, and each one also gets an
- * `x-middleware-request-<name>` header carrying its value. That is the exact
- * protocol the real Next server reads to reconstruct the downstream request,
- * so reading it back here is equivalent to asking "what will the route
- * handler see" without booting a server.
+ * What the route handler will see for `name`. Next encodes the forwarded
+ * request headers onto the response `proxy()` returns
+ * (server/web/spec-extension/response.js, `handleMiddlewareField`):
+ * `x-middleware-override-headers` lists the header names, and each gets an
+ * `x-middleware-request-<name>` header carrying its value.
  *
- * Returns `undefined` — not the client's original value — when `name` is not
- * in the override list, so a test asserting "absent" can tell that apart
- * from a header that happens to carry an empty string.
+ * Returns `undefined` when `name` is not in the override list, so "absent" is
+ * distinguishable from an empty string.
  */
 function forwarded(res: Response, name: string): string | undefined {
   const overridden = res.headers.get('x-middleware-override-headers');
@@ -43,11 +37,8 @@ afterEach(() => {
 
 describe('proxy', () => {
   /**
-   * I2 (review). The interface Task 3 consumes: on a successful auth, the
-   * ACTOR_HEADER forwarded downstream is the AUTHENTICATED username, never
-   * whatever the client put on the wire. Without the strip in proxy.ts, this
-   * would forward "mallory" — the exact forged value a client sent — and the
-   * kill route would audit the wrong human.
+   * The ACTOR_HEADER forwarded downstream is the authenticated username, never
+   * what the client sent. Otherwise the kill route would audit the wrong human.
    */
   it('replaces a forged actor header with the authenticated username', () => {
     process.env.PGOPS_USERNAME = 'alice';
@@ -60,12 +51,10 @@ describe('proxy', () => {
   });
 
   /**
-   * I2 (review), and the plan's Ruling 5 by name: the strip runs whether or
-   * not auth is configured, so an unauthenticated deployment cannot have a
-   * MORE forgeable audit trail than an authenticated one. This is the case
-   * that is easiest to lose, because nothing is authenticating anybody — a
-   * fix that only stripped the header on the auth-configured branch would
-   * pass every other test in this suite and still leave this one open.
+   * The strip runs whether or not auth is configured, so an unauthenticated
+   * deployment cannot have a more forgeable audit trail than an authenticated
+   * one. Stripping only on the auth-configured branch would pass every other
+   * test here.
    */
   it('strips a forged actor header entirely when auth is unconfigured', () => {
     const req = request({ [ACTOR_HEADER]: 'mallory' });
@@ -82,25 +71,16 @@ describe('proxy', () => {
     const res = proxy(req);
 
     expect(res.status).toBe(401);
-    // A challenge response is not `NextResponse.next(...)`, so it never runs
-    // `handleMiddlewareField` at all — there is no forwarded request for
-    // ANY header to ride along on, not just this one.
+    // A challenge is not `NextResponse.next(...)`: there is no forwarded request at all.
     expect(res.headers.get('x-middleware-override-headers')).toBeNull();
   });
 
   /**
-   * The kill route is POST-only, so Next's own app-route dispatch answers
-   * every other method with 405 BEFORE the handler — and therefore before
-   * `actionsAllowed` — ever runs. A 405 is a disclosure: a build without the
-   * file answers 404, so `GET /api/db/<name>/kill` was a reliable oracle
-   * that a console had the kill endpoint compiled in, no matter how firmly
-   * PGOPS_ALLOW_ACTIONS was left unset.
-   *
-   * Both README.md and the route's own comment claimed a flagless
-   * deployment was "indistinguishable from a build without this file". This
-   * is the test that makes the claim true instead of merely written down.
-   * The gate has to live here, above Next's method matching; the route keeps
-   * its own copy so the property does not rest on this matcher alone.
+   * The kill route is POST-only, so Next answers every other method with 405
+   * before the handler, and so before `actionsAllowed`, runs. A build without
+   * the file answers 404, so a 405 would disclose that the endpoint exists
+   * even with PGOPS_ALLOW_ACTIONS unset. The gate therefore lives in the
+   * proxy, above Next's method matching; the route keeps its own copy.
    */
   describe('the kill route with actions disabled', () => {
     const KILL = '/api/db/default/kill';
@@ -112,8 +92,7 @@ describe('proxy', () => {
         const res = proxy(req(method, KILL));
 
         expect(res.status).toBe(404);
-        // Not `NextResponse.next(...)`: nothing downstream may run, so there
-        // is no forwarded request for the route handler to be reached by.
+        // Not `NextResponse.next(...)`: nothing downstream may run.
         expect(res.headers.get('x-middleware-override-headers')).toBeNull();
       });
     }
@@ -146,9 +125,8 @@ describe('the proxy action gate', () => {
   });
 
   /**
-   * The prefix question, asserted rather than read off the regex. `kill` must
-   * not swallow a longer sibling, and no action path may match something
-   * deeper — a matcher that over-matched would 404 ordinary routes on a
+   * `kill` must not swallow a longer sibling, and no action path may match
+   * something deeper: an over-matching matcher would 404 ordinary routes on a
    * flagless deployment.
    */
   it('does not match a path that merely starts like one', () => {

@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
-import { checkStatement, planStatements, MAX_STATEMENT_LENGTH } from '../src/tools/explain.js';
+import { checkStatement, planStatements, relationsOf, MAX_STATEMENT_LENGTH } from '../src/tools/explain.js';
+import { statementShape } from '../src/redact.js';
 import { withPostgres } from './harness.js';
 
 const SETUP = `
@@ -27,10 +28,31 @@ describe('planStatements', () => {
       const [p] = await planStatements(ctx, ['SELECT * FROM orders WHERE status = $1 AND customer_id = $2']);
       if (!p!.ok) throw new Error(p!.message);
       expect(p!.parameters).toBe(2);
-      // A custom plan with NULLs bound folds to `One-Time Filter: false` —
-      // Verified fact 2 in the P6 plan. A generic plan keeps the placeholders.
+      // A custom plan with NULLs bound folds to `One-Time Filter: false`.
+      // A generic plan keeps the placeholders.
       expect(JSON.stringify(p!.plan)).toContain('$1');
       expect(JSON.stringify(p!.plan)).not.toContain('One-Time Filter');
+    });
+  }, 120_000);
+
+  it('plans the shape the sampler stores of a live statement, on every supported version', async () => {
+    const live = [
+      "SELECT * FROM orders WHERE status = 'paid' AND customer_id = 42",
+      "SELECT id, email FROM orders WHERE email LIKE 'u1%' ORDER BY 2 DESC, 1 LIMIT 10",
+      "SELECT status, count(*) FROM orders WHERE id > 100 GROUP BY 1 HAVING count(*) > 5",
+      "UPDATE orders SET status = 'void', email = E'it\\'s' WHERE id = 7",
+      "INSERT INTO orders (status, customer_id, email) VALUES ('new', 1, 'a@b'), ('new', 2, 'c@d')",
+      "DELETE FROM orders WHERE id IN (1, 2, 3) AND status <> $$x$$",
+      "SELECT * FROM orders WHERE customer_id = 3 -- the customer\nAND status = 'paid'",
+      "SELECT id::numeric(12, 2), status::varchar(10) FROM orders WHERE id BETWEEN 1 AND 1e3",
+      "SELECT o.id FROM orders o JOIN orders p ON p.customer_id = o.customer_id WHERE o.id = 5 OFFSET 2",
+      "SELECT now() - interval '1 day', $1::int FROM orders WHERE status = ANY (ARRAY['a', 'b'])",
+    ];
+    await withPostgres(async (ctx, pool) => {
+      await pool.query(SETUP);
+      const plans = await planStatements(ctx, live.map(statementShape));
+      plans.forEach((p, i) => { if (!p.ok) throw new Error(`${statementShape(live[i]!)}: ${p.message}`); });
+      expect(plans.map((p) => (p.ok ? relationsOf(p.plan) : null))).toEqual(live.map(() => ['public.orders']));
     });
   }, 120_000);
 
@@ -64,8 +86,7 @@ describe('planStatements', () => {
     await withPostgres(async (ctx) => {
       const [missing, leaky] = await planStatements(ctx, ['SELECT * FROM nope', "SELECT '42x'::int"]);
       expect(missing).toMatchObject({ ok: false, code: '42P01', message: expect.stringContaining('nope') });
-      // 22P02's message echoes the value it choked on — the data-extraction
-      // route pgHero's generic "Error explaining query" exists to close.
+      // 22P02's message echoes the value it choked on, a data-extraction route.
       expect(leaky).toEqual({
         ok: false, code: '22P02', message: 'Postgres could not plan this statement (SQLSTATE 22P02).',
       });
@@ -82,8 +103,7 @@ describe('planStatements', () => {
   /**
    * PREPARE takes an AccessShareLock on every relation it names, so a
    * migration holding ACCESS EXCLUSIVE makes it wait. Under statement_timeout
-   * alone that wait was 10s — per shape, so the suggestions page took minutes
-   * whenever a busy table was being altered. Measured before the fix.
+   * alone that wait is 10s per shape.
    */
   it('gives up quickly on a locked table, and says why', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -104,11 +124,60 @@ describe('planStatements', () => {
     });
   }, 120_000);
 
+  it('waits no longer for a lock than the caller allows', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query(SETUP);
+      const holder = await pool.connect();
+      try {
+        await holder.query('BEGIN');
+        await holder.query('LOCK TABLE orders IN ACCESS EXCLUSIVE MODE');
+        const started = Date.now();
+        const [locked] = await planStatements(ctx, ['SELECT * FROM orders'], { lockTimeoutMs: 100 });
+        // The default is a second. A failure here that moves is the machine, not the code.
+        expect(Date.now() - started).toBeLessThan(900);
+        expect(locked).toMatchObject({ ok: false, code: '55P03' });
+      } finally {
+        await holder.query('ROLLBACK');
+        holder.release();
+      }
+    });
+  }, 120_000);
+
   /**
-   * EXPLAIN checks SELECT on every table it names, though it reads no rows —
-   * so the README's least-privilege role (pg_read_all_stats) is refused on
-   * every application table. Postgres's message names the table but not the
-   * fix, and the operator is looking at a planning tool, not a permissions one.
+   * An immutable function of constants is run by the planner, so this one
+   * makes planning itself take two seconds: under the default ten it plans.
+   */
+  it('gives up on a plan that takes longer than the caller allows', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query(`CREATE FUNCTION slow_plan() RETURNS int IMMUTABLE LANGUAGE plpgsql
+                          AS $$ BEGIN PERFORM pg_sleep(2); RETURN 1; END $$`);
+      const started = Date.now();
+      const [cut] = await planStatements(ctx, ['SELECT slow_plan()'], { statementTimeoutMs: 1000 });
+      expect(Date.now() - started).toBeLessThan(1_900);
+      expect(cut).toMatchObject({ ok: false, code: '57014' });
+      const [planned] = await planStatements(ctx, ['SELECT slow_plan()']);
+      expect(planned!.ok).toBe(true);
+    });
+  }, 120_000);
+
+  it('names both tables of a join, and the table a write is on', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query(SETUP);
+      await pool.query('CREATE TABLE customers (id int PRIMARY KEY, email text)');
+      const [join, write] = await planStatements(ctx, [
+        'SELECT o.id FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.status = $1',
+        'DELETE FROM orders WHERE id = $1',
+      ]);
+      if (!join!.ok || !write!.ok) throw new Error('not planned');
+      expect(relationsOf(join!.plan)).toEqual(['public.customers', 'public.orders']);
+      expect(relationsOf(write!.plan)).toEqual(['public.orders']);
+    });
+  }, 120_000);
+
+  /**
+   * EXPLAIN checks SELECT on every table it names, though it reads no rows,
+   * so the README's least-privilege role (pg_read_all_stats) is refused.
+   * Postgres's message names the table but not the fix.
    */
   it('says which privilege planning needs when the role lacks it', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -149,9 +218,7 @@ describe('planStatements', () => {
 
   /**
    * A fake client that records every query and fails at PREPARE — past BEGIN,
-   * inside the per-statement try, which is the only place the rethrow guard
-   * lives. (A fake that failed at BEGIN never reached it; that mutation
-   * survived.)
+   * inside the per-statement try, the only place the rethrow guard lives.
    */
   function recordingClient(prepare: () => Promise<never> | Promise<unknown>) {
     const sent: unknown[] = [];
@@ -178,9 +245,7 @@ describe('planStatements', () => {
 
   /**
    * READ ONLY is defence in depth: nothing here executes the statement, so no
-   * real-database test can observe the difference, and deleting it passed the
-   * whole suite. A redundant layer has to be tested directly, not through the
-   * layer that makes it redundant — so this reads the transcript.
+   * real-database test can observe it. This reads the transcript instead.
    */
   it('sends every statement inside a read-only transaction it always rolls back', async () => {
     const r = recordingClient(async () => ({ rows: [] }));
@@ -189,9 +254,8 @@ describe('planStatements', () => {
     expect(strings.filter((q) => q.startsWith('BEGIN READ ONLY'))).toHaveLength(2);
     expect(strings.filter((q) => q.startsWith('ROLLBACK'))).toHaveLength(2);
     expect(strings.some((q) => /^(BEGIN|START)(?! READ ONLY)/.test(q) || q.startsWith('COMMIT'))).toBe(false);
-    // The envelope is pgops's own and says so. The PREPARE carries the
-    // operator's statement and is left exactly as built: this package never
-    // marks an operator's statement.
+    // The envelope is pgops's own and is marked. The PREPARE carries the
+    // operator's statement and is never marked.
     expect(strings.filter((q) => !q.endsWith('/* pgops */'))).toEqual([]);
     for (const q of r.sent.filter((x): x is { text: string } => typeof x === 'object')) {
       expect(q.text).not.toContain('/* pgops */');

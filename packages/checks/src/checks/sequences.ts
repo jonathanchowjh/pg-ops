@@ -1,5 +1,5 @@
 import type { Check, Threshold, Verdict } from '../types.js';
-import { DEFAULT_LIMIT, visibleSchemas, type RelationOpts } from './indexes.js';
+import { DEFAULT_LIMIT, capped, visibleSchemas, type RelationOpts } from './shared.js';
 
 export interface SequenceRow {
   name: string;
@@ -16,16 +16,15 @@ export interface SequenceRow {
 
 export interface SequenceEntry {
   name: string;
-  /** `null` when no column owns this sequence — see the docblock. */
+  /** `null` when no column owns this sequence. */
   table: string | null;
   column: string | null;
   columnType: string | null;
   /**
-   * The ceiling this sequence will actually hit, from the COLUMN's type where
-   * one owns it. NOTE: the bigint ceiling, 9223372036854775807, is not exactly
-   * representable as a JS number and arrives as 9223372036854776000. That is
-   * harmless for the percentage — the error is ~1e-16 relative — but do not
-   * render this value raw for a bigint column; render `columnType`.
+   * The ceiling this sequence will actually hit, from the column's type
+   * where one owns it. The bigint ceiling is not exactly representable as a
+   * JS number and arrives as 9223372036854776000: fine for the percentage,
+   * but do not render it raw; render `columnType`.
    */
   maxValue: number;
   /** `null` only when the sequence is unreadable. Never-called reads as its start value. */
@@ -40,25 +39,20 @@ export interface SequenceData {
   total: number;
   truncated: boolean;
   /**
-   * #54. A window aggregate over every sequence that survived the WHERE, not
-   * a count of the page — see the docblock. That was a database-wide count
-   * before this file grew a `relation` filter; under one, it counts THAT
-   * TABLE's unreadable sequences, exactly as `worstPctUsed` below does, and
-   * the SQL comment above the `WHERE` covers both, not just `worst_pct`.
+   * Unreadable sequences among everything that matched the WHERE, not on
+   * the page. Under a `relation` filter it counts that table's only.
    */
   unreadable: number;
-  /** The highest usage across EVERY readable sequence, cap or no cap. */
+  /** The highest usage across every readable sequence that matched, before the cap. */
   worstPctUsed: number | null;
 }
 
 export function toSequences(rows: SequenceRow[]): SequenceData {
-  const total = rows[0]?.total ?? 0;
   const worst = rows[0]?.worst_pct;
   return {
     sequences: rows.map((r) => {
       const maxValue = Number(r.max_value);
-      // `=== null`, never `||`: an unreadable sequence has no value, and a
-      // readable one sitting at 0 is a real reading.
+      // `=== null`, never `||`: a readable sequence at 0 is a real reading.
       const lastValue = r.last_value === null ? null : Number(r.last_value);
       return {
         name: r.name,
@@ -67,79 +61,41 @@ export function toSequences(rows: SequenceRow[]): SequenceData {
         columnType: r.column_type,
         maxValue,
         lastValue,
-        // Derived from the ceiling the QUERY chose, so the two cannot drift:
-        // there is one mapping from column type to ceiling and it lives in the
-        // SQL below.
+        // Uses the ceiling the query chose; the type-to-ceiling mapping
+        // lives only in the SQL.
         pctUsed: lastValue === null ? null : (lastValue / maxValue) * 100,
         readable: r.readable,
       };
     }),
-    total,
-    truncated: total > rows.length,
+    ...capped(rows),
     unreadable: rows[0]?.unreadable ?? 0,
     worstPctUsed: worst === undefined || worst === null ? null : Number(worst) * 100,
   };
 }
 
 /**
- * #52, #53 and #54 in one query — the most intricate in P2.
+ * Sequence usage, measured against the owning column's type and not the
+ * sequence's own maximum: a `bigint` sequence feeding an `integer` column
+ * fails at 2,147,483,647. The mapping is pgHero's: smallint 32767, integer
+ * 2147483647, everything else the bigint maximum.
  *
- * §3's divergence is the whole point of #53: **the danger is the COLUMN's
- * type, not the sequence's own maximum.** A `bigint` sequence feeding an
- * `integer` column fails at 2,147,483,647 with four billion values still
- * unspent, and a check measuring against the sequence would call that 0.00%
- * full. pgHero's mapping is adopted verbatim (methods/sequences.rb):
- * smallint 32767, integer 2147483647, everything else the bigint maximum.
- *
- * **Driven from `pg_class`, not from `pg_depend`.** A sequence wired only
- * through a column DEFAULT, with no OWNED BY, has NO `pg_class` dependency at
- * all — verified on 17.11, `CREATE SEQUENCE loose_seq; CREATE TABLE t (id int
- * DEFAULT nextval('loose_seq'))` produces only an `'n'` dependency on its
- * namespace. A `pg_depend`-driven query omits it silently, which is the one
- * failure mode this console exists to avoid. Listing every sequence and making
- * the COLUMN the optional part costs nothing and cannot omit one. pgHero
- * instead parses the default expression in Ruby; the ceiling here falls back
- * to the sequence's own `max_value`, which understates the risk for that case
- * and is recorded rather than hidden.
- *
- * **`regnamespace` is not used, deliberately.** `s.schemaname::regnamespace`
- * parses its argument as identifier syntax, so a single schema named
- * `"Weird Schema"` anywhere in the database makes the whole check return
- * `{ok:false}` with `ERROR: invalid name syntax` — permanently, for every
- * schema. The namespace is joined and compared by oid instead.
- *
- * **`'SELECT,USAGE'` means "any of".** Postgres exposes `last_value` to either
- * privilege, so a `'SELECT'`-only predicate calls a USAGE-only role's
- * perfectly readable sequence unreadable — blanking a 93%-full row and
- * dropping it from the verdict.
- *
- * **A NULL `last_value` does not mean unreadable.** Verified on 17.11: three
- * freshly created, fully readable sequences all read NULL, because nothing has
- * called them yet. Readability comes from the privilege predicate alone, and a
- * never-called sequence falls back to `start_value` exactly as pgHero's own
- * COALESCE does.
- *
- * **`unreadable` and `worst_pct` are window aggregates**, computed before the
- * LIMIT. `worst_pct` is deliberately redundant with the ordering: with the
- * ORDER BY correct, the worst row is always on the page and a per-row value
- * would agree, so no single mutation distinguishes them. It exists so the
- * VERDICT does not silently depend on the ordering staying right — change the
- * ORDER BY and one test fails, rather than the verdict quietly going wrong
- * too. Unreadable rows sort last and are the first a cap discards, so
- * counting the returned page would let a truncated list claim a database-wide
- * fact. The same reasoning applies to the verdict: `worst_pct` makes it
- * independent of the ORDER BY rather than relying on the worst row surviving.
- *
- * **Ordered by headroom, not by `last_value`.** Absolute ordering put a
- * 0.00%-full bigint sequence at 5,000,000,000 above a 93%-full integer one at
- * 2,000,000,000, and the cap then discarded the only finding.
- *
- * Temporary sequences are excluded by the shared schema filter, NOT by a
- * `relpersistence <> 't'` clause. pgHero carries that clause because it has no
- * temp-schema filter of its own; here it would be a second guard on the same
- * thing, and mutation proved it — deleting either one alone changed no test,
- * because a temporary sequence always lives in a `pg_temp_N` schema and the
- * filter already excludes it. One guard, and the tests now fail without it.
+ * - Driven from `pg_class`, with the column optional. A sequence wired only
+ *   through a column DEFAULT, with no OWNED BY, has no `pg_depend` row to a
+ *   table, and a `pg_depend`-driven query would omit it. Its ceiling falls
+ *   back to the sequence's own `max_value`, which understates the risk.
+ * - No `::regnamespace`: it parses identifier syntax, so one schema named
+ *   "Weird Schema" fails the whole check with `invalid name syntax`.
+ * - `'SELECT,USAGE'` means "any of". Either privilege exposes `last_value`.
+ * - A NULL `last_value` means never called, not unreadable. Readability
+ *   comes from the privilege predicate, and the value falls back to
+ *   `start_value`.
+ * - `unreadable` and `worst_pct` are window aggregates, computed before the
+ *   LIMIT, so the verdict does not depend on the worst row surviving the
+ *   cap or on the ORDER BY.
+ * - Ordered by fraction used, not `last_value`, so the cap keeps the
+ *   nearest-to-full sequences.
+ * - Temporary sequences are excluded by the schema filter; they always live
+ *   in a `pg_temp_N` schema.
  */
 const SEQUENCES_SQL = `
 WITH seq AS (
@@ -151,6 +107,7 @@ WITH seq AS (
   JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE c.relkind = 'S'
     AND ${visibleSchemas('n.nspname')}
+    AND n.nspname <> 'pgops'
 ),
 owned AS (
   SELECT DISTINCT ON (d.objid)
@@ -192,14 +149,8 @@ CROSS JOIN LATERAL (
     END AS ceiling,
     CASE WHEN s.readable THEN coalesce(ps.last_value, ps.start_value)::numeric END AS val
 ) v
--- \`unreadable\` and \`worst_pct\` above are window functions computed AFTER
--- this WHERE, so a relation-scoped call's \`unreadable\` count and
--- \`worst_pct\` are both THAT TABLE's — one unreadable-sequence count and
--- one worst reading, not the database's. That is correct, and more
--- actionable, for a Table page asking about one relation: the 90% threshold
--- below is PER SEQUENCE, so a per-table \`worst_pct\` crossing it is as real
--- a finding as a database-wide one, and the Table page's own comment on
--- \`seqsForDisplay\` explains what it does and does not withhold.
+-- unreadable and worst_pct are window functions computed after this
+-- WHERE, so a relation-scoped call reports that table's own figures.
 WHERE ($2::text IS NULL OR o.table_name = $2)
 ORDER BY (v.val / v.ceiling) DESC NULLS LAST, s.name
 LIMIT $1`;
@@ -208,7 +159,8 @@ export const sequences: Check<SequenceRow, SequenceData, RelationOpts> = {
   id: 'sequences',
   title: 'Sequence exhaustion',
   gate: 'keep-up',
-  class: 'hygiene',
+  home: 'sequence',
+  class: 'captured',
   timeoutMs: 10_000,
   sql: (o) => ({ text: SEQUENCES_SQL, values: [o.limit ?? DEFAULT_LIMIT, o.relation ?? null] }),
   map: toSequences,
@@ -222,14 +174,9 @@ export const sequences: Check<SequenceRow, SequenceData, RelationOpts> = {
             + 'plan for the lock rather than discovering it at exhaustion.' },
   ],
   /**
-   * Escalates on `worstPctUsed`, a window aggregate over EVERY readable
-   * sequence, so the verdict is correct under a cap no matter how the list is
-   * ordered. Reading the returned page would make the verdict depend on the
-   * ORDER BY continuing to sort the worst row first.
-   *
-   * `null` — no readable sequence to judge — returns `ok`, because `Verdict`
-   * has no third state. That is the absence of a finding, not a claim that the
-   * sequences are fine; `data.unreadable` is rendered beside it and says so.
+   * Escalates on `worstPctUsed`, not the returned page, so it is correct
+   * under a cap. `null` (no readable sequence) returns `ok` because
+   * `Verdict` has no third state; `data.unreadable` is rendered beside it.
    */
   verdict: (d: SequenceData, t: Threshold[]): Verdict => {
     const warn = t.find((x) => x.level === 'warn');

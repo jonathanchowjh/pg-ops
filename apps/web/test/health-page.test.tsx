@@ -25,10 +25,9 @@ const point = (at: number, over: Partial<HealthPoint>): HealthPoint => ({
 } as HealthPoint);
 
 /**
- * `days` × 24 hours of history ending now, four points a day. The trend
- * counts 24-hour periods back from the end of the window, which the page
- * takes a moment AFTER this runs; the minute's offset keeps the oldest point
- * inside the oldest period instead of on its edge.
+ * `days` × 24 hours of history ending now, four points a day. The page takes
+ * the end of its window a moment after this runs; the minute's offset keeps
+ * the oldest point inside the oldest 24-hour period instead of on its edge.
  */
 const history = (days: number, over: (day: number) => Partial<HealthPoint>) => {
   const start = Date.now() - days * DAY + 60_000;
@@ -115,7 +114,6 @@ describe('/db/<name>/health', () => {
     expect(state.asked!.to.getTime() - state.asked!.from.getTime()).toBe(7 * DAY);
   });
 
-  /** Review Focus 2, at the page. */
   it('renders the default window for a URL nobody could mean', async () => {
     state.read = history(2, () => ({ blocked: 0 }));
     view = await render(await page({ from: 'banana', to: 'also banana' }));
@@ -130,7 +128,7 @@ describe('/db/<name>/health', () => {
     expect(view.text()).toContain('10-01 02:00 to 10-01 08:00 UTC');
   });
 
-  /** Final review: see the same test on the fleet page. */
+  /** See the same test on the fleet page. */
   it('does not say "collecting" for a database whose last row is old', async () => {
     const last = Date.parse('2026-10-01T02:14:00Z');
     state.read = { ok: true, histories: [{ name: 'prod', rows: 0, lastAt: last, points: [] }] };

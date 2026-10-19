@@ -5,50 +5,30 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { Client } from 'pg';
 
 /**
- * I4 (final review): this was hardcoded `postgres:17-alpine`, so the CI matrix
- * did not reach the console at all — the PG 14 leg (the declared floor), 16 and
- * 18 all rendered pages against 17, and the Global Constraint "CI matrix 14,
- * 16, 17, 18" held for nothing in apps/web. Same expression as
- * packages/checks/test/global-setup.ts, which CI already drives per leg.
+ * Follows the CI matrix's Postgres version. Same expression as
+ * packages/checks/test/global-setup.ts.
  */
-const IMAGE = `postgres:${process.env.PGOPS_TEST_PG_VERSION ?? '17'}-alpine`;
+export const IMAGE = `postgres:${process.env.PGOPS_TEST_PG_VERSION ?? '17'}-alpine`;
 
 export interface Console {
   baseUrl: string;
   sql: (text: string) => Promise<void>;
   /**
-   * The throwaway container's own connection string. `sql()` above opens and
-   * closes a connection per call, so it cannot hold a backend open across a
-   * fetch — a test proving truncation (more sessions exist than the page's
-   * LIMIT) needs to open extra `pg.Client` connections directly and keep them
-   * open while it fetches, which needs the raw URL to connect to.
+   * The throwaway container's connection string, for a test that must hold a
+   * backend open across a fetch; `sql()` opens and closes one per call.
    */
   url: string;
 }
 
 /**
- * `next` itself, not `npm run start`. On Linux `npm run` puts `npm → sh →
- * next` between us and the listener, and a SIGTERM to npm kills npm and sh
- * but orphans `next` still holding the port — every later `withConsole` on
- * that worker then hit EADDRINUSE and silently tested the orphan instead
- * (CI run 35677090028: 23 failures, all "expected 404"). macOS's sh execs
- * its last command, so the orphan never appeared locally.
+ * `next` itself, not `npm run start`. On Linux a SIGTERM to npm kills npm and
+ * sh but orphans `next` still holding the port, and every later `withConsole`
+ * on that worker silently tests the orphan. macOS's sh execs its last
+ * command, so the orphan does not appear locally.
  *
- * RESOLVED, NOT SPELLED OUT, and that distinction has already cost a gate
- * run. This was `new URL('../node_modules/next/dist/bin/next')` — which is
- * apps/web/node_modules, true only while npm chose to nest `next` under this
- * workspace. A dependency bump hoisted it to the repo root, the path stopped
- * existing, and every integration test in apps/web died on MODULE_NOT_FOUND
- * fifteen minutes into the gate. Hoisting is npm's decision and it changes
- * with the tree; asking Node to resolve the specifier walks the same
- * node_modules chain `import 'next'` would, so it is right either way.
- * `next` publishes no `exports` field, so the subpath resolves directly.
- *
- * This is the third dependency to move here. The Dockerfile installs into one
- * stage rather than copying apps/web/node_modules, and this app keeps its own
- * vitest config because Vite resolves bare specifiers from the config's
- * directory; both docblocks end by warning that the next one to move will not
- * announce itself either. harness.test.ts is that warning as a test.
+ * Resolved, not spelled out as a path: npm may nest `next` under this
+ * workspace or hoist it to the repo root. `next` publishes no `exports`
+ * field, so the subpath resolves directly. harness.test.ts checks the result.
  */
 export const NEXT_BIN = createRequire(import.meta.url).resolve('next/dist/bin/next');
 const WEB_DIR = fileURLToPath(new URL('..', import.meta.url));
@@ -83,33 +63,20 @@ function run(command: string, args: string[]): Promise<void> {
 }
 
 /**
- * One container and one server per call. Starting the server is the
- * expensive part (a Next production build plus start), so a test needing
- * several assertions against the same seeded state should make them inside
- * one `withConsole` call rather than opening a new one per assertion.
+ * One container and one server per call. Starting the server is expensive (a
+ * Next production build plus start), so make several assertions inside one
+ * `withConsole` call rather than opening one per assertion.
  *
- * The build runs BEFORE the Postgres container even exists, and the server is
- * started only afterward, pointed at that container's freshly minted URL.
- * That order is the entire point: `next build` produces the artifact the
- * server runs from, and it does so before there is any database URL to
- * freeze even if the page tried. Only THEN does a container start, and only
- * then does the server that reads it. If the overview page rendered without
- * opting into dynamic rendering (see lib/check.ts's `connection()` seam),
- * `process.env.PGOPS_DATABASES` would have been captured — or, more likely,
- * found absent and thrown on — during the build step above, before this
- * function ever calls `PostgreSqlContainer`. A harness that instead ran
- * `next start` against a build already sitting on disk (the brief's
- * original shape) could not tell a dynamic page from a statically
- * prerendered one; this task's report records the run that proved the
- * distinction actually matters.
+ * The build runs before the Postgres container exists, so there is no
+ * database URL for a statically prerendered page to capture: a page that
+ * failed to opt into dynamic rendering (see lib/check.ts's `connection()`
+ * seam) fails here instead of passing against a frozen URL.
  */
 export async function withConsole(
   fn: (c: Console) => Promise<void>,
   /**
-   * Extra server environment. A FUNCTION when a value has to name the
-   * throwaway container — `PGOPS_STORE_URL` is the case: the store's
-   * connection string does not exist until the container has started, which
-   * is after this argument is passed.
+   * Extra server environment. A function when a value needs the container's
+   * URL (`PGOPS_STORE_URL`), which does not exist until the container starts.
    */
   extraEnv: Record<string, string> | ((url: string) => Record<string, string>) = {},
 ): Promise<void> {
@@ -118,13 +85,9 @@ export async function withConsole(
   try {
     await run('npm', ['run', '--workspace', '@pgops/web', 'build']);
 
-    // Preloaded, not created: `shared_preload_libraries` only makes the
-    // extension AVAILABLE, so `pg_stat_statements` is still a missing relation
-    // until a test runs `CREATE EXTENSION` on this container — which is what
-    // keeps "says the extension is missing rather than showing an empty table"
-    // honest, while letting the one test that needs all nine incident checks
-    // to run actually create it. Same command as
-    // packages/checks/test/global-setup.ts.
+    // Preloaded, not created: `pg_stat_statements` stays a missing relation
+    // until a test runs `CREATE EXTENSION`, so the missing-extension tests
+    // still hold. Same command as packages/checks/test/global-setup.ts.
     pg = await new PostgreSqlContainer(IMAGE)
       .withCommand(['postgres', '-c', 'shared_preload_libraries=pg_stat_statements'])
       .start();
@@ -137,10 +100,7 @@ export async function withConsole(
         ...process.env,
         PGOPS_DATABASES: JSON.stringify([{ name: 'primary', url }]),
         NODE_ENV: 'production',
-        // Auth (Task 2) and the action gate (Task 3) are both configured by
-        // environment variables read at request time, so a test proving either
-        // one needs to vary the SERVER's environment, not its own. Spread last:
-        // a test that deliberately overrides PGOPS_DATABASES should win.
+        // Spread last: a test that deliberately overrides PGOPS_DATABASES wins.
         ...(typeof extraEnv === 'function' ? extraEnv(url) : extraEnv),
       },
       stdio: 'inherit',
@@ -159,8 +119,6 @@ export async function withConsole(
       },
     });
   } finally {
-    // Always torn down, failure or not — this is a throwaway container the
-    // harness itself started, never the developer's own `pgops-dev`.
     // Awaited: the next `withConsole` on this worker binds the same port.
     if (server && server.exitCode === null) {
       const exited = new Promise((r) => server!.once('exit', r));

@@ -51,10 +51,8 @@ describe('suggestedIndexes (#58, #63)', () => {
     });
   }, 120_000);
 
-  // Every other test connects as a superuser, for whom nothing is redacted.
   // A monitoring role without pg_read_all_stats sees other roles' shapes as
-  // `<insufficient privilege>` — cost intact, text gone — and there is no
-  // statement there to plan.
+  // `<insufficient privilege>`: cost intact, text gone, nothing to plan.
   it('skips shapes Postgres redacted from this role', async () => {
     await withPostgres(async (ctx, pool) => {
       const suffix = Math.random().toString(36).slice(2, 10);

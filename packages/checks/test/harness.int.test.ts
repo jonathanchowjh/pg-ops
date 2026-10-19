@@ -4,11 +4,9 @@ import { withPostgres } from './harness.js';
 import type { Check } from '../src/types.js';
 
 const version: Check<{ v: string }, number> = {
-  id: 'version', gate: 'work', title: 'Server version', class: 'incident',
-  // No bind parameter here on purpose: `check.sql` as a plain string never gets a
-  // `values` array from runCheck, so a literal `$1` sent this way is unbound and
-  // Postgres rejects it with "there is no parameter $1" (42P02) — a real SQL
-  // defect that only a live server, not a fake pool, can catch.
+  id: 'version', gate: 'work', home: 'database', title: 'Server version', class: 'live',
+  // No bind parameter on purpose: a plain-string `check.sql` gets no `values`
+  // array from runCheck, so a literal `$1` would be rejected with 42P02.
   sql: "SELECT current_setting('server_version_num')::text AS v",
   map: (rows) => Number(rows[0]?.v ?? 0),
 };
@@ -22,11 +20,8 @@ describe('the integration harness', () => {
     });
   }, 120_000);
 
-  // Tasks 6-13 lean on every withPostgres() call getting a database no other
-  // call can see — that's the property that keeps one task's fixtures from
-  // leaking into another's assertions. Assert it directly rather than taking
-  // it on faith: create a table inside the first call, then prove a second,
-  // independent call never sees it.
+  // Every integration test relies on a withPostgres() call getting a database
+  // no other call can see.
   it('gives two withPostgres() calls non-interfering databases', async () => {
     await withPostgres(async (_ctx, pool) => {
       await pool.query('CREATE TABLE only_in_first (id int)');

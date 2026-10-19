@@ -9,10 +9,8 @@ import { cn } from '@/lib/utils';
 /**
  * One database's stored health, under the four gates.
  *
- * Reads on open and does not poll: at any window wider than a few hours a
- * new minute changes nothing you could see, and this page is for looking
- * back. It reads the store only and runs no check, so it works for a
- * database that is down, which is exactly when its past is wanted.
+ * Does not poll. It reads the store only and runs no check, so it works for
+ * a database that is down.
  */
 export default async function Health({ params, searchParams }: {
   params: Promise<{ name: string }>;

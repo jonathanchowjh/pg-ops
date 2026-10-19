@@ -5,7 +5,7 @@ export interface DatabaseActivityRow {
   temp_files: string; temp_bytes: string; blks_read: string; blks_hit: string;
   tup_returned: string; tup_fetched: string; tup_inserted: string; tup_updated: string; tup_deleted: string;
   stats_reset: string | null;
-  /** The server's `now()`, read in the SAME statement as the counters above. */
+  /** The server's `now()`, read in the same statement as the counters. */
   sampled_at: string;
 }
 
@@ -14,17 +14,14 @@ export interface DatabaseActivityData {
   tempFiles: number; tempBytes: number; blksRead: number; blksHit: number;
   tupReturned: number; tupFetched: number; tupInserted: number; tupUpdated: number; tupDeleted: number;
   statsResetAt: string | null;
-  /** The server's own `now()`, read in the same statement as the counters —
-   *  see ratesFor's comment for why the host clock will not do. */
+  /** The server's `now()`, read in the same statement as the counters. */
   sampledAt: string;
 }
 
 /**
- * The cumulative counters for THIS database. Cumulative is useless on its
- * own — "4,812,331 commits" says nothing — so this check carries no verdict
- * and the web layer differences two polls into per-second rates
- * (`counterRates`). Bigints come back as text and are parsed here; every
- * value fits a double for any database this console will meet.
+ * The cumulative counters for this database. No verdict: the web layer
+ * differences two polls into per-second rates (`counterRates`). Bigints come
+ * back as text and are parsed to doubles here.
  */
 const SQL = `
 SELECT xact_commit::text, xact_rollback::text, deadlocks::text, conflicts::text,
@@ -40,8 +37,9 @@ WHERE datname = current_database()`;
 export const databaseActivity: Check<DatabaseActivityRow, DatabaseActivityData> = {
   id: 'databaseActivity',
   gate: 'work',
+  home: 'database',
   title: 'Throughput',
-  class: 'incident',
+  class: 'live',
   sql: SQL,
   map: (rows) => {
     const r = rows[0];
@@ -77,31 +75,13 @@ const COUNTERS = [
 
 /**
  * Two samples into rates. Null, not zero, when the pair cannot be trusted:
- * no time elapsed, or any counter went backwards, which is a statistics
- * reset or a restart between the two polls. A page shows "—" for null and
- * never a rate that was computed across a discontinuity.
+ * no time elapsed, or a statistics reset or restart between the two polls.
  */
 export function counterRates(prev: DatabaseActivityData, cur: DatabaseActivityData, seconds: number): Rates | null {
   if (!(seconds > 0)) return null;
-  // A reset is detected two ways, and the second is not redundant.
-  //
-  // `stats_reset` changing is the DIRECT evidence: the server says these
-  // counters are not a continuation of the previous ones, whatever their
-  // values happen to be.
-  //
-  // The backwards-counter check alone misses a real case. After
-  // pg_stat_reset() the counters restart at zero, so normally the next sample
-  // is smaller and is caught — but only if the database was quiet enough that
-  // it has not already climbed back past its OLD cumulative totals. On a
-  // freshly created, low-traffic or demo database those totals are tiny, so a
-  // single busy interval can legitimately exceed them, nothing looks
-  // backwards, and the difference silently reports the post-reset counters
-  // minus the pre-reset ones as if it were one interval's work.
-  //
-  // Comparing the reset timestamp costs one string comparison and removes
-  // that case entirely. Both guards stay: `stats_reset` is null on servers
-  // and roles that do not expose it, and the backwards check still covers a
-  // reset that happens to leave the timestamp unreadable.
+  // Two reset guards, both needed. A backwards counter misses a reset on a
+  // low-traffic database whose new counters have already passed the old
+  // totals; `stats_reset` catches that, but is null where it is not exposed.
   if (prev.statsResetAt !== cur.statsResetAt) return null;
   for (const k of COUNTERS) if (cur[k] < prev[k]) return null;
   const read = cur.blksRead - prev.blksRead;

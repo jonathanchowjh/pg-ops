@@ -20,19 +20,10 @@ describe('the package boundary', () => {
   });
 
   /**
-   * Four import shapes need catching, not one: a static `from '...'`
-   * (single quotes) is what the original regex covered, but nothing in this
-   * repo's lint config enforces quote style, so `from "..."` (double
-   * quotes) is just as real; a side-effect import (`import 'pkg';`, no
-   * `from` at all) and a dynamic `import('pkg')` both bypass `from`
-   * entirely. All four are collected and checked the same way.
-   *
-   * Comments are stripped before scanning: this file's own prose uses
-   * "from" immediately ahead of a double-quoted phrase ("indistinguishable
-   * from \"no slow queries\"" in query-stats.ts; reads differently from
-   * "missed" here in registry.ts) — exactly the shape a quote-agnostic
-   * `from ['"]` regex is meant to catch, and it self-triggered on both
-   * until comments were excluded.
+   * Catches a third-party import in any of four shapes: `from '...'`,
+   * `from "..."`, a side-effect `import 'pkg'` and a dynamic `import('pkg')`.
+   * Comments are stripped first, because prose such as `from "missed"`
+   * matches the regex.
    */
   it('imports nothing but node builtins and pg', () => {
     const bad: string[] = [];
@@ -54,16 +45,9 @@ describe('the package boundary', () => {
   });
 
   /**
-   * The original `/^let |^var /` missed `export let cache = 0;` — the
-   * most dangerous form of module state there is, being both mutable and
-   * visible to every consumer — because it required "let"/"var" literally
-   * at column 0. It also required a trailing space, so a bare `let` followed
-   * immediately by a newline (an unusual but legal split declaration)
-   * escaped too. `\b` replaces the trailing-space requirement and an
-   * optional `export\s+` prefix is matched ahead of `let`/`var`, while `^`
-   * still anchors to column 0 so a `let`/`var` nested inside a function
-   * body (indented) is correctly left alone — this guard is about
-   * module-level state, not all mutable bindings.
+   * Catches a `let`/`var` at column 0, including `export let` and a `let`
+   * followed directly by a newline. Indented bindings inside a function body
+   * are left alone: the guard is about module-level state.
    */
   it('holds no module-level mutable state', () => {
     const bad: string[] = [];
@@ -79,23 +63,13 @@ describe('the package boundary', () => {
   });
 
   /**
-   * Every ratio in this package divides in NUMERIC arithmetic, never bigint.
+   * Catches a ratio divided in bigint arithmetic. `pg_stat*` counters are
+   * bigint and bigint / bigint is integer division: 39,649 hits and 1 read
+   * returns `0`, not 0.99997, and nothing errors.
    *
-   * `pg_statio_*` and `pg_stat_*` counters are all bigint, and bigint /
-   * bigint is INTEGER division in Postgres: measured on 17.11, an index with
-   * 39,649 hits and 1 read returns exactly `0` where the true rate is
-   * 0.99997. The page then reports a 0% cache hit rate under a summary
-   * reporting 99.99%, and nothing errors.
-   *
-   * This is a SOURCE guard because the behaviour is not reachable from a
-   * test. Catching it needs a relation with `heap_blks_read > 0`, and a
-   * table written inside the test is still entirely in shared buffers — 500k
-   * rows (17 MB) and 400k wide rows (54 MB, past the ring-buffer threshold)
-   * both measured `heap_blks_read = 0` against the default 128 MB. Only
-   * exceeding shared_buffers outright would do it, which is not a fixture
-   * worth having. The per-INDEX form is covered behaviourally in
-   * indexes.int.test.ts, because index pages do get read once; the per-TABLE
-   * form has no such luck, and this stands in for it.
+   * A source guard because a test cannot reach the per-table form: a table
+   * written inside a test stays in shared buffers, so `heap_blks_read` is 0.
+   * The per-index form is covered in indexes.int.test.ts.
    *
    * `sum(...)` needs no cast: `sum()` over a bigint already returns numeric.
    */
@@ -123,45 +97,17 @@ describe('the package boundary', () => {
   });
 
   /**
-   * The lexicographic-sort trap. A value cast `::text` for the wire (bigint
-   * safety — Convention 1: int8/numeric arrive as strings) keeps its
-   * numeric SOURCE column's name as its output alias when there is no
-   * explicit `AS`, or is given one explicitly when there is. Either way, an
-   * `ORDER BY` that references that alias BARE — unqualified by a table or
-   * CTE alias — sorts the TEXT column lexicographically: '20000000000'
-   * bytes sorts ahead of '5000000000' bytes as text, ranking 5 GB retained
-   * above 20 GB. Two correct decisions (cast to text for bigint safety;
-   * order by severity) combine into a wrong one unless the ORDER BY reaches
-   * past the text alias to the numeric source.
+   * Catches an `ORDER BY` on the bare alias of a column cast `::text` for the
+   * wire. That sorts lexicographically — '20000000000' ahead of '5000000000'
+   * — so severity ranks backwards and the query still runs. The fix is to
+   * qualify with a table/CTE alias or give the numeric source its own name.
    *
-   * This defect shipped three times in this plan — locks.ts, query-stats.ts,
-   * slots.ts (each file's own comments name the pitfall and its fix: qualify
-   * with a table/CTE alias, as query-stats.ts's `v.` does, or give the CTE's
-   * numeric source column a name distinct from the outer text alias, as
-   * slots.ts's `retained_bytes_num` vs. `retained_bytes` does) — because the
-   * query still runs either way; it just ranks severity backwards, silently.
+   * SQL comments are stripped first, since prose about this defect names
+   * "ORDER BY" and the alias.
    *
-   * SQL blocks are extracted from backtick template literals containing
-   * `SELECT`, and SQL line/block comments are stripped from each before
-   * scanning: without that, a file's own prose explaining this exact defect
-   * (slots.ts's `-- ORDER BY the CTE's raw numeric column, never the ::text
-   * output above... the outer SELECT's retained_bytes alias...`) contains
-   * the words "ORDER BY" and the alias name in plain English, and would
-   * self-trigger the very check meant to catch the bug it's warning about.
-   *
-   * Scope, stated rather than left implicit: this catches the alias written
-   * DIRECTLY in an ORDER BY clause inside a SQL template literal — the shape
-   * slots.ts actually shipped, and the shape reverting its fix reproduces
-   * (verified: see the task report). It does NOT follow a `${...}`
-   * interpolation back to a lookup table defined elsewhere in the file — the
-   * shape query-stats.ts's `calls`/`cache` sort keys took, where the ORDER
-   * BY text itself is assembled at runtime from `ORDER[o.sort]`. Chasing
-   * interpolations back to their source through arbitrary TypeScript is a
-   * real static-analysis problem, not a regex one; query-stats.ts's own `v.`
-   * qualification convention plus query-stats.int.test.ts's "sorts by calls
-   * and by cache hit rate too" integration test are what guard that shape
-   * instead. Verified this guard does NOT (and, honestly, should not be
-   * trusted to) catch that indirected form — see the task report.
+   * Scope: only an alias written directly in an ORDER BY inside a SQL
+   * template literal. An ORDER BY assembled from a `${...}` interpolation, as
+   * in query-stats.ts, is not followed; query-stats.int.test.ts guards that.
    */
   it('never sorts a ::text-cast column by its own text alias', () => {
     const offenders: string[] = [];
@@ -174,13 +120,10 @@ describe('the package boundary', () => {
           ...[...sql.matchAll(/::text\s+AS\s+(\w+)/gi)].map((m) => m[1]!),
           ...[...sql.matchAll(/(\w+)::text\b(?!\s*AS)/gi)].map((m) => m[1]!),
         ]);
-        // EACH ORDER BY clause, bounded — not one slice from the first
-        // `ORDER BY` to the end of the block. A query whose CTE carries its
-        // own `ORDER BY` (sequences.ts uses `DISTINCT ON`, which requires one)
-        // put every outer `::text AS` alias inside that slice and reported
-        // three offences against a query sorting on `(v.val / v.ceiling)` — a
-        // numeric expression. An inner clause cannot reference an outer
-        // alias, because the outer SELECT is not in its scope.
+        // Each ORDER BY clause, bounded — not one slice from the first
+        // `ORDER BY` to the end of the block. A CTE with its own `ORDER BY`
+        // (sequences.ts's `DISTINCT ON` requires one) would otherwise put
+        // every outer `::text AS` alias inside the slice and report it.
         const clauses = [...sql.matchAll(/ORDER BY[\s\S]*?(?=\bLIMIT\b|\n\s*\)|$)/gi)]
           .map((m) => m[0]);
         for (const alias of aliases) {
@@ -196,53 +139,14 @@ describe('the package boundary', () => {
   });
 
   /**
-   * Controller Ruling 46, restated after P1b deleted the TUI — the facts
-   * underneath it moved, so read this before assuming the step is dead
-   * weight.
+   * Catches the pre-commit hook dropping this package's own typecheck.
+   * `typecheck:test` also compiles src, but only this project sets
+   * `rootDir: "./src"` and excludes `test`, so only it rejects a src file
+   * importing from `test/` (TS6059) — the leak that would drag test-only code
+   * into the published `dist/`.
    *
-   * As written, the ruling said: the root `tsconfig.json` (`npm run
-   * typecheck`) covered only `src/**`, the old Ink TUI, and
-   * `tsconfig.test.json` reached this package's source only transitively,
-   * through whichever test files imported it — so `index.ts`, the package's
-   * public barrel and the file every consumer imports, was compiled by
-   * nothing. Proved at the time: appending a type error to `index.ts`
-   * produced zero errors from `typecheck:test`.
-   *
-   * P1b deleted `src/**`, and `tsconfig.test.json` was rerooted onto
-   * `tsconfig.base.json` with `packages/*\/src/**\/*` in its `include`. So
-   * `typecheck:test` now compiles `index.ts` directly — re-proved the same
-   * way, by appending a type error to it and watching `typecheck:test` fail
-   * on that line. The original hole is closed by the config itself.
-   *
-   * The step this test pins is kept anyway, and not from inertia — but the
-   * reason is a DIFFERENT PROJECT, not a stronger one. Do not reach for
-   * "declaration emit": both projects inherit `declaration: true` from
-   * `tsconfig.base.json`, and this package's `typecheck` script is itself
-   * `--noEmit`, so any argument of that shape disqualifies the very step it
-   * is trying to justify. `build` is the only thing here that emits.
-   *
-   * What is actually exclusive to this step is the project's SHAPE.
-   * `packages/checks/tsconfig.json` sets `rootDir: "./src"` and excludes
-   * `test`; `tsconfig.test.json` sets `rootDir: "."` with src and test both
-   * inside it. So a src file importing from `test/` — the leak that would
-   * drag test-only code into the published `dist/` — is a rootDir escape
-   * here and nothing there. Probed both directions: a src file re-exporting
-   * from `../test/harness.js` gives
-   * `error TS6059: File '…/test/harness.ts' is not under 'rootDir' '…/src'`
-   * from this step, and zero errors from `typecheck:test`.
-   *
-   * This test does not re-run tsc — it asserts the pre-commit hook still
-   * invokes that script, so an edit that drops the step is a red test rather
-   * than a silent loss. It pinned `.github/workflows/ci.yml`'s `static` job
-   * until the workflow was replaced by `.githooks/`; the step, and the reason
-   * for it, are unchanged.
-   *
-   * The hook carries a prose comment describing this very step — an
-   * unanchored substring search matches the command's text equally well from
-   * inside a `#` comment, so commenting the real line out while leaving prose
-   * that happens to quote it would still read as green. Anchored to a real
-   * command line (start of line, nothing after it but trailing whitespace) so
-   * only an actual step satisfies it.
+   * Anchored to a whole command line: the hook's own `#` comments quote the
+   * command, and an unanchored match would read a commented-out step as green.
    */
   it('runs this package\'s own typecheck before a commit — the package\'s own project, the one build emits from', () => {
     const hook = readFileSync(new URL('../../../.githooks/pre-commit', import.meta.url), 'utf8');
@@ -250,18 +154,11 @@ describe('the package boundary', () => {
   });
 
   /**
-   * M1, the same class of gap as Ruling 46 above and closed the same way.
-   * `package.json` declares `main`/`types`/`exports` into `dist/`, but every
-   * typecheck in the pre-commit hook is `--noEmit`, so without this step
-   * nothing ever produces that directory. `dist/` is gitignored, so what a
-   * developer has on disk is whatever they last built by hand — the reviewer
-   * found a stale one whose `index.js` still carried "redactSecrets is Task
-   * 5's module and does not exist yet". A local import would resolve against
-   * that; a clean checkout would MODULE_NOT_FOUND.
-   *
-   * Anchored to a real command line for the same reason as the typecheck
-   * assertion: the hook carries prose about this step directly above it, and
-   * an unanchored substring match reads a commented-out step as green.
+   * Catches the pre-commit hook dropping the build. `package.json` points
+   * into `dist/`, which is gitignored and which no `--noEmit` typecheck
+   * produces, so without this step a local import resolves against a stale
+   * build and a clean checkout fails with MODULE_NOT_FOUND.
+   * Anchored for the same reason as the typecheck assertion.
    */
   it('builds this package before a commit — main/types/exports point at dist/', () => {
     const hook = readFileSync(new URL('../../../.githooks/pre-commit', import.meta.url), 'utf8');
@@ -269,45 +166,23 @@ describe('the package boundary', () => {
   });
 
   /**
-   * THE PRE-PUSH HOOK MUST BE FAST, and this is a correctness rule rather
-   * than a comfort one.
-   *
-   * `git push` opens the connection to the remote BEFORE it runs pre-push —
-   * it has to, because the hook is handed each ref's remote SHA on stdin,
-   * which git can only know by asking. Traced on 2026-09-25:
-   *
-   *     run_command: 'ssh -v' git@github.com 'git-receive-pack ...'
-   *     debug1: Sending command: git-receive-pack
-   *     pre-push: integration tests against Postgres 17     <- AFTER
-   *
-   * So everything the hook does happens while an idle `git-receive-pack`
-   * session is held open. When the hook ran the integration suite and a
-   * Docker image build — about fifteen minutes — the remote dropped that
-   * session, and git died writing the pack to a closed pipe: exit 141,
-   * SIGPIPE, with no output at all, not even `Enumerating objects`. Every
-   * push failed, and the only way through was the `--no-verify` the gate
-   * exists to prevent.
-   *
-   * No edit to the hook's BODY can fix that; only making the hook fast can.
-   * The slow steps moved to `scripts/gate.sh`, and the tests below pin both
-   * halves — that they left here, and that they arrived there.
+   * Catches a slow step returning to pre-push. `git push` opens the
+   * connection to the remote before it runs the hook, so a fifteen-minute
+   * hook holds an idle `git-receive-pack` session until the remote drops it
+   * and git dies with exit 141 (SIGPIPE) and no output. The slow steps live
+   * in `scripts/gate.sh`.
    */
   it('does not run the slow gates from pre-push — git holds the connection open while it runs', () => {
     const hook = readFileSync(new URL('../../../.githooks/pre-push', import.meta.url), 'utf8');
-    // Anchored to real command lines for the same reason as the assertions
-    // above: this hook carries prose naming both steps, and an unanchored
-    // search cannot tell a live command from the comment explaining why it
-    // is no longer here.
+    // Anchored to command lines: the hook's comments name these steps too.
     expect(hook).not.toMatch(/^\s*(PGOPS_TEST_PG_VERSION=\S+ )?npm run test:int\s*$/m);
     expect(hook).not.toMatch(/^\s*\.\/scripts\/gate\.sh\s*$/m);
     expect(hook).not.toMatch(/^\s*\.\/scripts\/image-smoke\.sh\s*$/m);
   });
 
   /**
-   * The other half: a fast hook is only a gate if it still refuses an
-   * ungated push. It reads the ref lines git writes to its stdin and
-   * requires a receipt for each SHA being pushed — so the gate binds to the
-   * exact commit, and committing after gating invalidates it.
+   * Catches a fast hook that no longer refuses an ungated push. It requires a
+   * receipt for each SHA pushed, so committing after gating invalidates it.
    */
   it('verifies every pushed sha against a gate receipt', () => {
     const hook = readFileSync(new URL('../../../.githooks/pre-push', import.meta.url), 'utf8');
@@ -316,10 +191,8 @@ describe('the package boundary', () => {
   });
 
   /**
-   * The steps MOVED; they were not dropped. Without this, deleting the
-   * integration suite outright would satisfy the "pre-push is fast" test
-   * above and lose the gate entirely — the exact shape of vacuous test the
-   * pre-commit assertions above are anchored against.
+   * Catches the slow steps being dropped rather than moved: deleting them
+   * outright would satisfy the "pre-push is fast" test above.
    */
   it('runs the integration suite and the image smoke test from the gate script', () => {
     const gate = readFileSync(new URL('../../../scripts/gate.sh', import.meta.url), 'utf8');
@@ -328,18 +201,9 @@ describe('the package boundary', () => {
   });
 
   /**
-   * ONE VERSION, IN FOUR PLACES, HELD BY NOTHING UNTIL NOW. Step 1 of
-   * CONTRIBUTING's release procedure is to bump `version` in the root
-   * package.json, packages/checks' and apps/web's "together", and the README's
-   * status line is a fourth copy of the same fact — the one a release forgets,
-   * because it is prose rather than a manifest and no build reads it.
-   *
-   * Three of four is a silent state. The image reports one version, the
-   * package another, and the README a third; nothing throws, and the first
-   * person to notice is whoever is trying to work out which build they are
-   * running during an incident. Bumping four files by hand is the whole of
-   * the release's mechanical work, so it is the part that most wants a test
-   * rather than a checklist item.
+   * Catches a release that bumps some of the four copies of the version and
+   * not the rest: three manifests and the README's status line, which no
+   * build reads. A mismatch throws nowhere.
    */
   it('names one version in every manifest and in the README', () => {
     const version = (path: string): string =>
@@ -361,12 +225,7 @@ describe('the package boundary', () => {
     expect(gate).toMatch(/pgops-gate-receipt/);
   });
 
-  /**
-   * The other half of M1: the build step is only worth having if the paths
-   * it produces are the paths package.json advertises. A `build` script
-   * whose `outDir` drifts from `main`/`exports` would leave the same hole
-   * with a green CI step sitting on top of it.
-   */
+  /** Catches `outDir` drifting from the paths package.json advertises. */
   it('points main/types/exports at the directory tsconfig actually emits to', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
     const tsconfig = JSON.parse(readFileSync(new URL('../tsconfig.json', import.meta.url), 'utf8'));
@@ -380,23 +239,31 @@ describe('the package boundary', () => {
 });
 
 /**
- * The pre-push hook, RUN rather than read. Every other assertion about it in
- * this file greps its source, which is the right shape for "the slow steps are
- * not in here" but cannot answer "does a push of X succeed" — and the bug
- * below passed every source grep in the file.
+ * The pre-push hook, run rather than read: a source grep cannot answer "does
+ * a push of X succeed". For refs/tags/* git feeds the hook the tag object's
+ * sha, while the receipt holds commits, so a hook comparing them directly
+ * refuses every annotated tag.
  *
- * `git push origin v2.5.0` was refused for a commit that had just passed the
- * full four-version gate. For refs/tags/* git feeds the hook the TAG OBJECT's
- * sha; the receipt holds commits, so the comparison could never match, and no
- * annotated tag was pushable. Step 4 of CONTRIBUTING's release procedure is
- * "Tag vX.Y.Z", so the documented way to cut a release required the
- * --no-verify this hook exists to make unnecessary.
- *
- * The fixture is a throwaway repository rather than this one: these assertions
- * need a commit that is NOT gated and one that is already published, and
- * manufacturing either here would mean writing to this repository's own
- * receipt.
+ * A throwaway repository, because the tests need an ungated commit and a
+ * published one, and making either here would write to this repository's
+ * own receipt.
  */
+/**
+ * What migrate() tells an operator whose store a newer pgops has migrated
+ * must be true of the migrations that exist: a rolling deploy with an older
+ * replica loses whatever a dropping migration took.
+ */
+describe('the store migrations', () => {
+  it('are not called additive while one of them drops a table', () => {
+    const dir = join(SRC, 'store', 'migrations');
+    const drops = readdirSync(dir).filter((f) => /\bDROP TABLE\b/.test(readFileSync(join(dir, f), 'utf8')));
+    expect(drops).toEqual(['008-drop-check-results.ts']);
+    const schema = readFileSync(join(SRC, 'store', 'schema.ts'), 'utf8');
+    expect(schema.replace(/\n\s*\/\/ ?/g, ' ')).not.toMatch(/migrations are additive/);
+    expect(schema).toContain('008 drops pgops.check_results');
+  });
+});
+
 describe('the pre-push hook, against a throwaway repository', () => {
   const HOOK = new URL('../../../.githooks/pre-push', import.meta.url).pathname;
   const ZERO = '0'.repeat(40);
@@ -406,9 +273,8 @@ describe('the pre-push hook, against a throwaway repository', () => {
 
   /**
    * Three commits: one already on the remote, one named by the receipt, one
-   * neither. `update-ref` rather than a second repository and a real push —
-   * `--remotes=origin` reads refs/remotes/origin/*, and that is the whole of
-   * what the hook asks about.
+   * neither. `update-ref` stands in for a real push: the hook only reads
+   * refs/remotes/origin/*.
    */
   function fixture() {
     const dir = mkdtempSync(join(tmpdir(), 'pgops-pre-push-'));
@@ -441,8 +307,7 @@ describe('the pre-push hook, against a throwaway repository', () => {
     const { dir, gated } = fixture();
     git(dir, 'tag', '-a', 'v1.0.0', '-m', 'v1.0.0', gated);
     const tagObject = git(dir, 'rev-parse', 'v1.0.0');
-    // The bug, stated as a precondition: the sha git hands the hook is not
-    // the commit, so the receipt cannot contain it.
+    // Precondition: the sha git hands the hook is not the commit.
     expect(tagObject).not.toBe(gated);
 
     const r = push(dir, [`refs/tags/v1.0.0 ${tagObject} refs/tags/v1.0.0 ${ZERO}`]);
@@ -459,11 +324,7 @@ describe('the pre-push hook, against a throwaway repository', () => {
     expect(r.status).toBe(0);
   });
 
-  /**
-   * The guarantee the hook exists for, and the half most at risk from the
-   * change above: a commit made after the gate ran is not published and not in
-   * the receipt, so it is still refused.
-   */
+  /** A commit made after the gate ran is neither published nor in the receipt. */
   it('still refuses a commit that is neither gated nor already published', () => {
     const { dir, ungated } = fixture();
     const r = push(dir, [`refs/heads/main ${ungated} refs/heads/main ${ZERO}`]);

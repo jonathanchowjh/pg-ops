@@ -39,15 +39,10 @@ describe('historicalQueryStats', () => {
 });
 
 /**
- * The bound that spec §5.1 requires, proved against a real store rather than
- * against `readQueryStats` in isolation.
- *
- * store.int.test.ts already covers `readQueryStats`'s own handling of
- * `maxSnapshots`; what that cannot see — and did not — is whether the series
- * the queries page actually calls ever hands them over. It did not, so the
- * page's `maxSnapshots: 2` was inert and every 5-second poll read the whole
- * window. Three captures is the smallest number that tells the two apart: an
- * unbounded read yields two intervals per shape, a bounded one exactly one.
+ * store.int.test.ts covers `readQueryStats`'s handling of `maxSnapshots`;
+ * this proves the series hands the option over. Three captures is the
+ * smallest number that tells the two apart: an unbounded read yields two
+ * intervals per shape, a bounded one exactly one.
  */
 describe('historicalQueryStats — the read is bounded', () => {
   it('keeps only the N most recent captures the caller asked for', async () => {
@@ -63,14 +58,9 @@ describe('historicalQueryStats — the read is bounded', () => {
         await captureOnce(withStore, 'prod');
       }
 
-      // Built AFTER the captures, and with margin on both ends. `captured_at`
-      // is stamped by the STORE's clock, not this process's — that is
-      // capture.ts's deliberate rule, so that several replicas cannot sort
-      // their snapshots out of order — which means a host-side `to` of
-      // "now" can legitimately sit BEHIND a snapshot the store has just
-      // written, and the window then excludes every row. A first draft of
-      // this test built the range before the loop and read back nothing at
-      // all.
+      // Built after the captures, with margin on both ends. `captured_at` is
+      // stamped by the store's clock, so a host-side `to` of "now" can sit
+      // behind a snapshot the store has just written.
       const range = {
         from: new Date(Date.now() - 3_600_000),
         to: new Date(Date.now() + 3_600_000),
@@ -80,20 +70,18 @@ describe('historicalQueryStats — the read is bounded', () => {
         { databaseName: 'prod' });
       expect(all.ok).toBe(true);
       // Unbounded: three snapshots difference into more than one interval.
-      // `> 1` rather than `=== 2` so the assertion states the property under
-      // test — the bound reduces what is read — instead of pinning a count
-      // that any extra snapshot in the window would move.
+      // `> 1` rather than `=== 2` so an extra snapshot in the window does not
+      // move the assertion.
       expect(all.ok && all.points.some((s) => s.intervals.length > 1)).toBe(true);
 
       const bounded = await runSeries(withStore, SERIES.historicalQueryStats, range,
         { databaseName: 'prod', maxSnapshots: 2 });
       expect(bounded.ok).toBe(true);
       expect(bounded.ok && bounded.points.length).toBeGreaterThan(0);
-      // Two snapshots can only ever difference into one interval. Before the
-      // fix this read the same three snapshots the unbounded call did.
+      // Two snapshots can only difference into one interval.
       expect(bounded.ok && bounded.points.every((s) => s.intervals.length === 1)).toBe(true);
 
-      // ...and the shape filter, on the same call the page makes.
+      // The shape filter, on the same call the page makes.
       const one = bounded.ok ? bounded.points[0]!.queryid : '';
       const single = await runSeries(withStore, SERIES.historicalQueryStats, range,
         { databaseName: 'prod', maxSnapshots: 2, queryids: [one] });
@@ -103,9 +91,9 @@ describe('historicalQueryStats — the read is bounded', () => {
 });
 
 /**
- * The space series through `runSeries`, which is the only way a page reaches
- * them. `read` is where `ctx.store!` and the `maxPoints` hand-off live, and
- * neither is visible from a mapper test.
+ * The space series through `runSeries`, the way a page reaches them. `read`
+ * holds `ctx.store!` and the `maxPoints` hand-off, which mapper tests cannot
+ * see.
  */
 describe('the space series', () => {
   it('report missing-store when no store is configured', async () => {
@@ -120,14 +108,6 @@ describe('the space series', () => {
     });
   });
 
-  /**
-   * §5.1's bound, proved to reach the reader rather than assumed from the
-   * option being present in the type. Dropping `maxPoints` on the way through
-   * `relationSpace.read` is invisible to every mapper test and to
-   * `readRelationSpace`'s own tests, which call the reader directly -- the
-   * series is the only layer that can lose it, so it is the layer that has to
-   * be asked.
-   */
   it('bound relationSpace to the most recent maxPoints captures', async () => {
     await withPostgres(async (ctx, pool) => {
       await migrate(pool);
@@ -184,7 +164,7 @@ describe('queryShapeHistory', () => {
       const withStore = { ...ctx, store: pool };
 
       // Two captures with measurable work between them, so the counters climb
-      // and no interval is dropped as a discontinuity (§3.5).
+      // and no interval is dropped as a discontinuity.
       await captureOnce(withStore, 'prod');
       for (let i = 0; i < 20; i += 1) await pool.query('SELECT 1');
       await captureOnce(withStore, 'prod');
@@ -195,12 +175,9 @@ describe('queryShapeHistory', () => {
       expect(all.ok).toBe(true);
       if (!all.ok) return;
       const shapes = all.points.filter((p) => p.intervals.length > 0);
-      // EVERY shape, not the first one with intervals. A reader that dropped
-      // the queryid filter returns whichever shape sorts first -- which is
-      // exactly the shape a `find(...)` picks, so asserting on one target
-      // passes against a filter that is not there at all. Asking for each
-      // shape in turn means at least one request must get back somebody
-      // else's intervals.
+      // Every shape, not the first one with intervals: a reader that dropped
+      // the queryid filter returns whichever shape sorts first, so asserting
+      // on one target could pass with no filter at all.
       expect(shapes.length).toBeGreaterThan(1);
 
       for (const shape of shapes) {
@@ -221,9 +198,7 @@ describe('queryShapeHistory', () => {
         { from: new Date('2026-09-01T00:00:00Z'), to: new Date('2026-09-02T00:00:00Z') },
         { databaseName: 'prod', queryid: '404' });
 
-      // ok:true with no points, NOT ok:false. "We looked and there is no
-      // history" is a reading; "we could not look" is a failure, and a page
-      // that confuses them tells an operator their store is broken.
+      // ok:true with no points: "no history" is a reading, not a failure.
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.points).toEqual([]);

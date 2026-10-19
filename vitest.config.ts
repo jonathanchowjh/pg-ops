@@ -39,10 +39,9 @@ export default defineConfig({
           // Every integration file shares ONE Postgres container (see
           // global-setup.ts) but gets its own database — and pg_stat_activity,
           // pg_locks, and the lock manager are cluster-wide, not scoped to a
-          // database. Checks that read them (sessions, locks, blocked,
-          // longRunning, and whatever later tasks add) correctly do NOT filter
-          // by datname — an operator cares about the whole instance, since
-          // max_connections and the lock manager are cluster-wide too. Left
+          // database. Checks that read them (locks, blocked, longRunning)
+          // do NOT filter by datname; `sessions` does, since the tree places
+          // a session on tables only its own database can name. Left
           // parallel, sibling files' own short-lived fixtures (a blocked
           // session, a sleeping backend) become visible to each other's
           // assertions and race. Do not remove this to speed CI up: it does not

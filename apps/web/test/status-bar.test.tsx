@@ -23,11 +23,9 @@ describe('StatusBar', () => {
   });
 
   /**
-   * The pair that matters. A standby is not a fault, so it gets no verdict —
-   * but a terminate button sits two lines below this, and "you are on a
-   * replica" changes what pressing it means. The negative case is asserted
-   * beside it because a badge that renders unconditionally would pass the
-   * positive test alone.
+   * A standby is not a fault, but "you are on a replica" changes what the
+   * terminate button below means. The negative case is asserted because a
+   * badge that renders unconditionally would pass the positive one alone.
    */
   it('flags a replica, and stays quiet on a primary', async () => {
     const replica = await render(<StatusBar result={ok({ replica: true })} />);
@@ -40,12 +38,9 @@ describe('StatusBar', () => {
   });
 
   /**
-   * The regression that matters, and it is guarded by StatusBar not having
-   * changed at all. #56 renders in a disclosure on /cleanup, not here: this
-   * component sits in the layout shared by the four incident pages, two
-   * lines above a button that terminates backends, and settings are twenty-one
-   * numbers that would bury the one line saying WHICH server that button acts
-   * on. If a future change threads settings through here, this fails.
+   * Settings render in a disclosure on /cleanup, not here: this component is
+   * in the layout shared by the incident pages, and settings would bury the
+   * line saying which server the terminate button acts on.
    */
   it('states the server facts on one line and nothing else', async () => {
     const r = await render(<StatusBar result={ok()} />);
@@ -61,12 +56,7 @@ describe('StatusBar', () => {
     r.unmount();
   });
 
-  /**
-   * The invariant this whole console is built on, at its smallest scale:
-   * "we could not look" must not render as "we looked and it is fine", and
-   * must not render as its opposite either. An unknown SSL status is neither
-   * `SSL` nor `no SSL`.
-   */
+  /** "We could not look" is neither `SSL` nor `no SSL`. */
   it('distinguishes an unknown SSL status from an unencrypted one', async () => {
     const r = await render(<StatusBar result={ok({ ssl: null })} />);
     expect(r.text()).toMatch(/ssl unknown/i);
@@ -75,12 +65,8 @@ describe('StatusBar', () => {
   });
 
   /**
-   * A header that silently omits itself on failure reads as a header that
-   * had nothing to add. The check cannot fail on its own — it is a scalar
-   * SELECT — so reaching here means the database was unreachable, which the
-   * panels below will also say. It still says it: this line is the one that
-   * claims which server we are on, and a claim that quietly disappears is
-   * worse than one that admits it is missing.
+   * The check is a scalar SELECT, so failing means the database was
+   * unreachable. The header says so rather than silently omitting itself.
    */
   it('admits when it could not establish the identity at all', async () => {
     const r = await render(

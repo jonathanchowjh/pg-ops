@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  formatAge, formatBytes, formatCount, formatDelta, formatDuration, formatMillis, formatUnit, formatUtc,
-  planLines, plural,
+  formatBytes, formatCompact, formatCount, formatDuration, formatMillis, formatRate, formatUnit, formatUtc, plural,
 } from '@/lib/format';
 
 describe('formatDuration', () => {
@@ -17,23 +16,17 @@ describe('formatDuration', () => {
   it('renders hours and minutes, dropping seconds', () => {
     expect(formatDuration(100_366)).toBe('27h 52m');
   });
-  /** A negative age means clock skew between client and server, not a bug worth crashing on. */
+  /** A negative age means clock skew between client and server. */
   it('clamps a negative duration to 0s', () => {
     expect(formatDuration(-5)).toBe('0s');
   });
 });
 
 describe('formatMillis', () => {
-  /**
-   * The defect, stated as a test. The Queries page rendered these through
-   * `formatDuration(ms / 1000)`, which floors to whole seconds — so a 25.6ms
-   * mean, the ordinary magnitude for a statement on this page, printed "0s".
-   * Every sub-second row's mean and most of their totals were that "0s", on
-   * the two columns the page exists to rank by.
-   */
+  /** `formatDuration` floors to whole seconds, so an ordinary 25.6ms mean would print "0s". */
   it('keeps a sub-second query mean readable instead of flooring it to 0s', () => {
     expect(formatMillis(25.6)).toBe('25.6ms');
-    expect(formatDuration(25.6 / 1000)).toBe('0s'); // what it used to render
+    expect(formatDuration(25.6 / 1000)).toBe('0s'); // what formatDuration would print
   });
 
   it('drops the decimal once the millisecond count is large enough not to need it', () => {
@@ -60,9 +53,8 @@ describe('formatMillis', () => {
 
 describe('formatBytes', () => {
   it('uses binary units, matching what Postgres reports and pg_size_pretty prints', () => {
-    // 1 GiB, which is what `max_slot_wal_keep_size = 1GB` actually means.
-    // Decimal units would render this 1.1 GB and invite a 7% mis-comparison
-    // against the setting the operator is about to change.
+    // 1 GiB is what `max_slot_wal_keep_size = 1GB` means; decimal units
+    // would render it 1.1 GB.
     expect(formatBytes(1024 ** 3)).toBe('1 GB');
     expect(formatBytes(1536)).toBe('1.5 KB');
   });
@@ -78,58 +70,19 @@ describe('formatBytes', () => {
   });
 
   it('renders an em dash for an absent or non-finite reading', () => {
-    // `retainedBytes` is nullable: a slot on a server that will not report it
-    // has no size, which is not the same as a slot retaining nothing.
+    // `retainedBytes` is nullable: unreported is not the same as retaining nothing.
     expect(formatBytes(null)).toBe('—');
     expect(formatBytes(Number.NaN)).toBe('—');
   });
 });
 
-describe('formatDelta', () => {
-  it('carries the sign of a byte delta, which formatBytes clamps away', () => {
-    expect(formatDelta(2_147_483_648)).toBe('+2 GB');
-    expect(formatDelta(-2_147_483_648)).toBe('\u22122 GB');
-    expect(formatDelta(0)).toBe('0 B');
-    // The clamp this exists to route around.
-    expect(formatBytes(-2_147_483_648)).toBe('0 B');
-  });
-});
-
-describe('planLines', () => {
-  it('renders a plan the way EXPLAIN text does', () => {
-    expect(planLines({
-      'Node Type': 'Limit', 'Startup Cost': 1, 'Total Cost': 2.5, 'Plan Rows': 5, 'Plan Width': 33,
-      Plans: [{
-        'Node Type': 'Index Scan', 'Index Name': 'orders_pkey', 'Relation Name': 'orders', Schema: 'public',
-        Alias: 'o', 'Startup Cost': 0.29, 'Total Cost': 8.3, 'Plan Rows': 1, 'Plan Width': 33,
-        'Index Cond': '(o.id = $1)', Filter: '(o.status = $2)',
-        Plans: [{ 'Node Type': 'Result' }],
-      }],
-    })).toEqual([
-      'Limit  (cost=1.00..2.50 rows=5 width=33)',
-      '  ->  Index Scan using orders_pkey on public.orders o  (cost=0.29..8.30 rows=1 width=33)',
-      '        Index Cond: (o.id = $1)',
-      '        Filter: (o.status = $2)',
-      '        ->  Result',
-    ]);
-  });
-  it('joins array-valued details, and omits an alias equal to the relation', () => {
-    expect(planLines({ 'Node Type': 'Seq Scan', 'Relation Name': 't', Schema: 's', Alias: 't', 'Sort Key': ['a DESC', 'b'] }))
-      .toEqual(['Seq Scan on s.t', '  Sort Key: a DESC, b']);
-  });
-});
-
-/**
- * `0 slot(s)` is how a program writes when it has not decided what it is
- * saying, and this console is read by someone who has just been woken up.
- */
 describe('plural', () => {
   it('agrees with the count', () => {
     expect(plural(1, 'root blocker')).toBe('1 root blocker');
     expect(plural(2, 'root blocker')).toBe('2 root blockers');
   });
 
-  /** English's rule, not a special case: "0 sequences", never "0 sequence". */
+  /** "0 sequences", never "0 sequence". */
   it('gives zero the plural', () => {
     expect(plural(0, 'sequence')).toBe('0 sequences');
   });
@@ -141,37 +94,6 @@ describe('plural', () => {
 
   it('groups the number, like every other count on the page', () => {
     expect(plural(12_000, 'session')).toBe('12,000 sessions');
-  });
-});
-
-/**
- * A second duration formatter, for the question `formatDuration` is not built
- * for: "how long since this table was last vacuumed", which is routinely days
- * or weeks. `formatDuration` tops out in hours on purpose — `27h 52m` is the
- * right answer for a long transaction and is pinned above — and the same rule
- * renders a fortnight as `336h 0m`.
- */
-describe('formatAge', () => {
-  it('uses one unit, so a column of them compares at a glance', () => {
-    expect(formatAge(45)).toBe('45s');
-    expect(formatAge(125)).toBe('2m');
-    expect(formatAge(3 * 3600 + 40 * 60)).toBe('3h');
-  });
-
-  /**
-   * Two days, not one, before days take over: "36h" is a more useful answer
-   * than "1d" for a vacuum that ran yesterday evening.
-   */
-  it('keeps hours until they stop being readable', () => {
-    expect(formatAge(36 * 3600)).toBe('36h');
-    expect(formatAge(47 * 3600)).toBe('47h');
-    expect(formatAge(48 * 3600)).toBe('2d');
-    expect(formatAge(14 * 86_400)).toBe('14d');
-  });
-
-  /** Clock skew between the server and the statistics it read. */
-  it('clamps a negative age to 0s', () => {
-    expect(formatAge(-5)).toBe('0s');
   });
 });
 
@@ -189,9 +111,8 @@ describe('formatUnit', () => {
   });
 
   /**
-   * Found on screen: a quiet database's average active sessions is a few
-   * thousandths, and its axis read "0.00" at the top and "0.00" at the
-   * bottom. A figure that small keeps the digits that distinguish it.
+   * A quiet database's average active sessions is a few thousandths; at the
+   * usual precision both ends of its axis would read "0.00".
    */
   it('keeps the digits of a figure too small for the usual precision', () => {
     expect(formatUnit('sessions', 0.004)).toBe('0.004');
@@ -204,5 +125,24 @@ describe('formatUnit', () => {
 describe('formatUtc', () => {
   it('prints month, day, hour and minute in UTC', () => {
     expect(formatUtc(Date.parse('2026-10-07T02:14:59Z'))).toBe('10-07 02:14');
+  });
+});
+
+describe('formatRate and formatCompact', () => {
+  it('keeps a small rate from printing as zero', () => {
+    expect(formatRate(0)).toBe('0');
+    expect(formatRate(0.003)).toBe('0.003');
+    expect(formatRate(1e-7)).toBe('0.0000001');
+    expect(formatRate(0.0096)).toBe('0.01');
+    expect(formatRate(0.44)).toBe('0.4');
+    expect(formatRate(12.6)).toBe('13');
+    expect(formatRate(1234)).toBe('1.2K');
+  });
+
+  it('prints a large count in three characters or so', () => {
+    expect(formatCompact(950)).toBe('950');
+    expect(formatCompact(48_000_000)).toBe('48M');
+    expect(formatUnit('compact', 1500)).toBe('1.5K');
+    expect(formatUnit('rate', 0.003)).toBe('0.003/s');
   });
 });

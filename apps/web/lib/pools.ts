@@ -1,8 +1,17 @@
 import { Pool, type PoolClient } from 'pg';
-import type { CheckContext } from '@pgops/checks';
+import { PGOPS_APP, messageOf, ownSql, type CheckContext } from '@pgops/checks';
 // Extensionless — see the comment on the equivalent import in lib/check.ts.
-import { APP_NAME, readDatabases, type DatabaseConfig } from './config';
-import { storePool } from './store';
+import { readDatabases, storeUrl, type DatabaseConfig } from './config';
+
+/**
+ * Every pool this console holds: one per monitored database and one for the
+ * store.
+ *
+ * On `globalThis`, not module-level: Next compiles this file into the
+ * instrumentation bundle, the page bundle and each route's, and module-level
+ * maps would be one set of pools per bundle, each up to its `max`, on the
+ * database pgops is diagnosing. Opening a pool per request would be worse.
+ */
 
 export class UnknownDatabaseError extends Error {
   constructor(name: string, known: string[]) {
@@ -12,81 +21,47 @@ export class UnknownDatabaseError extends Error {
 }
 
 /**
- * The ONE piece of module-level mutable state in this app, and deliberately so
- * (see the plan's note to reviewers). `packages/checks` forbids it because a
- * library that reaches for a pool can only ever address one database. A web
- * PROCESS is the opposite case: opening a pool per request would exhaust
- * max_connections on the database it is diagnosing, at exactly the moment that
- * matters. Keyed by connection URL rather than by name so that two names
- * pointing at one database share a pool, and so a renamed database does not
- * strand its pool.
+ * What this process holds for one monitored database.
+ *
+ * `ownTotal` counts the statements issued since the process started, at the
+ * client, where a statement leaves the process. Per process, so a second
+ * replica's polling is invisible. The health tick takes its own window over
+ * it.
  */
-const POOLS = new Map<string, Pool>();
-const VERSIONS = new Map<string, number>();
+interface Target {
+  pool: Pool;
+  /** Probed on first use; cannot change without a restart, which drops the pool. */
+  serverVersion?: number;
+  ownTotal: number;
+}
 
-/**
- * B11: statements this process has issued against each database since the
- * count was last read, keyed by connection URL.
- *
- * Counted HERE, at the pool, because this is where a statement actually
- * leaves the process — not in `runCheckFor`, which would miss the version
- * probe below and anything a page runs outside a check, and so would
- * under-report the console's own share. Under-reporting it is the one error
- * this count exists to prevent: the number is on screen precisely so an
- * operator does not read pgops's polling as the application's load.
- *
- * Keyed by URL, as POOLS is, and NOT by name as rates.ts's own Map is: a
- * commit counter is a fact about a database, so two names pointing at one
- * database share the count the same way they share the pool and share the
- * `pg_stat_database` row these numbers are compared against.
- *
- * Per process, like every other rate here. A second replica's polling is
- * invisible to this one, which is exactly why `Throughput` STATES this
- * number beside the rate instead of subtracting it from it.
- */
-const OWN = new Map<string, number>();
+interface Held {
+  /**
+   * Keyed by connection URL rather than by name, so two names pointing at
+   * one database share a pool and the `pg_stat_database` row the counts are
+   * compared against, and a renamed database does not strand its pool.
+   */
+  targets: Map<string, Target>;
+  /** Replaced when PGOPS_STORE_URL changes, so it is retired, not left open. */
+  store: { pool: Pool; url: string } | null;
+}
+const KEY = Symbol.for('pgops.pools');
+const HELD: Held = ((globalThis as { [KEY]?: Held })[KEY] ??= { targets: new Map(), store: null });
 
-/**
- * The same count as OWN, never reset. OWN is read-and-reset by the
- * Throughput line; the health tick needs its own window over the same
- * statements, and two readers cannot share one read-and-reset counter
- * without each stealing from the other.
- */
-const OWN_TOTAL = new Map<string, number>();
+/** The state for a configured name, if it resolves and has been contacted. Never throws. */
+function targetNamed(name: string): Target | undefined {
+  try {
+    const url = configured().find((d) => d.name === name)?.url;
+    return url === undefined ? undefined : HELD.targets.get(url);
+  } catch {
+    return undefined;
+  }
+}
 
 /** Statements this process has sent the named database since it started. */
 export function ownStatementsTotal(name: string): number {
-  let url: string | undefined;
-  try {
-    url = configured().find((d) => d.name === name)?.url;
-  } catch {
-    return 0;
-  }
-  return url === undefined ? 0 : OWN_TOTAL.get(url) ?? 0;
+  return targetNamed(name)?.ownTotal ?? 0;
 }
-
-/**
- * How many statements this process has issued against `name` since the last
- * call, resetting the count. Read once per sample by `ratesFor`, so the
- * count always covers the same window as the rate it is divided into.
- *
- * Never throws. It resolves a name through the environment, which can fail
- * on a misconfigured deployment, and a throughput line is not worth taking a
- * page down for — an unresolvable name has issued nothing.
- */
-export function ownStatementsSince(name: string): number {
-  let url: string | undefined;
-  try {
-    url = configured().find((d) => d.name === name)?.url;
-  } catch {
-    return 0;
-  }
-  if (url === undefined) return 0;
-  const n = OWN.get(url) ?? 0;
-  OWN.set(url, 0);
-  return n;
-}
-
 
 function configured(): DatabaseConfig[] {
   return readDatabases(process.env);
@@ -96,97 +71,56 @@ export function databaseNames(): string[] {
   return configured().map((d) => d.name);
 }
 
-/** pg hands the same client object out again and again; each is wrapped once. */
-const COUNTED = new WeakSet<object>();
+/** The longest any statement to a monitored database runs, and waits on a lock, unless its check says otherwise. */
+export const TARGET_STATEMENT_MS = 15_000;
+export const TARGET_LOCK_MS = 1_000;
+
 const TRANSACTION_CONTROL = /^\s*(BEGIN|COMMIT|ROLLBACK|SET LOCAL)\b/i;
 
 /**
- * Count statements sent on a checked-out client into OWN_TOTAL.
- *
- * `pool.query` is counted where it is wrapped below, but the health tick and
- * every check with a timeout run on a client from `connect()`, and those
- * were invisible: the Health page's "statements pgops itself sent" read zero
- * beside a commit rate that was pgops's own. BEGIN, COMMIT, ROLLBACK and
- * SET LOCAL are not counted; they are the envelope, not a statement.
- *
- * Only OWN_TOTAL. The Throughput line's counter keeps the meaning its own
- * tests pin.
+ * Count every statement this process sends the database into `ownTotal`,
+ * at the client, where both `pool.query` and a checked-out client end up.
+ * BEGIN, COMMIT, ROLLBACK and SET LOCAL are not counted; they are the
+ * envelope, not a statement.
  */
-function countClientStatements(pool: Pool, url: string): void {
-  const count = (client: PoolClient): PoolClient => {
-    if (COUNTED.has(client)) return client;
-    COUNTED.add(client);
-    const inner = client.query.bind(client) as (...a: unknown[]) => unknown;
-    client.query = function counted(...a: unknown[]) {
-      const first = a[0];
-      const text = typeof first === 'string' ? first : (first as { text?: unknown } | null)?.text;
-      if (typeof text === 'string' && !TRANSACTION_CONTROL.test(text)) {
-        OWN_TOTAL.set(url, (OWN_TOTAL.get(url) ?? 0) + 1);
-      }
-      return inner(...a);
-    } as typeof client.query;
-    return client;
-  };
-  const innerConnect = pool.connect.bind(pool) as (...args: unknown[]) => unknown;
-  // `pool.query` itself calls the CALLBACK form of connect (the trap
-  // lib/store.ts documents). That path is passed through untouched: its
-  // statement was already counted by the pool.query wrapper.
-  pool.connect = function countedConnect(...args: unknown[]) {
-    if (typeof args[0] === 'function') return innerConnect(...args);
-    return (innerConnect(...args) as Promise<PoolClient>).then(count);
-  } as typeof pool.connect;
+function countStatements(target: Target): void {
+  onEveryStatement(target.pool, (args) => {
+    const first = args[0];
+    const text = typeof first === 'string' ? first : (first as { text?: unknown } | null)?.text;
+    if (typeof text === 'string' && !TRANSACTION_CONTROL.test(text)) target.ownTotal += 1;
+    return args;
+  });
 }
 
-function poolFor(db: DatabaseConfig): Pool {
-  const existing = POOLS.get(db.url);
+function targetFor(db: DatabaseConfig): Target {
+  const existing = HELD.targets.get(db.url);
   if (existing) return existing;
   const pool = new Pool({
     connectionString: db.url,
-    // So pgops can recognise its own backends, which it could not do at all.
+    // So pgops can recognise its own backends on the Sessions page.
     //
-    // Without this, every pool opened here reported an EMPTY application_name,
-    // and the Sessions page showed pgops's own ~19 idle connections
-    // interleaved with the application's — each with its own Terminate link,
-    // offering to kill the console. Three real sessions in an incident were
-    // three rows out of twenty-two.
-    //
-    // Verified against PG 17, not assumed: `pg`'s ConnectionParameters
-    // Object.assigns the PARSED connection string over the explicit config,
-    // so a URL carrying `?application_name=` wins over this line (and over
-    // `fallback_application_name`, which behaves identically here). That is
-    // the right precedence — an operator who named their connections meant
-    // it — and the consequence is stated where it lands: the Sessions fold
-    // keys on APP_NAME, so on such a deployment it matches nothing and every
-    // row stays visible. It over-shows; it never hides a real session.
-    application_name: APP_NAME,
-    // A diagnostic tool must not be the reason connections run out. Ten is
-    // ample for a console rendering a handful of checks per page view.
+    // `pg`'s ConnectionParameters assigns the parsed connection string over
+    // the explicit config, so a URL carrying `?application_name=` wins over
+    // this line (and over `fallback_application_name`). The checks know
+    // pgops by PGOPS_APP exactly, so on such a deployment its own sessions
+    // show as anyone's. It over-shows; it never hides a real session.
+    application_name: PGOPS_APP,
+    // A diagnostic tool must not be the reason connections run out.
     max: 10,
     // Fail visibly rather than hanging a page render forever.
     connectionTimeoutMillis: 5_000,
+    // A backstop for every statement no check bounds itself, and a lock it
+    // will not wait behind: this pool is aimed at a database that may be
+    // the one in trouble. A check's own `SET LOCAL` overrides both.
+    statement_timeout: TARGET_STATEMENT_MS, lock_timeout: TARGET_LOCK_MS,
   });
   // A pool-level error with no listener is an unhandled 'error' event, which
-  // terminates the Node process. A console that dies because an idle backend
-  // was terminated server-side is worse than one that renders a failed check.
+  // terminates the Node process.
   pool.on('error', () => {});
-  // B11. `pg` emits no per-query event, so the count is taken by wrapping
-  // `query` once, here, at the moment the pool is created — every check's
-  // statement goes through it (run.ts reaches for `ctx.target.query`), as
-  // does the version probe below.
-  //
-  // A client checked out with `pool.connect()` is deliberately NOT counted:
-  // that path is explain and terminate, which an operator ran on purpose and
-  // which happen once, where this number exists to explain a rate that
-  // repeats every five seconds.
-  const inner = pool.query.bind(pool) as (...args: unknown[]) => unknown;
-  pool.query = function wrapped(...args: unknown[]) {
-    OWN.set(db.url, (OWN.get(db.url) ?? 0) + 1);
-    OWN_TOTAL.set(db.url, (OWN_TOTAL.get(db.url) ?? 0) + 1);
-    return inner(...args);
-  } as typeof pool.query;
-  countClientStatements(pool, db.url);
-  POOLS.set(db.url, pool);
-  return pool;
+  const target: Target = { pool, ownTotal: 0 };
+  countStatements(target);
+  HELD.targets.set(db.url, target);
+  return target;
 }
 
 export async function contextFor(name: string): Promise<CheckContext> {
@@ -194,19 +128,144 @@ export async function contextFor(name: string): Promise<CheckContext> {
   const db = dbs.find((d) => d.name === name);
   if (!db) throw new UnknownDatabaseError(name, dbs.map((d) => d.name));
 
-  const target = poolFor(db);
+  const found = targetFor(db);
+  const target = found.pool;
 
-  // Probed once per database, then cached: server_version_num cannot change
-  // without the server restarting, and a restart drops the pool anyway.
-  let serverVersion = VERSIONS.get(db.url);
-  if (serverVersion === undefined) {
+  if (found.serverVersion === undefined) {
     const { rows } = await target.query<{ server_version_num: string }>('SHOW server_version_num');
-    serverVersion = Number(rows[0]!.server_version_num);
-    VERSIONS.set(db.url, serverVersion);
+    found.serverVersion = Number(rows[0]!.server_version_num);
   }
+  const serverVersion = found.serverVersion;
 
   // `store` is undefined, not null, when unset: CheckContext types it as
   // optional, and runSeries tests presence rather than nullness.
   const store = storePool(process.env) ?? undefined;
   return { target, store, serverVersion };
+}
+
+/** What any one store statement may take, and wait on a lock. */
+export const STORE_STATEMENT_MS = 10_000;
+export const STORE_LOCK_MS = 2_000;
+
+/**
+ * Retire the cached pool, if any. Best-effort: `.end()` rejecting must not
+ * block building a replacement.
+ *
+ * `end()` stops the pool handing out new clients, closes idle ones
+ * immediately, and closes the rest as they are released. It does not cancel
+ * a query already in flight.
+ */
+function retire(): void {
+  HELD.store?.pool.end().catch(() => {});
+  HELD.store = null;
+}
+
+export function storePool(env: Record<string, string | undefined>): Pool | null {
+  const url = storeUrl(env);
+  if (url === null) {
+    // Unsetting PGOPS_STORE_URL evicts too, or the cached pool's sockets
+    // leak.
+    retire();
+    return null;
+  }
+  if (HELD.store?.url === url) return HELD.store.pool;
+  retire();
+  // `pgops-store`, not `pgops`: when PGOPS_STORE_URL points at a database
+  // pgops also monitors, the capture's writes appear in that database's own
+  // Sessions list, and the name tells them apart.
+  // Bounded, because every page awaits the store before it renders and a
+  // store that hangs must fall back to memory like one that fails. The
+  // migrations and the capture lift both for their own work.
+  const pool = new Pool({
+    connectionString: url, max: 5, connectionTimeoutMillis: 5_000,
+    application_name: `${PGOPS_APP}-store`,
+    statement_timeout: STORE_STATEMENT_MS, lock_timeout: STORE_LOCK_MS,
+  });
+  // Same reasoning as targetFor: an unhandled pool 'error' event terminates
+  // the process.
+  pool.on('error', () => {});
+  markOwnStatements(pool);
+  HELD.store = { pool, url };
+  return pool;
+}
+
+/**
+ * Mark everything the store sends with `OWN_SQL_MARKER`, so the `queryStats`
+ * check excludes it the way it already excludes every statement `runCheck`
+ * issues. The store's statements never pass through `runCheck`, and when
+ * `PGOPS_STORE_URL` points at a database pgops also monitors they land in
+ * that database's own `pg_stat_statements`.
+ */
+function markOwnStatements(pool: Pool): void {
+  onEveryStatement(pool, (args) => {
+    const [first, ...rest] = args;
+    if (typeof first === 'string') return [ownSql(first), ...rest];
+    // The config-object form. Only `text` changes; `name`, `values` and
+    // `rowMode` travel untouched — a named prepared statement whose name
+    // moved would stop agreeing with the server's cached plan.
+    if (first !== null && typeof first === 'object' && typeof (first as { text?: unknown }).text === 'string') {
+      const cfg = first as { text: string };
+      return [{ ...cfg, text: ownSql(cfg.text) }, ...rest];
+    }
+    // A cursor or any other submittable: nothing safe to rewrite, so it goes
+    // through unchanged.
+    return args;
+  });
+}
+
+/**
+ * Pass every statement any client of `pool` sends through `each`, which
+ * returns the arguments to send: to mark the store's statements, and to
+ * count those sent to a monitored database.
+ *
+ * The client is the one place to stand, because every statement ends up
+ * there: `pool.query` checks a client out itself, through the callback form
+ * of `connect`. Wrapping `pool.query` as well sees its statements twice.
+ *
+ * Each client is wrapped once ever. `pg` hands the same `PoolClient` object
+ * back on a later checkout, so wrapping per checkout would nest the wrapper.
+ * Call this once per pool, for the same reason.
+ */
+export function onEveryStatement(pool: Pool, each: (args: unknown[]) => unknown[]): void {
+  const SEEN = new WeakSet<PoolClient>();
+  const wrapClient = (client: PoolClient): PoolClient => {
+    if (SEEN.has(client)) return client;
+    SEEN.add(client);
+    const inner = client.query.bind(client) as (...a: unknown[]) => unknown;
+    client.query = function intercepted(...a: unknown[]) {
+      return inner(...each(a));
+    } as typeof client.query;
+    return client;
+  };
+
+  /**
+   * Both of `connect`'s forms. The callback form returns undefined, so
+   * chaining `.then` on it unconditionally would break every `pool.query`.
+   */
+  const innerConnect = pool.connect.bind(pool) as (...args: unknown[]) => unknown;
+  pool.connect = function interceptedConnect(...args: unknown[]) {
+    const [first] = args;
+    if (typeof first === 'function') {
+      const cb = first as (err: unknown, client: PoolClient | undefined, done: unknown) => void;
+      // `done` travels through untouched: pg's own Pool.query releases the
+      // client with it, and an error arrives with no client to wrap.
+      return innerConnect((err: unknown, client: PoolClient | undefined, done: unknown) => {
+        cb(err ? plainError(err) : err, client === undefined ? client : wrapClient(client), done);
+      }, ...args.slice(1));
+    }
+    return (innerConnect(...args) as Promise<PoolClient>).then(wrapClient, (err: unknown) => { throw plainError(err); });
+  } as typeof pool.connect;
+}
+
+/**
+ * A connect error as a plain Error with its `code`. Node's happy-eyeballs
+ * raises an AggregateError with an empty message when every address of
+ * `localhost` refuses, which says nothing in a log, and which React's dev
+ * server serialises into a stream the browser cannot finish reading: the
+ * page hangs. The code is kept so a refusal still reads as unreachable. An
+ * ordinary Error passes as it is, with everything pg put on it.
+ */
+function plainError(err: unknown): unknown {
+  if (err instanceof Error && !(err instanceof AggregateError) && err.message !== '') return err;
+  return Object.assign(new Error(messageOf(err)), { code: (err as { code?: unknown } | null)?.code });
 }

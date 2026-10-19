@@ -19,15 +19,8 @@ describe('captureOnce', () => {
       await captureOnce(withStore, 'prod');
       const after = await calls(pool);
 
-      // Two assertions, because the counter one alone is indirect: a reset
-      // would drop sum(calls) below the baseline the migration and setup
-      // queries established, but so would several other things, and it also
-      // passes when capture stores nothing at all.
-      //
-      // pg_stat_statements_info.stats_reset is the direct evidence. It moves
-      // if and only if something reset the view, which is exactly what
-      // pgHero's own capture_query_stats does — silently breaking every other
-      // consumer on the database.
+      // stats_reset is the direct evidence: it moves if and only if something
+      // reset the view. The counter assertion alone is indirect.
       expect(await lastReset(pool)).toEqual(resetBefore);
       expect(after).toBeGreaterThanOrEqual(before);
     });
@@ -37,30 +30,22 @@ describe('captureOnce', () => {
     await withPostgres(async (ctx, pool) => {
       await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
       await migrate(pool);
-      // Three normalisation facts drive the shape of this statement, each
-      // verified against PG 17 rather than assumed, and each one broke an
-      // earlier draft of this test:
-      //   - LITERALS are replaced with $1 before pgops sees the text, so a
+      // Three normalisation facts shape this statement:
+      //   - literals are replaced with $1 before pgops sees the text, so a
       //     secret in a literal is gone whether redactSecrets runs or not;
-      //   - COMMENTS are not in the queryid jumble, so `SELECT 1 /* a */` and
-      //     `SELECT 1 /* b */` share one queryid;
-      //   - column ALIASES are not in it either — `SELECT 1 AS x` and
-      //     `SELECT 1 AS y` also share one.
-      // Capture groups by queryid and keeps `max(query)`, so a marker that
-      // shares its queryid with another statement can be silently replaced by
-      // that statement's text. A distinct RELATION is what actually yields a
-      // distinct queryid, so the secret rides in a comment on a select from a
-      // uniquely-named table: unique queryid, singleton group, text intact.
+      //   - comments are not in the queryid jumble;
+      //   - column aliases are not in it either.
+      // Capture groups by queryid and keeps `max(query)`, so a marker sharing
+      // a queryid can be replaced by another statement's text. Only a distinct
+      // relation yields a distinct queryid, so the secret rides in a comment
+      // on a select from a uniquely-named table.
       const t = `redact_probe_${Date.now()}`;
       await pool.query(`CREATE TABLE ${t} (id int)`);
       await pool.query(`SELECT id FROM ${t} /* postgres://user:hunter2@db/app */`);
       await captureOnce({ ...ctx, store: pool }, 'prod');
 
-      // POSITIVE CONTROL FIRST. I5 (final review): asserting only that no row
-      // matches '%hunter2%' is also satisfied by an EMPTY pgops.queries — so
-      // with redactSecrets deleted AND the capture query failing for any
-      // reason, the test stayed green while the code under test was gone.
-      // Prove the shape reached the store, then prove the secret did not.
+      // Positive control first: an empty pgops.queries would also satisfy
+      // "no row matches '%hunter2%'".
       const stored = await pool.query<{ query: string }>(
         `SELECT query FROM pgops.queries WHERE query LIKE '%postgres://%'`,
       );
@@ -70,9 +55,8 @@ describe('captureOnce', () => {
       const leaked = await pool.query<{ query: string }>(
         `SELECT query FROM pgops.queries WHERE query LIKE '%hunter2%'`,
       );
-      // pgops.queries is durable storage. A secret written there outlives
-      // every screenshot; redactSecrets runs before the insert, not only on
-      // the render path.
+      // pgops.queries is durable, so redaction must run before the insert,
+      // not only on the render path.
       expect(leaked.rows).toHaveLength(0);
     });
   });
@@ -117,17 +101,14 @@ describe('captureOnce — what it refuses to lie about', () => {
     await withPostgres(async (ctx, pool) => {
       await migrate(pool);
       await pool.query('CREATE TABLE widgets (id int)');
-      // The harness creates pg_stat_statements for every database it hands
-      // out, so it has to be removed to reach this path. Dropping it is what
-      // a cluster pg_upgraded to 14 without the documented
-      // `ALTER EXTENSION pg_stat_statements UPDATE` looks like from here: the
-      // view is not readable, for a reason that is not the database's fault.
+      // The harness creates pg_stat_statements for every database, so it is
+      // dropped to reach this path: an unreadable view.
       await pool.query('DROP EXTENSION IF EXISTS pg_stat_statements');
       const outcome = await captureOnce({ ...ctx, store: pool }, 'prod');
-      // Space stats still land — they are independent and still useful.
+      // Space stats are independent and still land.
       expect(outcome).toMatchObject({ ok: true, shapes: 0 });
-      // But the failure is NAMED. Reported as a bare shapes:0 it is
-      // indistinguishable from a database that genuinely ran nothing.
+      // The failure is named: a bare shapes:0 would look like a database
+      // that ran nothing.
       expect(outcome.ok === true && outcome.queryStatsError).toBeTruthy();
       const { rows } = await pool.query<{ n: string }>(
         `SELECT count(*)::text AS n FROM pgops.space_stats`,
@@ -142,32 +123,25 @@ describe('captureOnce — what it refuses to lie about', () => {
       await migrate(pool);
 
       // pg_stat_statements is keyed by (userid, dbid, queryid, toplevel), so
-      // ONE shape run by TWO roles is two rows with the same queryid — the
-      // queries page documents this as I3, reproduced on PG 17. A capture
-      // that does not aggregate collapses them into one primary key, keeps
-      // whichever the scan returned first, and makes the counters jump
-      // backwards whenever the survivor changes. A second role is the only
-      // way to reach that, which is why this test creates one.
-      // A uniquely-named TABLE, not an alias or a comment: only a distinct
-      // relation gives the statement a queryid of its own, and without that
-      // this test reads some other statement's text (see the redaction test
-      // above for the three normalisation facts behind that).
+      // one shape run by two roles is two rows with the same queryid. A
+      // capture that does not aggregate keeps whichever the scan returned
+      // first, and the counters jump backwards when the survivor changes.
+      // A uniquely-named table gives the statement its own queryid (see the
+      // redaction test above).
       const t = `shared_shape_${Date.now()}`;
       const stmt = `SELECT id FROM ${t}`;
       await pool.query(`CREATE TABLE ${t} (id int)`);
-      // Randomised, and dropped in the `finally` below. `withPostgres` drops
-      // the per-test DATABASE, but a role is cluster-level and the whole
-      // integration run shares one container — a fixed name survives the test
-      // and makes a retry of this file fail with "role already exists".
+      // A unique name: a role is cluster-level and the run shares one
+      // container, so a fixed name would fail a retry with "role already
+      // exists".
       const role = `probe_${Date.now()}`;
       await pool.query(`CREATE ROLE ${role} LOGIN PASSWORD 'probe'`);
       await pool.query(`GRANT USAGE ON SCHEMA public TO ${role}`);
       await pool.query(`GRANT SELECT ON ${t} TO ${role}`);
       await pool.query(stmt);
 
-      // Built from the injected base URI, NOT from current_setting('port'):
-      // that reports the port inside the container (5432), not the mapped one
-      // testcontainers published on the host.
+      // Built from the injected base URI: current_setting('port') reports the
+      // port inside the container, not the one mapped on the host.
       const { rows: conn } = await pool.query<{ db: string }>(
         `SELECT current_database() AS db`,
       );
@@ -184,8 +158,8 @@ describe('captureOnce — what it refuses to lie about', () => {
         await asProbe.end().catch(() => {});
       }
 
-      // Two rows, one queryid — the precondition. Without it this test would
-      // pass against an unaggregated capture and prove nothing.
+      // Precondition: two rows, one queryid. Without it an unaggregated
+      // capture would pass.
       const raw = await pool.query<{ n: string; calls: string }>(
         `SELECT count(*)::text AS n, sum(calls)::text AS calls
            FROM pg_stat_statements WHERE query LIKE $1`,
@@ -202,9 +176,8 @@ describe('captureOnce — what it refuses to lie about', () => {
           WHERE q.query LIKE $1`,
         [`%FROM ${t}%`],
       );
-      // Exactly one stored row for the shape...
       expect(stored.rows[0]!.n).toBe('1');
-      // ...carrying the SUM of both roles, not one of them.
+      // The sum of both roles, not one of them.
       expect(stored.rows[0]!.calls).toBe(raw.rows[0]!.calls);
 
       await pool.query(`REVOKE ALL ON ${t} FROM ${role}`);
@@ -217,17 +190,10 @@ describe('captureOnce — what it refuses to lie about', () => {
     await withPostgres(async (ctx, pool) => {
       await migrate(pool);
 
-      // pg_stat_statements is loaded via shared_preload_libraries, so it
-      // records statements from EVERY database on the cluster and the view
-      // read from here shows all of them. Run a distinctive statement on a
-      // different database, then capture on this one.
-      //
-      // The marker is a uniquely-named TABLE. Neither a literal, a comment
-      // nor a column alias gives a statement its own queryid — capture groups
-      // by queryid and keeps `max(query)`, so all three earlier drafts of this
-      // marker were silently replaced by another statement's text and the
-      // assertion passed against an UNFILTERED capture. See the redaction
-      // test above for the three facts.
+      // pg_stat_statements records statements from every database on the
+      // cluster, and the view read from here shows all of them. The marker
+      // is a uniquely-named table so it has its own queryid (see the
+      // redaction test above); otherwise an unfiltered capture would pass.
       const marker = `pgops_other_db_${Date.now()}`;
       const other = new pg.Client({ connectionString: inject('pgConnectionUri') });
       await other.connect();
@@ -275,7 +241,7 @@ describe('captureOnce — what it refuses to lie about', () => {
       uri.pathname = `/${(await pool.query<{ db: string }>('SELECT current_database() AS db')).rows[0]!.db}`;
       const asReader = new pg.Pool({ connectionString: uri.toString(), max: 2 });
       try {
-        // Run the shape AS THE READER, so it has one row it can read among
+        // Run the shape as the reader, so it has one row it can read among
         // many it cannot. Without pg_read_all_stats every other role's row
         // comes back as '<insufficient privilege>' with a NULL queryid.
         await asReader.query(`SELECT id FROM ${t}`);
@@ -283,8 +249,7 @@ describe('captureOnce — what it refuses to lie about', () => {
           `SELECT count(*) FILTER (WHERE query = '<insufficient privilege>')::text AS hidden
              FROM pg_stat_statements`,
         );
-        // The precondition. Without hidden rows present this test would pass
-        // against any implementation and prove nothing.
+        // Precondition: without hidden rows any implementation would pass.
         expect(Number(seen.rows[0]!.hidden)).toBeGreaterThan(0);
 
         const outcome = await captureOnce({ ...ctx, target: asReader, store: pool }, 'prod');
@@ -294,12 +259,10 @@ describe('captureOnce — what it refuses to lie about', () => {
       }
 
       const stored = await pool.query<{ query: string }>(`SELECT query FROM pgops.queries`);
-      // Positive control: the reader's OWN shape reached the store...
+      // Positive control: the reader's own shape reached the store.
       expect(stored.rows.some((r) => r.query.includes(`FROM ${t}`))).toBe(true);
-      // ...and nothing it could not read did. pgops.queries is durable, and
-      // upsertQuery overwrites `query` on conflict, so one capture by an
-      // under-privileged role could otherwise replace a shape's real text
-      // with the placeholder for good.
+      // upsertQuery overwrites `query` on conflict, so one under-privileged
+      // capture could replace a shape's real text with the placeholder.
       expect(stored.rows.every((r) => !r.query.includes('insufficient privilege'))).toBe(true);
 
       await pool.query(`REVOKE ALL ON ${t} FROM ${role}`);
@@ -312,12 +275,9 @@ describe('captureOnce — what it refuses to lie about', () => {
     await withPostgres(async (ctx, pool) => {
       await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
       await migrate(pool);
-      // Several replicas capture the same databases — that is what the
-      // advisory lock exists for — and a Node-side `new Date()` makes their
-      // snapshots sort by whichever clock is fastest. With a skew larger than
-      // the capture interval, deltas sees counters decrease and drops every
-      // interval as a discontinuity. Asserting the stored instant is the
-      // store's transaction time pins the one clock.
+      // Several replicas capture the same databases. With a Node-side
+      // `new Date()` and clock skew larger than the capture interval, deltas
+      // sees counters decrease and drops every interval as a discontinuity.
       const before = await pool.query<{ now: Date }>('SELECT now() AS now');
       await captureOnce({ ...ctx, store: pool }, 'prod');
       const after = await pool.query<{ now: Date }>('SELECT now() AS now');
@@ -340,15 +300,8 @@ describe('captureOnce — what it refuses to lie about', () => {
       await pool.query('INSERT INTO has_rows SELECT generate_series(1, 100)');
       await captureOnce({ ...ctx, store: pool }, 'prod');
 
-      // SPACE_SQL gained `pg_total_relation_size(c.oid) IS NOT NULL`, which
-      // returns NULL only for a relation dropped between the pg_class scan
-      // and the size call — a race no test can stage deterministically, and
-      // deliberately NOT asserted here rather than asserted by something that
-      // cannot fail. What IS assertable is the other direction: the filter
-      // must not quietly drop measurable relations, and an EMPTY table is the
-      // one that would go if `IS NOT NULL` were ever written as `> 0` (an
-      // empty heap measures 0 bytes, which is a real measurement, not a
-      // missing one).
+      // An empty table measures 0 bytes, which is a real measurement: it must
+      // not be dropped along with the relations whose size is NULL.
       const { rows } = await pool.query<{ relation: string }>(
         `SELECT relation FROM pgops.space_stats
           WHERE relation IN ('public.empty_but_real', 'public.has_rows')
@@ -359,13 +312,59 @@ describe('captureOnce — what it refuses to lie about', () => {
     });
   });
 
+  /**
+   * Its size scan once ran with no timeout at all, so a migration holding a
+   * table held the capture, its store client and its advisory lock for as
+   * long as the migration ran. It writes the tables read as failed instead.
+   */
+  it('is not held by a table a migration holds', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await migrate(pool);
+      await pool.query('CREATE TABLE migrating (id int)');
+      const holder = await pool.connect();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await holder.query('BEGIN');
+        await holder.query('LOCK TABLE migrating IN ACCESS EXCLUSIVE MODE');
+        const held = new Promise<'held'>((resolve) => { timer = setTimeout(() => resolve('held'), 15_000); });
+        const outcome = await Promise.race([captureOnce({ ...ctx, store: pool }, 'prod'), held]);
+        expect(outcome).toMatchObject({ ok: true, relations: 0 });
+      } finally {
+        clearTimeout(timer);
+        await holder.query('ROLLBACK');
+        holder.release();
+      }
+      const { rows } = await pool.query<{ ok: boolean; message: string | null }>(
+        "SELECT ok, message FROM pgops.captures WHERE read = 'tables'",
+      );
+      expect(rows).toEqual([{ ok: false, message: expect.stringMatching(/lock timeout/) }]);
+    });
+  });
+
+  it('writes the tables read\'s sizes as the space series', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await migrate(pool);
+      await pool.query('CREATE TABLE has_rows (id int)');
+      await pool.query('INSERT INTO has_rows SELECT generate_series(1, 1000)');
+      await captureOnce({ ...ctx, store: pool }, 'prod');
+      const { rows: space } = await pool.query<{ relation: string; size: number }>(
+        'SELECT relation, size_bytes::float8 AS size FROM pgops.space_stats ORDER BY relation',
+      );
+      const { rows: tables } = await pool.query<{ relation: string; size: number }>(
+        `SELECT c.data->>'name' AS relation, (c.data->>'sizeBytes')::float8 AS size
+           FROM pgops.captured c WHERE c.read = 'tables' ORDER BY 1`,
+      );
+      expect(space.length).toBeGreaterThan(0);
+      expect(space).toEqual(tables);
+    });
+  });
+
   it('does not unlock a capture lock it never took', async () => {
     await withPostgres(async (ctx, pool) => {
       await migrate(pool);
       // Hold the lock from another session, so captureOnce takes the skipped
-      // path. Releasing a lock this session never acquired makes Postgres log
-      // `WARNING: you don't own a lock of type ExclusiveLock` into the STORE's
-      // log on every skipped tick.
+      // path. Releasing a lock it never acquired would log `WARNING: you
+      // don't own a lock of type ExclusiveLock` on every skipped tick.
       const holder = new pg.Client({ connectionString: inject('pgConnectionUri') });
       const dbName = (await pool.query<{ db: string }>('SELECT current_database() AS db')).rows[0]!.db;
       const uri = new URL(inject('pgConnectionUri'));
@@ -381,8 +380,7 @@ describe('captureOnce — what it refuses to lie about', () => {
         const outcome = await captureOnce({ ...ctx, store: pool }, 'prod');
         expect(outcome).toMatchObject({ ok: 'skipped', reason: 'locked' });
 
-        // The holder still owns exactly one advisory lock: captureOnce did not
-        // release someone else's.
+        // The holder still owns its advisory lock.
         const { rows } = await pool.query<{ n: string }>(
           `SELECT count(*)::text AS n FROM pg_locks WHERE locktype = 'advisory'`,
         );
@@ -396,22 +394,11 @@ describe('captureOnce — what it refuses to lie about', () => {
 });
 
 
-/**
- * The load row — the one thing capture writes that is not a copy of what it
- * read. Unit-tested for its arithmetic (capture.test.ts); this pins the two
- * properties that only a real store can show: that the first capture writes
- * nothing, and that retention reaches the table.
- */
 describe('readQueryText', () => {
   /**
-   * The query detail page identifies its subject by `queryid` alone, so this
-   * is the one lookup standing between an operator and a page that names a
-   * 19-digit integer and nothing else.
-   *
-   * THE TYPES DO NOT MATCH ON PAPER: `pgops.queries.queryid` is bigint and
-   * the caller passes the string out of the URL, because a 64-bit hash does
-   * not survive a JS number. That comparison is the thing worth proving
-   * against a real server rather than reasoning about.
+   * `pgops.queries.queryid` is bigint and the caller passes the string out of
+   * the URL, because a 64-bit hash does not survive a JS number. This proves
+   * that comparison against a real server.
    */
   it('finds a shape by the queryid string a URL carries', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -434,18 +421,14 @@ describe('readQueryText', () => {
     });
   });
 
-  /**
-   * A shape the store has never seen is an ordinary state, not an error: the
-   * operator may have followed a link to a statement that has since aged out
-   * of the retention window. The page falls back to the id it already has.
-   */
+  /** Not an error: a linked statement may have aged out of the retention window. */
   it('answers null for a shape this database has never captured', async () => {
     await withPostgres(async (ctx, pool) => {
       await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
       await migrate(pool);
       await captureOnce({ ...ctx, store: pool }, 'prod');
       expect(await readQueryText(pool, 'prod', '1234567890123456789')).toBeNull();
-      // And scoped to the database it was asked about, not to the cluster.
+      // Scoped to the database it was asked about.
       expect(await readQueryText(pool, 'no-such-db', '1')).toBeNull();
     });
   });
@@ -453,9 +436,8 @@ describe('readQueryText', () => {
 
 describe('readDatabaseSpace', () => {
   /**
-   * One row per CAPTURE out of a table that holds one row per relation per
-   * capture. Summing in the console would mean thirty days of a 400-relation
-   * database — 3.4 million rows — crossing the wire to be added up in JS.
+   * One row per capture out of a table that holds one row per relation per
+   * capture, so the sum happens in SQL and not over millions of rows in JS.
    */
   it('collapses every relation to one total per capture', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -469,9 +451,8 @@ describe('readDatabaseSpace', () => {
       const totals = await readDatabaseSpace(pool, 'prod', from, to);
       expect(totals).toHaveLength(1);
 
-      // The total is the sum of what was stored, and the count is the
-      // population it was summed over — the pair the surface needs to tell a
-      // dropped relation from a capture that saw less of the database.
+      // The count is the population the total was summed over; together they
+      // tell a dropped relation from a capture that saw less of the database.
       const { rows } = await pool.query<{ n: string; total: string }>(
         `SELECT count(*)::text AS n, sum(size_bytes)::text AS total
            FROM pgops.space_stats`,
@@ -482,7 +463,6 @@ describe('readDatabaseSpace', () => {
     });
   });
 
-  /** Scoped to one database and one window, like every other read here. */
   it('answers nothing for another database or a window with no captures', async () => {
     await withPostgres(async (ctx, pool) => {
       await migrate(pool);
@@ -497,6 +477,7 @@ describe('readDatabaseSpace', () => {
   });
 });
 
+/** The two properties of the load row only a real store can show; its arithmetic is in capture.test.ts. */
 describe('captureOnce and the load series', () => {
   it('writes no row for the first capture and one for the second', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -505,8 +486,8 @@ describe('captureOnce and the load series', () => {
       const withStore = { ...ctx, store: pool };
 
       await captureOnce(withStore, 'prod');
-      // One cumulative snapshot is not an interval. A zero row here would
-      // claim the database was idle for five minutes it was never watched.
+      // One cumulative snapshot is not an interval: a zero row would claim
+      // the database was idle while it was not being watched.
       expect(await loadRows(pool)).toHaveLength(0);
 
       // Real work between the two captures, so the interval is not empty.
@@ -527,8 +508,7 @@ describe('captureOnce and the load series', () => {
       const withStore = { ...ctx, store: pool };
       await captureOnce(withStore, 'prod');
 
-      // A row older than query_stats' retention, planted directly: the point
-      // is that `prune` covers this table, not that time passes.
+      // A row older than query_stats' retention, planted directly.
       await pool.query(
         `INSERT INTO pgops.query_load (database_id, captured_at, total_exec_time, calls)
          SELECT d.id, now() - interval '30 days', 1.0, 1 FROM pgops.databases d WHERE d.name = 'prod'`,

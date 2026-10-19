@@ -8,10 +8,7 @@ const row = (pid: number, blockedBy: number[], app = `a${pid}`, waitSecs?: strin
   pid, blocked_by: blockedBy, app, usename: 'u', state: 'active',
   query: 'q', backend_start: '2026-01-01T00:00:00Z',
   xact_age_secs: '1', waiting_mode: null, waiting_on: null,
-  // Mirrors what the SQL's `HAVING count(*) > 0` produces: a session with no
-  // ungranted lock — i.e. one that is not blocked — has no wait to report,
-  // so its `wait_secs` comes back NULL rather than 0 (I3). Pass `waitSecs`
-  // explicitly to model a specific wait duration.
+  // Mirrors the SQL: a session that is not blocked has `wait_secs` NULL, not 0.
   wait_secs: waitSecs !== undefined ? waitSecs : (blockedBy.length > 0 ? '1' : null),
 });
 
@@ -38,13 +35,9 @@ describe('buildChains', () => {
   });
 
   it('terminates a three-node cycle rather than looping forever (A -> B -> C -> A)', () => {
-    // 1 is blocked by 3, 2 is blocked by 1, 3 is blocked by 2: a ring, not a
-    // pair. Termination is guaranteed structurally by `path.has(child)`
-    // regardless of cycle length, but a 2-node cycle can pass even with an
-    // off-by-one in the ancestor tracking, since the immediate parent looks
-    // the same as "any ancestor" when there's only one. This shape only
-    // terminates at the right place if the whole `path` set is checked at
-    // every level, not just the direct parent.
+    // A two-node cycle passes even if only the direct parent is checked; a
+    // ring of three terminates at the right place only if the whole `path`
+    // set is checked at every level.
     const roots = buildChains([row(1, [3]), row(2, [1]), row(3, [2])]);
     expect(roots).toHaveLength(1);
     const root = roots[0]!;
@@ -61,13 +54,10 @@ describe('buildChains', () => {
   });
 
   it('counts a waiter blocked by two independent roots once, though it appears under both', () => {
-    // pg_blocking_pids() returns an array: 20 is blocked by both 1 and 10,
-    // the shape a DDL statement queued behind several independently-granted
-    // readers produces (each reader is its own unblocked root). 20 belongs
-    // under both trees -- that's real, killing either root alone won't free
-    // it -- so each root's own totalWaiters is correctly 1. But summing
-    // those two per-root counts would say two sessions are stuck when there
-    // is one; that sum is exactly what the pre-fix verdict computed.
+    // 20 is blocked by both 1 and 10, as a DDL statement queued behind
+    // several readers is. It belongs under both trees, since killing either
+    // root alone won't free it, but summing the per-root counts would say
+    // two sessions are stuck when there is one.
     const roots = buildChains([row(1, []), row(10, []), row(20, [1, 10])]);
     expect(roots).toHaveLength(2);
     expect(roots.every((r) => r.waiters.some((w) => w.pid === 20))).toBe(true);
@@ -76,17 +66,10 @@ describe('buildChains', () => {
   });
 
   /**
-   * B8, second half. In a deadlock every session in the ring is waiting, and
-   * `buildChains` seeds one of them as a root because no unblocked session
-   * exists to be one. That seeded root is a stuck session — it is the only
-   * node in its own tree that the waiter walk never reaches — so a count
-   * that skips every root under-reported a two-session deadlock as one
-   * blocked session, on the quantity `verdict` escalates on.
-   *
-   * A root that is genuinely unblocked still must not count: it is the
-   * session doing the blocking, not one of the sessions stuck behind it.
-   * `waitSecs` is the documented difference (see `Waiter.waitSecs`) — null
-   * for an unblocked root, a real number for one that is itself waiting.
+   * In a deadlock `buildChains` seeds one waiting session as a root. That
+   * root is itself stuck, so a count that skips every root reports a
+   * two-session deadlock as one blocked session. `waitSecs` tells the two
+   * apart: null for an unblocked root, a number for one that is waiting.
    */
   it('counts a seeded cycle root, which is itself a stuck session', () => {
     expect(countDistinctWaiters(buildChains([row(1, [2]), row(2, [1])]))).toBe(2);
@@ -97,14 +80,9 @@ describe('buildChains', () => {
   });
 
   /**
-   * B8. Cycle seeding used to be gated on `roots.length === 0`, which asks
-   * "did this whole database produce no unblocked session" when the question
-   * is "is every blocked session covered by some tree". One ordinary chain
-   * anywhere in the graph answered the first question and hid every deadlock
-   * in the database: pids 3 and 4 below are `children` keys with blockers, so
-   * they are roots of nothing and waiters under nobody, and they vanished
-   * from the view with the kill button while Postgres was about to abort one
-   * of them.
+   * Gating cycle seeding on `roots.length === 0` lets one ordinary chain
+   * anywhere in the graph hide every deadlock: pids 3 and 4 below would be
+   * roots of nothing and waiters under nobody.
    */
   it('seeds a cycle even when an unrelated ordinary root exists', () => {
     // 1 blocks 2. Separately and independently, 3 and 4 block each other.
@@ -117,37 +95,28 @@ describe('buildChains', () => {
   });
 
   it('does not re-seed an ordinary root as a cycle entry point', () => {
-    // The seeding pass now runs unconditionally, so it must treat the
-    // ordinary roots and everything under them as already covered. Without
-    // that, pid 1 is a `children` key and would be appended a second time.
+    // The seeding pass runs unconditionally, so it must treat ordinary roots
+    // and everything under them as covered, or pid 1 is appended twice.
     const roots = buildChains([row(1, []), row(2, [1])]);
     expect(roots).toHaveLength(1);
     expect(roots[0]!.pid).toBe(1);
   });
 
   it('does not crash when a referenced blocker has no row of its own', () => {
-    // pg_blocking_pids() can return the pid of a parallel worker or other
-    // auxiliary process; this check's SQL restricts the row set to
-    // backend_type = 'client backend', so an untracked blocker pid is a
-    // real possibility from a live server, not a hypothetical. Losing this
-    // one pid's blocked status must not crash buildChains and take the
-    // whole check down with it.
+    // pg_blocking_pids() can return a parallel worker or other auxiliary
+    // process, and the SQL keeps only client backends, so a live server can
+    // produce a blocker pid with no row.
     expect(() => buildChains([row(5, [999])])).not.toThrow();
     expect(buildChains([row(5, [999])])).toEqual([]);
   });
 });
 
 describe('locks.map (truncation)', () => {
-  // The SQL fetches LIMIT 501 specifically so `map` can tell "exactly 500
-  // rows exist" apart from "more than 500 rows exist and 500 survived an
-  // arbitrary-looking cutoff." These pin that row-count logic directly,
-  // since a pure buildChains-level test can't reach it -- `truncated` is
-  // set in `map`, one level up.
+  // The SQL fetches LIMIT 501 so `map` can tell exactly 500 rows from more
+  // than 500. `truncated` is set in `map`, so buildChains tests cannot reach it.
   const chain = (n: number): LockRow[] =>
-    // pid 1 unblocked; pid 2 blocked by 1; pid 3 blocked by 2; ... pid n
-    // blocked by n-1. Ordered oldest-first, the same order the SQL's
-    // `ORDER BY xact_start ASC` would hand map -- so slicing the array is
-    // exactly what happens to the real result set.
+    // pid 1 unblocked; pid k blocked by k-1. Oldest first, the order the
+    // SQL's `ORDER BY xact_start ASC` hands map.
     Array.from({ length: n }, (_, i) => row(i + 1, i === 0 ? [] : [i]));
 
   // Follows the chain to its tail, whichever node type it starts from.
@@ -157,31 +126,22 @@ describe('locks.map (truncation)', () => {
   it('does not flag truncation at exactly 500 rows', () => {
     const data = locks.map(chain(500));
     expect(data.truncated).toBe(false);
-    // full chain intact: the 500th pid is reachable.
     expect(deepest(data.roots[0]!).pid).toBe(500);
   });
 
   it('flags truncation and drops the 501st row when the query returns the overflow row', () => {
     const data = locks.map(chain(501));
     expect(data.truncated).toBe(true);
-    // pid 501 (and its edge from 500) must not appear -- only the retained
-    // window (pids 1..500) is used to build the graph.
+    // Only the retained window (pids 1..500) builds the graph.
     expect(deepest(data.roots[0]!).pid).toBe(500);
     expect(data.roots[0]!.totalWaiters).toBe(499);
   });
 });
 
 /**
- * I3 + I5. `locks.verdict` had no test of any kind — not a unit test, not an
- * integration test — which is how it came to escalate on
- * `max(roots[*].xactAgeSecs)`, the root BLOCKER's transaction age, while its
- * own critical threshold justified the escalation with a sentence about how
- * long the WAITERS had waited. Spec §9 requires every threshold be asserted
- * at its boundary and one unit either side; these do that, and the I3
- * regression below pins the subject of the comparison as well as its shape.
- *
- * Data is built through `locks.map`, not hand-assembled, so these tests
- * exercise the same row -> graph path the live check takes.
+ * Each threshold is asserted at its boundary and one unit either side. Data
+ * is built through `locks.map`, so these take the same row -> graph path the
+ * live check takes.
  */
 describe('locks.verdict', () => {
   const t = locks.thresholds!;
@@ -199,8 +159,7 @@ describe('locks.verdict', () => {
   });
 
   it('flips to warn exactly at the warn threshold, in blocked-session count', () => {
-    // warnAt is 1 session, so "one unit below" is a graph with no waiters —
-    // which is what a lone unblocked session is.
+    // warnAt is 1 session, so "one unit below" is a graph with no waiters.
     expect(warnAt).toBe(1);
     expect(locks.verdict!(graph(warnAt - 1, 0), t).level).toBe('ok');
     expect(locks.verdict!(graph(warnAt, 0), t).level).toBe('warn');
@@ -214,12 +173,8 @@ describe('locks.verdict', () => {
   });
 
   /**
-   * The I3 defect itself. A nightly ETL job holds one transaction open for
-   * forty minutes doing ordinary work, then blocks one short SELECT for
-   * 200ms. The old verdict took `max(roots[*].xactAgeSecs)` — 2400 — and
-   * reported `critical`, two severity levels above what `blocked` reported
-   * for the same event on the same page. With the subject corrected to the
-   * waiter's own `waitSecs`, this is a warn.
+   * A transaction open for forty minutes blocks one short SELECT for 200ms.
+   * The verdict reads the waiter's own `waitSecs`, so this is a warn.
    */
   it('does not escalate on the blocker’s transaction age (I3)', () => {
     const d = graph(1, 0.2, String(40 * 60));
@@ -233,9 +188,8 @@ describe('locks.verdict', () => {
     expect(locks.verdict!(d, t).level).toBe('critical');
   });
 
-  // Same Convention 3 proof the other checks carry: the lookups must not use
-  // a non-null assertion, and "no critical threshold configured" must fail
-  // toward visible, not toward silence.
+  // The lookups must not use a non-null assertion, and a missing critical
+  // threshold must fail toward visible.
   it('does not throw, and stays visible, when a threshold level is absent', () => {
     const warnOnly = t.filter((x) => x.level === 'warn');
     expect(locks.verdict!(graph(1, 99999), warnOnly).level).toBe('warn');
@@ -256,11 +210,9 @@ describe('longestWaitSecs', () => {
   });
 
   /**
-   * In a deadlock every session is blocked, so `buildChains` seeds one of
-   * them as a root even though it is itself waiting (see its own comment).
-   * That seeded root's wait is real and must count — the max walk therefore
-   * includes roots and cycle back-edges, unlike `countDistinctWaiters`,
-   * which must skip them to avoid double-counting a session.
+   * A deadlock's seeded root is itself waiting, so the max walk includes
+   * roots and cycle back-edges, unlike `countDistinctWaiters`, which must
+   * skip them to avoid double-counting a session.
    */
   it('counts the wait of a cycle’s seeded root', () => {
     const roots = buildChains([row(1, [2], 'a1', '30'), row(2, [1], 'a2', '10')]);
@@ -270,12 +222,9 @@ describe('longestWaitSecs', () => {
 
 describe('locks.requires', () => {
   /**
-   * The verdict reads `pg_locks.waitstart`, which Postgres added in 14. The
-   * package floor is 14 so every supported server has it — but a check that
-   * merely assumes its floor fails on PG13 with a raw `42703 column
-   * "waitstart" does not exist`, where the version machinery would say so in
-   * words. query-stats.ts already declares exactly this; locks now depends on
-   * a 14-only column too, so it declares it too.
+   * `pg_locks.waitstart` was added in Postgres 14. Without the declared
+   * floor, PG13 fails with a raw `42703 column "waitstart" does not exist`
+   * instead of the version machinery's message.
    */
   it('declares the PG14 floor its waitstart column needs', () => {
     expect(locks.requires).toContainEqual({ kind: 'version', min: 140000 });

@@ -25,31 +25,31 @@ export interface Interval {
 /**
  * Difference consecutive cumulative snapshots into intervals.
  *
- * Counters are cumulative since the last reset, and there are two hazards,
- * both of which produce the same signature and get the same treatment:
+ * Counters are cumulative since the last reset, and two things restart them:
  *
  *   - an explicit pg_stat_statements_reset(), visible as stats_reset advancing;
- *   - LRU eviction — pg_stat_statements.max defaults to 5000, and a shape
- *     evicted then re-added restarts from zero, which for that row is
- *     indistinguishable from a reset.
+ *   - LRU eviction: pg_stat_statements.max defaults to 5000, and a shape
+ *     evicted then re-added restarts from zero.
  *
- * An interval spanning either is a DISCONTINUITY and is DROPPED — not clamped
- * to zero, not rendered as a spike. A gap in a chart is honest; a spike is a
- * lie that reads as an incident, and this tool exists to be trusted during
- * one.
+ * An interval spanning either is dropped, not clamped to zero and not
+ * charted as a spike.
  *
- * Both conditions are tested, not just the counter one: after a reset the
- * counters can climb past their old values before the next capture, and
- * counter comparison alone would miss it and chart the whole post-reset total
- * as a five-minute spike.
+ * Both `stats_reset` and the counters are compared: after a reset the
+ * counters can climb past their old values before the next capture, which a
+ * counter comparison alone would miss.
+ *
+ * `resets` are the moments of pgops's own resets, from its events. The reset
+ * it issues is scoped to one database, and Postgres advances `stats_reset`
+ * only for a reset of everything, so these are the only sign of it.
  */
-export function deltas(points: CounterPoint[]): Interval[] {
+export function deltas(points: CounterPoint[], resets: readonly number[] = []): Interval[] {
   const sorted = [...points].sort((a, b) => a.capturedAt.getTime() - b.capturedAt.getTime());
   const out: Interval[] = [];
   for (let i = 1; i < sorted.length; i += 1) {
     const prev = sorted[i - 1]!;
     const next = sorted[i]!;
     if (isDiscontinuity(prev, next)) continue;
+    if (resets.some((r) => r > prev.capturedAt.getTime() && r <= next.capturedAt.getTime())) continue;
     out.push({
       from: prev.capturedAt,
       to: next.capturedAt,
@@ -84,34 +84,19 @@ export interface ShapeIntervals {
 export interface HistoricalQueryStatsOpts extends ReadOpts { databaseName: string }
 
 /**
- * #15 historical_query_stats.
- *
- * pgHero gets deltas by calling pg_stat_statements_reset() after each
- * snapshot. pgops refuses — that silently breaks every other consumer on the
- * database — so it stores cumulative counters and differences them here, at
- * read time.
+ * Per-shape intervals over a window. pgops stores cumulative counters and
+ * differences them here at read time; it never resets pg_stat_statements,
+ * as pgHero does, because that breaks every other consumer on the database.
  */
 export const historicalQueryStats: Series<ShapeIntervals, HistoricalQueryStatsOpts> = {
   id: 'historicalQueryStats',
   title: 'Query stats over time',
   read: async (ctx, range, opts) => {
-    // `runSeries` returns `missing-store` before ever calling `read`, so the
-    // store is present here by construction. Reached any other way this
-    // throws, and `runSeries` converts that to ok:false like any other error.
+    // `ctx.store!`: `runSeries` returns `missing-store` before calling `read`.
     //
-    // `opts` is forwarded WHOLE, and that fifth argument is load-bearing. It
-    // was missing: `HistoricalQueryStatsOpts extends ReadOpts` precisely so a
-    // caller can bound the read, the queries page passes `maxSnapshots: 2`
-    // and the ~100 `queryids` it renders, and both were dropped here — so
-    // read.ts's I2 bound existed, was unit-tested, and applied to nothing
-    // reachable from a page. Every render of an INCIDENT page polling at 5s
-    // read every snapshot in a twenty-minute window for every shape in the
-    // database, each dragging its full query text: spec §5.1's "one indexed
-    // lookup per render and it must stay that way", inverted.
-    //
-    // The extra `databaseName` property rides along unread; `ReadOpts` is a
-    // supertype, so this is the whole options object arriving where its
-    // store-facing half is wanted, not a cast.
+    // `opts` must be forwarded: it carries the `maxSnapshots` and `queryids`
+    // bounds, without which a polling page reads every snapshot of every
+    // shape in the window.
     const shapes = await readQueryStats(ctx.store!, opts.databaseName, range.from, range.to, opts);
     return shapes
       .map((s) => ({ queryid: s.queryid, query: s.query, intervals: deltas(s.points) }))
@@ -120,19 +105,9 @@ export const historicalQueryStats: Series<ShapeIntervals, HistoricalQueryStatsOp
 };
 
 /**
- * #16. One shape's movement over a window, as intervals.
- *
- * A SECOND series rather than an option on `historicalQueryStats`, because
- * they bound differently and answering both from one object would give it two
- * incompatible defaults. That one answers "how has every shape on this page
- * moved since the last capture" — many shapes, two snapshots. This answers
- * "how has THIS shape moved over 24 hours" — one shape, every snapshot in the
- * window. They share `readQueryStats` and `deltas`, which is where the
- * sharing belongs.
- *
- * Returns `Interval[]`, not shapes: the caller already knows which shape it
- * asked about, and returning a one-element array of shapes to be unwrapped at
- * every call site is ceremony.
+ * One shape's movement over a window, as intervals: one shape, every
+ * snapshot in the window, where `historicalQueryStats` reads many shapes and
+ * few snapshots.
  */
 export const queryShapeHistory: Series<Interval, {
   databaseName: string;
@@ -145,9 +120,8 @@ export const queryShapeHistory: Series<Interval, {
     const shapes = await readQueryStats(
       ctx.store!, opts.databaseName, range.from, range.to,
       { queryids: [opts.queryid], maxSnapshots: opts.maxSnapshots });
-    // A shape the store has never captured yields no rows. `[]` is the
-    // reading — `runSeries` reports ok:true with no points, and the page says
-    // "no history yet" rather than "we could not look".
+    // A shape the store has never captured yields `[]`, which is a reading
+    // ("no history yet"), not a failure.
     const shape = shapes[0];
     return shape === undefined ? [] : deltas(shape.points);
   },

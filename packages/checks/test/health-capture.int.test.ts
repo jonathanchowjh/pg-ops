@@ -99,9 +99,9 @@ describe('captureHealth', () => {
   });
 
   /**
-   * THE ATTRIBUTION RULE. Two databases on one server, a lock chain in one.
-   * The live `blocked` check would report it from either; the stored row for
-   * the quiet database must say zero.
+   * Two databases on one server, a lock chain in one. The live `blocked`
+   * check would report it from either; the stored row for the quiet database
+   * must say zero.
    */
   it('does not charge one database with another database\'s lock chain', async () => {
     await withPostgres(async (ctxA, poolA) => {
@@ -140,11 +140,8 @@ describe('captureHealth', () => {
     });
   });
 
-  /**
-   * Review Focus 1. A role that cannot see other sessions' state must store
-   * null session counts, and everything it CAN read must still land.
-   */
-  it('stores null session counts for a role that cannot see other sessions', async () => {
+  /** Everything the role can read must still land. */
+  it('counts the connections for a role that cannot read other sessions, and nulls what needs a state', async () => {
     await withPostgres(async (ctx, pool) => {
       await migrate(pool);
       await counted(pool);
@@ -160,8 +157,9 @@ describe('captureHealth', () => {
         const outcome = await captureHealth({ ...ctx, target: blind, store: pool }, 'prod');
         expect(outcome).toMatchObject({ ok: true });
         const [row] = await rows(pool, 'prod');
-        expect(row.connections).toBeNull();
-        expect(row.server_connections).toBeNull();
+        // The superuser's own connection is in this database and unreadable to the role.
+        expect(row.connections).toBeGreaterThanOrEqual(2);
+        expect(row.server_connections).toBeGreaterThanOrEqual(row.connections);
         expect(row.active).toBeNull();
         expect(row.idle_in_txn).toBeNull();
         expect(row.max_connections).toBeGreaterThan(0);

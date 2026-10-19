@@ -8,12 +8,10 @@ import { withPostgres } from './harness.js';
 /**
  * Open a session that holds an advisory lock and keeps its transaction open.
  *
- * `clients` is pushed to BEFORE `connect()`/`BEGIN`/the lock query — any of
- * which can throw. Pushing after all of them would mean a client that threw
- * partway through never gets registered for cleanup, leaking an open
- * connection (and, past `BEGIN`, an open transaction) that makes the
- * harness's `DROP DATABASE` fail on "database is being accessed by other
- * users" — a leaked test database, not a loud test failure.
+ * `clients` is pushed to before `connect()`/`BEGIN`/the lock query, any of
+ * which can throw. A client that threw unregistered would leak a connection
+ * and make the harness's `DROP DATABASE` fail on "database is being accessed
+ * by other users".
  */
 async function holder(uri: string, app: string, key: number, clients: pg.Client[]): Promise<pg.Client> {
   const c = new pg.Client({ connectionString: uri, application_name: app });
@@ -29,8 +27,6 @@ describe('locks', () => {
   it('does not name an unrelated advisory-lock holder as a blocker (A2)', async () => {
     await withPostgres(async (ctx, pool) => {
       const uri = (pool as unknown as { options: { connectionString: string } }).options.connectionString;
-      // Registered for cleanup as each client is created, not after the last
-      // one succeeds — see the comment on `holder` above.
       const clients: pg.Client[] = [];
       try {
         await holder(uri, 'holder-key-1', 1, clients);   // innocent
@@ -46,8 +42,8 @@ describe('locks', () => {
         if (!r.ok) throw new Error(r.message);
         const rootApps = r.data.roots.map((x) => x.app);
         expect(rootApps).toContain('holder-key-2');
-        // The shipped join key omitted classid/objid, so every advisory lock in
-        // a database matched every other one and this name appeared.
+        // A join key without classid/objid matches every advisory lock in the
+        // database to every other one, and this name appears.
         expect(rootApps).not.toContain('holder-key-1');
       } finally {
         await Promise.all(clients.map((cl) => cl.end().catch(() => {})));
@@ -81,9 +77,8 @@ describe('locks', () => {
         if (!r.ok) throw new Error(r.message);
         const root = r.data.roots.find((x) => x.app === 'long-reader');
         expect(root, 'long-reader should be the root').toBeDefined();
-        // Truth: reader -> migration -> tail. The shipped query produced
-        // reader -> {migration, tail} because an edge required the blocker's
-        // own lock to be GRANTED, so a queued blocker could never nest.
+        // reader -> migration -> tail. Requiring the blocker's own lock to be
+        // granted would flatten this to reader -> {migration, tail}.
         expect(root!.waiters).toHaveLength(1);
         expect(root!.waiters[0]!.app).toBe('migration');
         expect(root!.waiters[0]!.waiters[0]!.app).toBe('tail-reader');
@@ -95,24 +90,15 @@ describe('locks', () => {
   }, 120_000);
 
   /**
-   * I3, against a real lock wait rather than a fixture. `verdict` used to
-   * escalate on `max(roots[*].xactAgeSecs)` — how long the BLOCKER's
-   * transaction had been open — while the critical threshold's own `because`
-   * justified the escalation by how long the WAITERS had waited. Those
-   * diverge exactly in the shape this fixture builds: a blocker whose
-   * transaction is already old, blocking a session that has only just
-   * started waiting. `pg_locks.waitstart` (PG14+) is the corrected subject.
+   * The fixture is a blocker whose transaction is already old, blocking a
+   * session that has only just started waiting: the verdict must follow
+   * `pg_locks.waitstart` (PG14+), not the blocker's transaction age.
    *
-   * The check's shipped critical threshold is 60 seconds. Rather than keep
-   * a Postgres container busy for a minute, `fast` below reuses the real
-   * `verdict` function against a scaled-down threshold array — the same
-   * data, the same comparison, seconds instead of a minute. `verdict` takes
-   * its thresholds as a parameter precisely because they are data.
+   * The shipped critical threshold is 60 seconds; `fast` runs the real
+   * `verdict` against a scaled-down copy so the test takes seconds.
    *
-   * The graph is narrowed to this fixture's own root before the verdict
-   * runs: `locks` reads pg_locks cluster-wide, and a verdict computed over
-   * whatever else the shared container happens to be doing would be
-   * asserting on someone else's fixture.
+   * `locks` reads pg_locks cluster-wide, so the graph is narrowed to this
+   * fixture's own root before the verdict runs.
    */
   it('escalates on how long the waiter has waited, not on the blocker\'s transaction age (I3)', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -133,9 +119,8 @@ describe('locks', () => {
 
       try {
         await holder(uri, 'i3-blocker', 77, clients);
-        // The blocker's transaction gets demonstrably older than the scaled
-        // critical threshold BEFORE anything waits on it. This is the ETL
-        // job in the finding: forty minutes of ordinary work, then a lock.
+        // The blocker's transaction gets older than the scaled critical
+        // threshold before anything waits on it.
         await new Promise((r) => setTimeout(r, 3600));
 
         const waiter = new pg.Client({ connectionString: uri, application_name: 'i3-waiter' });
@@ -155,18 +140,17 @@ describe('locks', () => {
 
         const root = d!.roots[0]!;
         const waiterNode = root.waiters[0]!;
-        // The two quantities really are different numbers right now, which
-        // is what makes the assertion below meaningful rather than lucky.
+        // The two quantities must differ here for the verdict assertion to
+        // mean anything.
         expect(root.xactAgeSecs!).toBeGreaterThan(fast[1]!.value);
         // A root blocker is not waiting on anything, so it has no waitstart.
         expect(root.waitSecs).toBeNull();
         expect(waiterNode.waitSecs).not.toBeNull();
         expect(waiterNode.waitSecs!).toBeLessThan(fast[1]!.value);
-        // The old subject would read 3.6s+ here and report critical.
+        // Escalating on the blocker's transaction age would report critical.
         expect(locks.verdict!(d!, fast).level).toBe('warn');
 
-        // Now let the WAIT itself grow past the same threshold. Nothing
-        // about the blocker changes; only the quantity that should matter.
+        // Let the wait itself grow past the same threshold.
         await new Promise((r) => setTimeout(r, 3400));
         const later = await mine();
         expect(later!.roots[0]!.waiters[0]!.waitSecs!).toBeGreaterThanOrEqual(fast[1]!.value);

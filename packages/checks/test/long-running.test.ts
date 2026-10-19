@@ -18,9 +18,8 @@ describe('longRunning.map', () => {
     });
   });
 
-  // A7, same technique as sessions.ts's own `total_matching`: `limit` is a
-  // runtime Opts value here, so `map` (pure over `rows` alone) can only
-  // detect truncation via the pre-LIMIT count carried on every row.
+  // `limit` is a runtime option, so `map` can only detect truncation from
+  // the pre-LIMIT count carried on every row.
   it('signals truncation when the pre-LIMIT count exceeds the returned rows (A7)', () => {
     const d = longRunning.map([
       lrRow({ pid: 1, total_matching: 3 }),
@@ -40,10 +39,9 @@ describe('longRunning.map', () => {
   });
 
   /**
-   * Null is a real reading, not a gap to paper over. `killBackend` accepts a
-   * null identity and means "kill on pid alone" by it, so substituting a
-   * string here would fabricate an identity that never matches and turn every
-   * kill into `session-changed`.
+   * `killBackend` takes a null identity to mean "kill on pid alone"; a
+   * substituted string would never match and turn every kill into
+   * `session-changed`.
    */
   it('passes a null identity through rather than inventing one', () => {
     const d = longRunning.map([lrRow({ backend_start: null })]);
@@ -73,19 +71,9 @@ describe('longRunning.verdict', () => {
   });
 
   /**
-   * I5. Spec §9 requires each threshold be asserted AT its value and one
-   * unit either side — "this is what would have caught A1; a test that
-   * asserts a constant equals itself cannot." The two assertions above only
-   * ever probed `warnAt + 1` and `critAt + 1`, so the flip point itself was
-   * pinned by nothing.
-   *
-   * It was also the outlier in the `>=` vs `>` divergence the final review
-   * found: this check used strict `>` while `blocked`, `locks` and `slots`
-   * used `>=`, and `sessionStates` used both inside one function. The ruling
-   * standardised on `>=` — a threshold is the value AT WHICH the condition
-   * becomes a problem, which is how every `because` string in this package
-   * is worded ("pgHero #9 uses 60s as the definition of long-running", not
-   * "past 60s"). So a query running exactly 60.0s is `warn`, and exactly
+   * Each threshold is asserted at its value and one unit either side. The
+   * package convention is `>=`: a threshold is the value at which the
+   * condition becomes a problem, so exactly 60.0s is `warn` and exactly
    * 300.0s is `critical`.
    */
   it('flips at the threshold itself, not one second past it (I5)', () => {
@@ -104,8 +92,6 @@ describe('longRunning.verdict', () => {
     expect(at(critAt + 1)).toBe('critical');
   });
 
-  // Same Convention 3 proof as blocked.verdict above, for this check's own
-  // two-threshold lookup.
   it('does not throw when a threshold level is absent from the array', () => {
     const v = longRunning.verdict!(
       { queries: [{ pid: 1, runningSecs: 99999, query: null, backendStart: null }], truncated: false },
@@ -117,17 +103,10 @@ describe('longRunning.verdict', () => {
 
 describe('longRunning SQL / verdict agreement', () => {
   /**
-   * The verdict escalates at `>=` its warn threshold (the package-wide
-   * convention: a threshold is the value AT WHICH a condition becomes a
-   * problem). The SQL's own age predicate has to agree, because `minSecs`
-   * defaults to exactly that warn threshold — with `>` there, a query at
-   * precisely 60.000s never reaches the verdict at all and the check reports
-   * `ok`, contradicting the boundary test one layer up.
-   *
-   * Float equality on a clock makes that measure-zero in practice, which is
-   * why this is pinned at the source rather than with a live query: there is
-   * no way to construct "exactly 60.000000s" against a real server, and a
-   * disagreement no test can reach is exactly the kind that survives.
+   * `minSecs` defaults to the warn threshold, and the verdict escalates at
+   * `>=`. With `>` in the SQL, a query at exactly 60.000s never reaches the
+   * verdict. Pinned at the source because "exactly 60s" cannot be
+   * constructed against a real server.
    */
   it('filters on >=, matching the verdict it feeds', () => {
     const sql = longRunning.sql;

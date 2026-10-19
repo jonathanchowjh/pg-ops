@@ -2,16 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ACTOR_HEADER } from '@/lib/auth';
 import { openAction, readJson, type ActionRequest } from '@/lib/action-route';
 
-// The preamble resolves a context; these are unit tests over the preamble,
-// not over the pools, so the seam is mocked at the module boundary.
+// Unit tests over the preamble, not the pools, so contextFor is mocked.
 vi.mock('@/lib/pools', async () => {
   const actual = await vi.importActual<typeof import('@/lib/pools')>('@/lib/pools');
   return {
     ...actual,
     contextFor: vi.fn(async (name: string) => {
       // Two arguments: the constructor does `known.join(...)`, so a
-      // single-argument call throws a TypeError from inside it and the
-      // instanceof branch under test is never reached.
+      // single-argument call throws a TypeError instead.
       if (name === 'nosuch') throw new actual.UnknownDatabaseError(name, ['prod']);
       if (name === 'broken') throw new Error('could not connect');
       return { target: {}, databaseName: name } as never;
@@ -30,11 +28,7 @@ beforeEach(() => { process.env.PGOPS_ALLOW_ACTIONS = 'true'; });
 afterEach(() => { delete process.env.PGOPS_ALLOW_ACTIONS; vi.clearAllMocks(); });
 
 describe('openAction', () => {
-  /**
-   * 404, never 403: a 403 advertises an endpoint that is merely switched off.
-   * Checked before the body is read, so a flagless deployment reveals nothing
-   * about what the body would have needed.
-   */
+  /** 404, not 403: a 403 advertises an endpoint that is merely switched off. */
   it('answers 404 when actions are off', async () => {
     delete process.env.PGOPS_ALLOW_ACTIONS;
     const r = await openAction(post({ reason: 'x' }), 'prod');
@@ -43,10 +37,8 @@ describe('openAction', () => {
   });
 
   /**
-   * The CSRF defence. A cross-origin HTML form can send a body that parses as
-   * JSON, but `enctype` accepts only three values and none of them is this
-   * one — and nothing else can set a request header cross-origin without a
-   * preflight these routes never answer.
+   * The CSRF defence: a cross-origin form can send a body that parses as JSON,
+   * but cannot declare it `application/json`.
    */
   it('answers 415 for a body that is not declared JSON', async () => {
     const r = await openAction(post({ reason: 'x' }, { 'content-type': 'text/plain' }), 'prod');
@@ -54,18 +46,9 @@ describe('openAction', () => {
   });
 
   /**
-   * The ORDER of the two checks above, which is not stylistic and which
-   * nothing else covers.
-   *
-   * With actions off, a request that would otherwise earn a 415 must still
-   * answer 404 — a 415 tells the caller the route exists and is merely
-   * switched off, which is exactly what the 404 is there to hide.
-   *
-   * The integration suite cannot see this: proxy.ts gates the path above
-   * method dispatch, so with actions off the request never reaches this
-   * function at all. This copy is the defence-in-depth layer, and its
-   * ordering is observable only from here. Swapping the two blocks passes
-   * every other test in both suites.
+   * The order of the two checks above: with actions off, a 415 would reveal
+   * that the route exists. The integration suite cannot see this, because
+   * proxy.ts gates the path before the request reaches this function.
    */
   it('answers 404 rather than 415 when actions are off, whatever the body claims', async () => {
     delete process.env.PGOPS_ALLOW_ACTIONS;
@@ -85,10 +68,7 @@ describe('openAction', () => {
     expect((await openAction(post({}), 'prod') as Response).status).toBe(400);
   });
 
-  /**
-   * Tier 2. A confirmation the client alone enforces is one curl away from
-   * bypassed, so the comparison happens here.
-   */
+  /** Tier 2: the confirmation is compared server-side, since curl bypasses the client. */
   it('rejects a tier-2 request whose typed confirmation does not match', async () => {
     const r = await openAction(post({ reason: 'x', confirm: 'not-the-db' }), 'prod',
       { confirm: 'prod' });
@@ -100,11 +80,7 @@ describe('openAction', () => {
     expect((r as Response).status).toBe(400);
   });
 
-  /**
-   * Exact, not case-insensitive. The fixture differs only in case precisely so
-   * a loosened comparison is visible — a typed confirmation that accepts a
-   * near-miss is a confirmation the operator did not actually give.
-   */
+  /** The fixture differs only in case, so a case-insensitive comparison fails here. */
   it('compares the confirmation exactly, not loosely', async () => {
     const r = await openAction(post({ reason: 'x', confirm: 'PROD' }), 'prod',
       { confirm: 'prod' });
@@ -123,11 +99,7 @@ describe('openAction', () => {
     expect((r as ActionRequest).actor).toMatch(/^alice@/);
   });
 
-  /**
-   * Absent auth is recorded honestly rather than falling back to the
-   * container's OS user and container id, which is what writeAudit would do
-   * on its own. See ActionMeta's docblock.
-   */
+  /** Without this, writeAudit would fall back to the container's OS user and id. */
   it('records anonymous when no actor header is present', async () => {
     const r = await openAction(post({ reason: 'x' }), 'prod');
     expect((r as ActionRequest).actor).toMatch(/^anonymous@/);
@@ -149,10 +121,7 @@ describe('openAction', () => {
   });
 });
 
-/**
- * The CSRF defence and the body parse, shared with the tier-0 explain route.
- * No tier gate here: that stays in openAction, above this call.
- */
+/** Shared with the tier-0 explain route; the tier gate stays in openAction. */
 describe('readJson', () => {
   const req = (body: string, type: string) =>
     new Request('http://console.example/api/db/prod/explain', { method: 'POST', headers: { 'content-type': type }, body });

@@ -32,26 +32,28 @@ is in [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Features
 
 **Incident pages, polled every 5 seconds.** Every configured database with
-its worst verdict; a triage page with one band per gate, where an escalated
-check expands into a panel carrying cause and remedy and a healthy one
-collapses to a line; live sessions with connection sources and an SSL
-breakdown; the lock wait graph as a tree, root blocker on top and cycles
-marked; `pg_stat_statements` sortable three ways with a slow-query panel; and
-the wraparound horizon, replication role, lag, standbys and slots.
+its worst verdict; each database as a tree on a clock: its tables, the
+statements running on them and the sessions running those, with a lock chain
+as one finding that names its root and offers Terminate, and a cursor that
+pins the page to any moment of the last day; every statement on a scatter
+of calls against mean time; and the wraparound horizon, replication
+role, lag, standbys and slots.
 
-**Hygiene pages, run on open.** Index hit rate and the missing, unused,
-duplicate, invalid and bloated ones, with the exact `CREATE INDEX` to run;
-every table in one SQL-sorted list with presets, and a page per relation;
-database and relation sizes with growth; running vacuums with progress and
-the last vacuum per table; every sequence measured against the ceiling of the
-column it feeds, not its own; and Explain, which plans a pasted statement and
-names the index that would serve it.
+**The catalog, on the same clock.** Tables, statements and indexes each as a
+scatter of the whole population over its rows, and a page per table and per
+statement; never-used and duplicate indexes with what covers them, bloat and
+index suggestions from a button; every sequence measured against the ceiling
+of the column it feeds, not its own; and Explain, which plans a pasted
+statement and names the index that would serve it.
 
 **History, with a store configured.** Statement statistics and relation sizes
-captured every 5 minutes, never by resetting shared counters. 24-hour charts
-of execution time and call volume, per database and per statement shape;
-30-day size history per relation; hygiene findings cached on each capture and
-summarised on triage with the age of the reading. One health row per database
+captured every 5 minutes, never by resetting shared counters. Statement
+numbers over any window of the last fourteen days; size history per
+relation; the catalog stored on each capture, with hourly counters per table
+and index.
+A sample of every session not idle each 15 seconds, kept two days, and its
+per-minute rollup kept fourteen; without a store the tree's clock holds the
+last 15 minutes in memory. One health row per database
 per minute, kept 90 days, charted per fleet and per database.
 
 **Operations.** HTTP basic auth over every route, a least-privilege role
@@ -138,23 +140,14 @@ requirement.
 |---|---|---|
 | `/` | Every database with its worst verdict. An unreachable database shows `UNKNOWN`, never `OK`. | Every 30 s |
 | `/health` | Every database, six charts, last 48 hours. | Every 60 s |
-| `/db/<name>` | Triage. One band per gate, escalated checks expanded, cached hygiene findings. | Every 5 s |
-| `/db/<name>/sessions` | Live sessions, connection sources, SSL breakdown, terminate controls. | Every 5 s |
-| `/db/<name>/locks` | Lock wait graph as a tree. | Every 5 s |
-| `/db/<name>/queries` | Statement statistics, slow queries, 24-hour load charts, statistics reset. | Every 5 s |
-| `/db/<name>/queries/<queryid>` | One statement shape over 24 hours: calls, time, rows, blocks read. | On open |
-| `/db/<name>/queries/explain` | Plan a pasted statement. | On open |
-| `/db/<name>/queries/indexes` | Index hit rate, missing, unused, duplicate and invalid indexes. | On open |
-| `/db/<name>/queries/indexes/bloat` | Index bloat estimate. | On open |
-| `/db/<name>/queries/indexes/suggested` | Suggested indexes, with the statement to run. | On open |
-| `/db/<name>/queries/tables` | Table hit rate, unused tables, per-table statistics. | On open |
-| `/db/<name>/tables` | Every table, sorted and searched in SQL, with presets. | On open |
-| `/db/<name>/tables/<relation>` | One relation: size over 30 days, indexes, sequences, transaction ID age. | On open |
+| `/db/<name>` | The tree on the clock: tables, the statements on them, the sessions running those; a lock chain as one finding with Terminate. | Every 5 s |
+| `/db/<name>/queries` | Every statement on a scatter of calls against mean time, then the hottest on the clock. | Every 5 s |
+| `/db/<name>/queries/<queryid>` | One statement on the clock: its numbers, load, tables and sessions; its plan in place. | Every 5 s |
+| `/db/<name>/explain` | Plan a pasted statement. | On open |
+| `/db/<name>/tables` | Every table on a scatter of rows written against size, then the rows; unowned sequences at the foot. | On open |
+| `/db/<name>/indexes` | Every index on a scatter of scans against size; the list to drop; bloat and index suggestions from a button. | On open |
+| `/db/<name>/tables/<relation>` | One table on the clock: load, dead rows, rows written and read, size; its statements, indexes and sequences. Analyze. | Every 5 s |
 | `/db/<name>/cleanup` | Wraparound horizon, replication role and lag, slots, server settings. | Every 5 s |
-| `/db/<name>/cleanup/space` | Database size, size over 30 days, largest relations, 7-day growth. | On open |
-| `/db/<name>/cleanup/space/<relation>` | One relation's size over 30 days. | On open |
-| `/db/<name>/cleanup/maintenance` | Running vacuums with progress, last vacuum and analyze, transaction ID age. Analyze action. | On open |
-| `/db/<name>/cleanup/sequences` | Every sequence against its column's ceiling. | On open |
 | `/db/<name>/health` | One database's stored health by gate, 6 hours to 90 days, with trend. | On open |
 
 Every page under `/db/<name>` carries a status line with the database, role,
@@ -172,7 +165,7 @@ it.
 | Tier | Actions | Gate |
 |---|---|---|
 | 0 | Every read, and explaining a statement | Always available |
-| 1 | Terminate one session. Analyze tables. | `PGOPS_ALLOW_ACTIONS=true`, plus an inline confirmation with a required reason |
+| 1 | Terminate one session. Analyze a table. | `PGOPS_ALLOW_ACTIONS=true`, plus an inline confirmation with a required reason |
 | 2 | Terminate every long-running query. Reset query statistics. Reset database statistics. | Tier 1, plus the database name typed back and checked on the server |
 | 3 | Schema changes | Not implemented, deliberately. See [CONTRIBUTING.md](CONTRIBUTING.md#the-five-declines). |
 

@@ -10,9 +10,7 @@ describe('databaseActivity', () => {
       // when its first message arrives, a moment after the database exists.
       // Read before that, `stats_reset` is null; read after, it is the
       // entry's creation time, and `counterRates` rightly calls that a
-      // reset. Whether the first reading beat the collector was a race this
-      // test lost four runs in four on 2026-10-07, on a commit that had
-      // passed the full matrix that morning. Wait for the entry.
+      // reset. Wait for the entry.
       await awaitPublished(
         pool,
         'the database\'s statistics entry',
@@ -23,17 +21,9 @@ describe('databaseActivity', () => {
       await pool.query('CREATE TABLE da_t (id int)');
       for (let i = 0; i < 20; i++) await pool.query('INSERT INTO da_t VALUES ($1)', [i]);
       await pool.query('BEGIN'); await pool.query('SELECT 1'); await pool.query('ROLLBACK');
-      // Brief defect, found running this test for real: a bare
-      // `setTimeout(1_000)` here is exactly the trap harness.ts's own
-      // `awaitPublished` docblock describes — PG15+ only flushes a
-      // backend's local stats to shared memory at transaction end, no more
-      // often than PGSTAT_MIN_INTERVAL (1s), so a fixed one-second sleep
-      // raced that interval and lost on PG 17 in this environment
-      // (xact_commit and tup_inserted read back byte-identical to `a` even
-      // after 3s, confirmed by hand with a throwaway debug test before
-      // writing this comment). Polling for the actual counter to move,
-      // the way every other integration test in this package already does,
-      // is the fix — not a longer fixed sleep, which only narrows the race.
+      // Poll rather than sleep: PG15+ flushes a backend's stats to shared
+      // memory at transaction end, no more often than PGSTAT_MIN_INTERVAL
+      // (1s), so a fixed sleep races that interval.
       await awaitPublished(
         pool,
         'databaseActivity counters after INSERTs',

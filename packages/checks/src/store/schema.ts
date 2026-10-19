@@ -5,16 +5,16 @@ import { SQL as M002 } from './migrations/002-query-stats-query-id.js';
 import { SQL as M003 } from './migrations/003-check-results.js';
 import { SQL as M004 } from './migrations/004-query-load.js';
 import { SQL as M005 } from './migrations/005-health-stats.js';
+import { SQL as M006 } from './migrations/006-samples.js';
+import { SQL as M007 } from './migrations/007-captured.js';
+import { SQL as M008 } from './migrations/008-drop-check-results.js';
+import { SQL as M009 } from './migrations/009-shapes.js';
 
 /**
- * Forward-only, numbered, idempotent. No migration framework — the list is
- * the framework, and `packages/checks` keeps exactly one dependency.
- *
- * Every entry must be safe to run against a store already at that version:
- * `register()` fires on every dev-server restart, so re-running is the normal
- * case rather than the exceptional one.
+ * Forward-only, numbered, idempotent. Every entry must be safe to run
+ * against a store already at that version.
  */
-const MIGRATIONS: readonly string[] = [M001, M002, M003, M004, M005];
+const MIGRATIONS: readonly string[] = [M001, M002, M003, M004, M005, M006, M007, M008, M009];
 
 /** The version this build knows how to produce. */
 export const CURRENT_VERSION = MIGRATIONS.length;
@@ -22,16 +22,13 @@ export const CURRENT_VERSION = MIGRATIONS.length;
 /**
  * Bring `store` to CURRENT_VERSION and return the version now in force.
  *
- * Held under a session advisory lock so N replicas booting together migrate
- * once. Each migration and its version bump are ONE transaction: a migration
- * that half-applied and still recorded its version would leave a store that
- * reports healthy and is not.
+ * Held under a session advisory lock so replicas booting together migrate
+ * once. Each migration and its version bump are one transaction.
  */
 export async function migrate(store: Pool): Promise<number> {
   return withAdvisoryLock(store, MIGRATION_LOCK_KEY, async (client) => {
-    // Bootstrap: the version table lives inside migration 001, so the very
-    // first run has nowhere to read a version from. `to_regclass` answers
-    // without throwing, unlike a SELECT against a missing relation.
+    // The version table is created by migration 001, so the first run has
+    // none. `to_regclass` answers without throwing.
     const { rows: probe } = await client.query<{ present: string | null }>(
       `SELECT to_regclass('pgops.schema_version')::text AS present`,
     );
@@ -59,27 +56,15 @@ export async function migrate(store: Pool): Promise<number> {
       }
     }
 
-    // The version actually IN FORCE, which is not always this build's.
-    //
-    // This returned `MIGRATIONS.length` unconditionally, contradicting the
-    // sentence above it: a store migrated by a NEWER pgops — any rollback,
-    // and a rolling deploy where one replica is a version behind for a few
-    // minutes — reports a version LOWER than the schema it actually has.
-    // `Math.max` is the honest answer.
-    //
-    // And it is only a report. An older build is deliberately NOT refused
-    // here: migrations are additive, so its queries still work, and throwing
-    // would be worse than the problem — `startScheduler` swallows a failed
-    // migrate into "history is disabled for this process", so a rollback
-    // would silently turn history off instead of merely running against a
-    // schema with a column it does not read. The one line below is what makes
-    // the situation visible, since nothing consumes this return value; the
-    // package already logs on `audit.ts`'s reasoning, that a fact an operator
-    // can act on must not be swallowed.
+    // The store may have been migrated by a newer pgops (a rollback, or a
+    // rolling deploy). An older build is not refused, because throwing would
+    // turn all of its history off. Not every migration is additive, though:
+    // 008 drops pgops.check_results, so a build from before it loses its
+    // hygiene cache. It is logged instead.
     if (current > MIGRATIONS.length) {
       console.error(
         'pgops: store schema is at version %d but this build knows %d — '
-        + 'it was migrated by a newer pgops. History still works; finish the '
+        + 'it was migrated by a newer pgops. Some history may not work; finish the '
         + 'rollback or roll forward.',
         current, MIGRATIONS.length,
       );

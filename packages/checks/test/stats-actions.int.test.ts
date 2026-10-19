@@ -20,18 +20,15 @@ describe('resetQueryStats', () => {
 
       await resetQueryStats(ctx, { subcommand: 'test', reason: 'clearing' });
 
-      // Not zero: the reset itself and the counting query are statements too,
-      // and pg_stat_statements records them the moment they run. The
-      // assertion that means something is that what was there BEFORE is
-      // gone — so compare against the pre-reset count, never a literal.
+      // Not zero: the reset and the counting query are statements too, so
+      // compare against the pre-reset count.
       expect(await mine()).toBeLessThan(before);
     });
   }, 120_000);
 
   /**
-   * The safety property, and the most important assertion in this file.
-   * pg_stat_statements is SHARED across the cluster and the zero-argument
-   * form wipes all of it. A reset issued for one database must leave another
+   * pg_stat_statements is shared across the cluster and the zero-argument
+   * reset wipes all of it. A reset for one database must leave another
    * database's statements standing.
    */
   it('resets only the database it was asked for', async () => {
@@ -44,9 +41,8 @@ describe('resetQueryStats', () => {
         return Number(rows[0]!.n);
       };
       const before = await others();
-      // A guard against wiping the cluster that cannot OBSERVE the cluster is
-      // not a guard. If this server has no sibling-database statements the
-      // assertion below is vacuous, so fail loudly here instead.
+      // Guard the fixture: with no sibling-database statements the assertion
+      // below is vacuous.
       expect(before, 'no sibling-database statements to protect — fixture is vacuous')
         .toBeGreaterThan(0);
 
@@ -70,16 +66,10 @@ describe('resetStats', () => {
 
       await resetStats(ctx, { subcommand: 'test', reason: 'clearing' });
 
-      // Bounded poll, not a single read, and the reason is a real version
-      // difference rather than flakiness insurance. Before PG 15 the
-      // statistics live in a separate collector process and pg_stat_reset()
-      // sends it a MESSAGE — so a read issued immediately afterwards can
-      // still see the pre-reset snapshot. Verified: on 14 the before and
-      // after timestamps came back byte-identical. PG 15 moved statistics to
-      // shared memory and the same read is immediate.
-      //
-      // This waits for the observation, never for the action: resetStats has
-      // already returned, and a reset that never lands still fails here.
+      // Bounded poll, not a single read: before PG 15 pg_stat_reset() sends a
+      // message to a separate collector process, so an immediate read can
+      // still see the pre-reset snapshot. A reset that never lands still
+      // fails here.
       let after = before;
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline) {
@@ -113,11 +103,7 @@ describe('the reset actions audit', () => {
     });
   }, 120_000);
 
-  /**
-   * The half that a success-only test misses. An action that audited only
-   * when it worked would leave no trace of the case an incident review most
-   * needs: the operator pressed it and the database refused.
-   */
+  /** An action that audited only on success would leave no trace of the database refusing. */
   it('records a failure too, rather than only the successes', async () => {
     await withPostgres(async (ctx) => {
       const failing = {

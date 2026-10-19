@@ -1,31 +1,30 @@
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
+import { anyClient, unreadableClient } from './checks/shared.js';
 import { guardClient, messageOf, ownSql } from './run.js';
-import { HEALTH_LOCK_NS, releaseCaptureLock, tryCaptureLock } from './store/lock.js';
-import {
-  RETENTION, healthIsFresh, insertHealth, upsertDatabase, type HealthRow,
-} from './store/write.js';
+import { HEALTH_LOCK_NS, withCaptureLock } from './store/lock.js';
+import { RETENTION, healthIsFresh, insertHealth, type HealthRow } from './store/write.js';
 import type { CheckContext, FailureReason } from './types.js';
 
 /**
- * Per statement. A health tick that hangs on a monitored database is pgops
- * holding a connection there for no reading; five seconds is far longer than
- * any of these should take and far shorter than the next tick.
+ * Per statement. Far longer than any of these should take and far shorter
+ * than the next tick.
  */
 export const HEALTH_STATEMENT_TIMEOUT_MS = 5_000;
 
 /**
  * The six statements, by the name a failure is reported under, in the order
- * they run. `size` is LAST: pg_database_size stats every relation file, so
- * on a database with very many relations it is the one that can time out,
- * and placed last its timeout costs no other part its reading.
+ * they run. `size` is last: pg_database_size stats every relation file, so
+ * it is the one that can time out, and placed last its timeout costs no
+ * other part its reading.
  */
 export const HEALTH_PARTS = ['database', 'activity', 'wait', 'replication', 'xmin', 'size'] as const;
 
 const QUERY_CANCELED = '57014';
 
 /**
- * This database's cumulative counters and its frozen-xid age, in one row. `pg_stat_wal` is server-wide and rides here because it is one
- * more single-row read that any role may make.
+ * This database's cumulative counters and its frozen-xid age, in one row.
+ * `pg_stat_wal` is server-wide; it is read here as one more single-row read
+ * any role may make.
  *
  * Counters are cast to text: they are 64-bit (wal_bytes is numeric) and a
  * JavaScript number cannot hold them exactly.
@@ -52,18 +51,18 @@ const DATABASE_SQL = ownSql(`SELECT s.sessions::text            AS sessions,
 /**
  * Session counts, per database and server-wide, in one pass.
  *
- * \`hidden\` is how this statement says it could not look. A role without
- * pg_read_all_stats sees another role's session with its state (and backend
- * type) nulled, and a count taken over that is too small by an amount the
- * role cannot know. One hidden session is enough to make every count here
- * unknown, so \`healthRow\` stores them as null.
+ * A role without pg_read_all_stats sees another role's session with its
+ * state and backend type nulled and its database kept, so the connections
+ * are counted whole. What needs a state cannot be: `hidden` counts this
+ * database's unreadable clients, and if there is even one, `healthRow`
+ * stores active, idle in transaction and the longest query as null.
  *
- * The capturing backend is excluded from \`active\` and from the longest
+ * The capturing backend is excluded from `active` and from the longest
  * query: it is always running this statement.
  */
 const ACTIVITY_SQL = ownSql(`SELECT count(*) FILTER (WHERE client)::int AS server_connections,
        count(*) FILTER (WHERE client AND mine)::int AS connections,
-       count(*) FILTER (WHERE backend_type IS NULL OR (client AND state IS NULL))::int AS hidden,
+       count(*) FILTER (WHERE unreadable AND mine)::int AS hidden,
        count(*) FILTER (WHERE client AND mine AND state = 'active' AND NOT self)::int AS active,
        count(*) FILTER (WHERE client AND mine AND state LIKE 'idle in transaction%')::int AS idle_in_txn,
        coalesce(max(EXTRACT(EPOCH FROM now() - query_start))
@@ -73,17 +72,17 @@ const ACTIVITY_SQL = ownSql(`SELECT count(*) FILTER (WHERE client)::int AS serve
          - current_setting('superuser_reserved_connections')::int
          - COALESCE(NULLIF(current_setting('reserved_connections', true), '')::int, 0) AS max_connections
   FROM (SELECT backend_type, state, query_start,
-               backend_type = 'client backend' AS client,
+               ${anyClient()} AS client,
+               ${unreadableClient()} AS unreadable,
                datname = current_database()    AS mine,
                pid = pg_backend_pid()          AS self
           FROM pg_stat_activity) a`);
 
 /**
- * Sessions of THIS database waiting on a lock, and the longest wait.
+ * Sessions of this database waiting on a lock, and the longest wait.
  *
- * Filtered on datname, which the live \`blocked\` check deliberately is not:
- * that one answers "is the server stuck", this one is stored against one
- * database and must not charge it with another database's lock chain.
+ * Filtered on datname, unlike the live `blocked` check: this is stored
+ * against one database and must not include another database's lock chain.
  * pg_blocking_pids and pg_locks.waitstart are readable by any role.
  */
 const WAIT_SQL = ownSql(`SELECT count(*)::int AS blocked,
@@ -97,13 +96,12 @@ const WAIT_SQL = ownSql(`SELECT count(*)::int AS blocked,
 /**
  * On a standby, its own replay lag. On a primary, the worst standby's.
  * Null on a primary with no standby, or whose standbys this role cannot
- * read: both are "no figure", and the page says so in words.
+ * read.
  *
- * Postgres nulls \`replay_lag\` once a caught-up standby has been idle for a
- * moment, so a healthy standby on a quiet primary would read as "no
- * standby". A streaming standby that has replayed everything it was sent is
- * at zero lag, and is reported as zero. (An unprivileged role sees the LSNs
- * as null too, so this cannot invent a zero for a standby it cannot read.)
+ * Postgres nulls `replay_lag` once a caught-up standby has been idle for a
+ * moment, so a streaming standby that has replayed everything it was sent is
+ * reported as zero. An unprivileged role sees the LSNs as null too, so this
+ * cannot invent a zero for a standby it cannot read.
  */
 const REPLICATION_SQL = ownSql(`SELECT CASE
          WHEN NOT pg_is_in_recovery()
@@ -118,6 +116,7 @@ const REPLICATION_SQL = ownSql(`SELECT CASE
 const XMIN_SQL = ownSql(`SELECT coalesce(max(a), 0)::text AS xmin_age
   FROM (SELECT age(backend_xmin) AS a FROM pg_stat_activity
          WHERE backend_xmin IS NOT NULL AND pid <> pg_backend_pid()
+           AND (datid IS NULL OR datname = current_database())
         UNION ALL
         SELECT greatest(age(xmin), age(catalog_xmin)) FROM pg_replication_slots
          WHERE xmin IS NOT NULL OR catalog_xmin IS NOT NULL
@@ -154,17 +153,16 @@ export interface HealthParts {
 }
 
 /**
- * Lay the five parts out as one row. Pure, so the null rules have a unit test.
+ * Lay the parts out as one row. Pure, so the null rules have a unit test.
  *
- * A failed part leaves ITS columns null and the rest of the row lands: a role
- * that cannot read replication state still gets its connections charted.
+ * A failed part leaves its own columns null and the rest of the row lands.
  */
 export function healthRow(parts: HealthParts, ownStatements: number | null): HealthRow {
   const { database: d, activity: a, wait: w, replication: r, xmin: x, size: z } = parts;
   const seen = a !== null && a.hidden === 0 ? a : null;
   return {
-    connections: seen?.connections ?? null,
-    server_connections: seen?.server_connections ?? null,
+    connections: a?.connections ?? null,
+    server_connections: a?.server_connections ?? null,
     max_connections: a?.max_connections ?? null,
     sessions: d?.sessions ?? null,
     sessions_abandoned: d?.sessions_abandoned ?? null,
@@ -194,20 +192,16 @@ export function healthRow(parts: HealthParts, ownStatements: number | null): Hea
 }
 
 /**
- * Run the statements on ONE connection to the monitored database.
+ * Run the statements on one connection to the monitored database, not six
+ * pool queries.
  *
- * One connection, not six pool queries: a tool that samples sixty databases
- * a minute must not be six connections wide on each.
+ * Each statement runs in its own transaction under SET LOCAL. A session-level
+ * SET through a transaction-mode pooler lands on a server connection the
+ * application shares, and the application's statements then die at five
+ * seconds.
  *
- * Each statement runs in its own transaction under SET LOCAL, the way
- * `queryWithTimeout` in run.ts does. A session-level SET would be simpler
- * and is wrong: through a transaction-mode pooler it lands on a server
- * connection the application shares, and the application's statements then
- * die at five seconds.
- *
- * The FIRST timeout ends the sampling. A database that has stopped answering
- * would otherwise cost one timeout per statement, serially, and enough of
- * those make every other database's rows arrive too far apart to join.
+ * The first timeout ends the sampling, so a database that has stopped
+ * answering costs one timeout rather than one per statement.
  */
 export async function sampleHealth(
   target: Pool,
@@ -262,12 +256,11 @@ export type HealthOutcome =
 /**
  * Sample one database and store one row.
  *
- * Lock and freshness are checked BEFORE the monitored database is touched,
+ * Lock and freshness are checked before the monitored database is touched,
  * so a replica that loses the race costs that database nothing.
  *
- * A database that cannot be reached writes NO row. The gap in the chart is
- * the record; a row of nulls would say "pgops looked and could see nothing",
- * which is a different thing.
+ * A database that cannot be reached writes no row; the gap in the chart is
+ * the record.
  *
  * `ownStatements` is the caller's count of what it sent this database since
  * its last row, or null when it does not know (the first tick after boot).
@@ -277,29 +270,7 @@ export async function captureHealth(
   name: string,
   ownStatements: number | null = null,
 ): Promise<HealthOutcome> {
-  if (!ctx.store) {
-    return {
-      ok: false,
-      reason: 'missing-store',
-      message: 'No store configured; set PGOPS_STORE_URL to record health.',
-    };
-  }
-  let client;
-  let release;
-  try {
-    client = await ctx.store.connect();
-    release = guardClient(client);
-  } catch (err) {
-    return { ok: false, reason: 'unreachable', message: messageOf(err) };
-  }
-  let databaseId: number | null = null;
-  let locked = false;
-  try {
-    databaseId = await upsertDatabase(client, name);
-    if (!(await tryCaptureLock(client, databaseId, HEALTH_LOCK_NS))) {
-      return { ok: 'skipped', reason: 'locked' };
-    }
-    locked = true;
+  const sampleAndStore = async (client: PoolClient, databaseId: number): Promise<HealthOutcome> => {
     if (await healthIsFresh(client, databaseId)) return { ok: 'skipped', reason: 'fresh' };
 
     let sample;
@@ -321,10 +292,6 @@ export async function captureHealth(
       throw err;
     }
     return { ok: true, missing: sample.missing };
-  } catch (err) {
-    return { ok: false, reason: 'error', message: messageOf(err) };
-  } finally {
-    if (locked && databaseId !== null) await releaseCaptureLock(client, databaseId, HEALTH_LOCK_NS);
-    release();
-  }
+  };
+  return withCaptureLock(ctx, name, { recording: 'health', ns: HEALTH_LOCK_NS }, sampleAndStore);
 }

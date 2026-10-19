@@ -1,15 +1,7 @@
 /**
- * What an operator sees when pgops cannot read its own configuration.
- *
- * F4 (final review): `ConfigError` used to escape uncaught out of
- * `databaseNames()` on both routes that call it, so Next answered with its
- * generic 500 page and the message — which names the exact input the operator
- * set, and was Task 1's entire justification — survived only in the container
- * log. A blank 500 sends an on-call engineer to the database. This sends them
- * to the deployment they just changed.
- *
- * Deliberately not `notFound()` and deliberately not a thrown error: neither
- * of those can carry a message, and the message is the whole value here.
+ * What an operator sees when pgops cannot read its own configuration. Not
+ * `notFound()` and not a thrown error: neither can carry the message, which
+ * names the input the operator set.
  */
 export function ConfigErrorPage({ message }: { message: string }) {
   return (
@@ -20,13 +12,7 @@ export function ConfigErrorPage({ message }: { message: string }) {
         <p className="text-muted-foreground">{message}</p>
       </div>
 
-      {/* The message above names what is WRONG. This names what RIGHT looks
-          like. They are different questions, and the page answered only the
-          first — leaving an operator who is mid-deploy, and who reached this
-          page precisely because they do not have the shape in their head, to
-          go and find the README. Three inputs, in the precedence order the
-          server actually applies them, so the page also answers the follow-up
-          question: which one wins when more than one is set. */}
+      {/* The three inputs, in the precedence order the server applies them. */}
       <section className="mt-4 rounded-lg border p-4 text-sm">
         <h2 className="mb-3 font-medium">Set one of these, highest precedence first</h2>
         <dl className="grid gap-3">

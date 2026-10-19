@@ -17,7 +17,7 @@ describe('horizon', () => {
         expect(b).toBeDefined();
         expect(b!.ageSecs).not.toBeNull();
         // A snapshot one second old on an idle test database pins almost nothing,
-        // so `ok` here is the verdict being RIGHT, not the verdict being absent.
+        // so `ok` here is the verdict being right, not absent.
         expect(res.data.truncated).toBe(false);
         expect(res.verdict).toEqual({ level: 'ok' });
       } finally {
@@ -27,31 +27,32 @@ describe('horizon', () => {
     });
   }, 120_000);
 
+  it('does not name a snapshot held in another database, which cannot hold this one back', async () => {
+    await withPostgres(async (ctx, pool) => {
+      const url = new URL((pool as unknown as { options: { connectionString: string } }).options.connectionString);
+      url.pathname = '/postgres';
+      const elsewhere = new pg.Client({ connectionString: url.toString() });
+      elsewhere.on('error', () => {});
+      try {
+        await elsewhere.connect();
+        await elsewhere.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+        await elsewhere.query('SELECT 1');
+        const { rows } = await elsewhere.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+        const res = await runCheck(ctx, horizon);
+        if (!res.ok) throw new Error(res.message);
+        expect(res.data.holders.map((h) => h.who)).not.toContain(String(rows[0]!.pid));
+      } finally {
+        await elsewhere.end().catch(() => {});
+      }
+    });
+  }, 120_000);
+
   /**
-   * STEP 3B — MEASURED, NOT ASSUMED.
-   *
-   * `pg_stat_activity` hides some columns of another role's backend from a
-   * role lacking `pg_read_all_stats` — `query` and `query_id` are the
-   * documented ones. Whether `backend_xmin` is ALSO one of them decides
-   * whether this check can render `ok` on a database where a real holder is
-   * invisible to it, which is exactly the Stage 1 Sessions defect in a new
-   * place: "we could not fully look" rendering as "it is fine".
-   *
-   * MEASURED against a real PostgreSQL 17 container (see this task's report
-   * for the manual reproduction this test formalises): a role with neither
-   * superuser, `pg_read_all_stats`, nor any relation to the holder role
-   * still sees the holder's `backend_xmin` and can compute `age(backend_xmin)`
-   * from it. What that role does NOT see is `xact_start`, `state` and `query`
-   * for the foreign backend — they come back NULL / `<insufficient
-   * privilege>`. Those three feed only `ageSecs` and `detail` (informational
-   * — the verdict is documented above to never depend on them), so the
-   * restriction degrades the DISPLAY, not the JUDGMENT: `xminAge` is intact,
-   * and the verdict this check computes from it is the correct one, not a
-   * false `ok`.
-   *
-   * This is therefore kept as a REGRESSION LOCK on that measurement, not a
-   * requirement this check declares — see the task-3 report for the finding
-   * stated as a decision point rather than something patched into this file.
+   * Locks a measured Postgres behaviour. A role with neither superuser,
+   * `pg_read_all_stats` nor membership in the holder's role still sees the
+   * holder's `backend_xmin`. It does not see `xact_start`, `state` or
+   * `query`, which feed only `ageSecs` and `detail`. So the restriction
+   * degrades the display, not the verdict: `xminAge` is intact.
    */
   it('sees a foreign backend_xmin without pg_read_all_stats, though it loses the foreign query text', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -59,9 +60,8 @@ describe('horizon', () => {
       const holderRole = `h_horizon_${suffix}`;
       const restrictedRole = `r_horizon_${suffix}`;
       await pool.query(`CREATE ROLE ${holderRole} LOGIN PASSWORD 'holder_pw'`);
-      // No GRANT of pg_read_all_stats and no membership relationship to
-      // holderRole — the exact shape of an ops/monitoring role distinct from
-      // the application role it is watching.
+      // No pg_read_all_stats and no membership in holderRole: a monitoring
+      // role distinct from the application role it watches.
       await pool.query(`CREATE ROLE ${restrictedRole} LOGIN PASSWORD 'restricted_pw'`);
 
       const baseUri = new URL(
@@ -89,11 +89,9 @@ describe('horizon', () => {
           if (!res.ok) throw new Error(res.message);
 
           const seen = res.data.holders.find((h) => h.detail.includes('horizon_test_holder'));
-          // MEASURED: backend_xmin (and therefore xminAge, the judged
-          // quantity) is visible to the restricted role. If this ever starts
-          // failing, that is the Stage-1-shaped defect the brief warned
-          // about, and the fix belongs in a `requires: [{kind:'role', ...}]`
-          // decision, not in loosening this assertion.
+          // If this starts failing, the check can render a false `ok` for
+          // this role; the fix is a `requires: [{kind:'role', ...}]`
+          // decision, not loosening this assertion.
           expect(seen).toBeDefined();
           expect(seen!.xminAge).toBeGreaterThanOrEqual(0);
         } finally {
@@ -104,9 +102,8 @@ describe('horizon', () => {
           await holderClient.query('ROLLBACK').catch(() => {});
           await holderClient.end().catch(() => {});
         }
-        // Roles are cluster-wide, not scoped to withPostgres's per-test
-        // database — must be torn down explicitly, and a bare DROP ROLE
-        // fails on the objects these roles have connected under.
+        // Roles are cluster-wide — a bare DROP ROLE fails on the objects
+        // these roles connected under.
         await pool.query(`REVOKE ALL ON SCHEMA public FROM ${holderRole}`).catch(() => {});
         await pool.query(`REVOKE ALL ON SCHEMA public FROM ${restrictedRole}`).catch(() => {});
         await pool.query(`DROP OWNED BY ${holderRole}`).catch(() => {});
@@ -118,28 +115,23 @@ describe('horizon', () => {
   }, 120_000);
 
   /**
-   * STEP 3B — MEASURED, NOT ASSUMED. Driving the console at 390px against a
-   * live database showed the Cleanup page's Oldest snapshot table naming one
-   * of pgops's own backends as the thing pinning the xmin horizon: one page
-   * render fires about six checks in parallel on separate pool connections,
-   * so at the instant any one runs, the other five are themselves open
-   * backends. See activity.int.test.ts's version of this pair for the fuller
-   * explanation — the cause and the fix are shared between the two checks.
+   * One page render fires about six checks in parallel on separate pool
+   * connections, so while any one runs the others are open backends. Without
+   * the filter the page names one of pgops's own as pinning the horizon.
    */
   it('does not count the console itself among xmin holders', async () => {
     await withPostgres(async (ctx, pool) => {
       const other = await pool.connect();
       try {
-        // Both connections wear the same application_name, which is what
-        // pgops's own parallel check traffic looks like: six checks, six
-        // connections, one page render.
-        await ctx.target.query(`SET application_name = 'pgops-probe'`);
-        await other.query(`SET application_name = 'pgops-probe'`);
+        // Both connections share an application_name, as pgops's parallel
+        // checks do.
+        await ctx.target.query(`SET application_name = 'pgops'`);
+        await other.query(`SET application_name = 'pgops'`);
         await other.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
         await other.query('SELECT 1'); // takes the snapshot, sets backend_xmin
         const res = await runCheck(ctx, horizon);
         if (!res.ok) throw new Error(res.message);
-        expect(res.data.holders.some((h) => h.detail.startsWith('pgops-probe'))).toBe(false);
+        expect(res.data.holders.some((h) => h.detail.startsWith('pgops '))).toBe(false);
       } finally {
         await other.query('ROLLBACK').catch(() => {});
         await other.query(`SET application_name = ''`).catch(() => {});

@@ -9,11 +9,7 @@ const { Client } = pg;
 /** Distinctive name — slots are cluster-wide and visible to every other test file. */
 const SLOT = 'pgops_test_slots_active';
 
-/**
- * Repeatedly polls `pg_replication_slots.active` until it matches `want` or
- * `timeoutMs` elapses. A fixed `setTimeout` sleep would either race under
- * CI's slower scheduling or waste time locally; polling adapts to both.
- */
+/** Polls `pg_replication_slots.active` until it matches `want` or `timeoutMs` elapses. */
 async function waitForActive(pool: pg.Pool, want: boolean, timeoutMs = 10_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -30,9 +26,7 @@ async function waitForActive(pool: pg.Pool, want: boolean, timeoutMs = 10_000): 
 /**
  * `pg_drop_replication_slot` raises "replication slot ... is active for PID
  * ..." if called before the server has finished tearing down the walsender
- * that just disconnected — a race, not a bug in the drop itself. Retrying
- * briefly is cheaper and less flaky than trying to synchronize on the exact
- * moment the backend releases the slot.
+ * that just disconnected, so the drop is retried briefly.
  */
 async function dropSlotWithRetry(pool: pg.Pool, name: string, attempts = 20): Promise<void> {
   for (let i = 0; i < attempts; i++) {
@@ -49,22 +43,16 @@ async function dropSlotWithRetry(pool: pg.Pool, name: string, attempts = 20): Pr
 describe('slots', () => {
   it('measures retained WAL for a genuinely ACTIVE slot too (A6)', async () => {
     await withPostgres(async (ctx, pool) => {
-      // Both the slot and the replication connection are created INSIDE this
-      // try, and cleanup covers both regardless of which succeeded: a
-      // replication connect() can fail for ordinary reasons (pg_hba.conf,
-      // wal_level, max_wal_senders exhaustion, a transient error) even after
-      // the slot itself was created successfully. A slot is CLUSTER-WIDE and
-      // outlives this test's own database — an un-dropped one retains WAL in
-      // the shared container for every test file that runs afterward (see
-      // the file-top comment on SLOT). Fix round 1: this used to create the
-      // slot and connect() ahead of the try, so a failed connect() leaked it.
+      // The slot and the replication connection are both created inside this
+      // try: a replication connect() can fail after the slot was created, and
+      // a slot is cluster-wide, so an un-dropped one retains WAL in the
+      // shared container for every later test file.
       let slotCreated = false;
       let replClient: pg.Client | undefined;
       let streamDone: Promise<unknown> | undefined;
       try {
         // immediately_reserve=true: without it restart_lsn stays NULL until a
-        // consumer first connects, which would make this fixture indistinguishable
-        // from "slot never used" rather than "consumer connected, not advancing".
+        // consumer first connects.
         const { rows: created } = await pool.query<{ slot_name: string; lsn: string }>(
           "SELECT * FROM pg_create_physical_replication_slot($1, true)",
           [SLOT],
@@ -72,16 +60,9 @@ describe('slots', () => {
         slotCreated = true;
         const startLsn = created[0]!.lsn;
 
-        // A real walsender connection, held open and never advanced — this is
-        // what makes the slot ACTIVE, not merely present. The old query's
-        // `FILTER (WHERE NOT active)` excluded exactly this row.
-        //
-        // `replication` is a genuine libpq/node-pg startup parameter (used by
-        // every logical-replication client built on node-pg) but @types/pg's
-        // `ClientConfig` doesn't declare it, so this object literal needs an
-        // `as unknown as` widening to accept it. `pool.options.connectionString`
-        // itself typechecks fine without any cast — only the extra `replication`
-        // field is the reason this widening exists.
+        // A real walsender connection, held open and never advanced, is what
+        // makes the slot active. `replication` is a real startup parameter
+        // that @types/pg's `ClientConfig` does not declare, hence the cast.
         replClient = new Client({
           connectionString: pool.options.connectionString,
           replication: 'database',
@@ -94,9 +75,8 @@ describe('slots', () => {
         const becameActive = await waitForActive(pool, true);
         expect(becameActive).toBe(true);
 
-        // Force some WAL forward without ever feeding it back to the slot —
-        // restart_lsn stays pinned at startLsn while pg_current_wal_lsn() moves,
-        // exactly like a connected-but-stalled logical consumer.
+        // Move WAL forward without feeding it back to the slot: restart_lsn
+        // stays pinned at startLsn while pg_current_wal_lsn() moves.
         await pool.query('CREATE TABLE IF NOT EXISTS pgops_wal_bump (id int)');
         await pool.query('INSERT INTO pgops_wal_bump SELECT generate_series(1, 500)');
 
@@ -104,8 +84,8 @@ describe('slots', () => {
         if (!r.ok) throw new Error(r.message);
         const slot = r.data.slots.find((s) => s.name === SLOT);
         expect(slot).toBeDefined();
-        // Proves the ACTIVE branch specifically, not merely "the slot exists":
-        // the pre-fix query zeroed retained bytes exactly when this is true.
+        // The active branch specifically: a `FILTER (WHERE NOT active)` would
+        // zero retained bytes exactly when this is true.
         expect(slot!.active).toBe(true);
         expect(slot!.retainedBytes).not.toBeNull();
         expect(slot!.retainedBytes as number).toBeGreaterThan(0);
@@ -127,19 +107,10 @@ describe('slots', () => {
   });
 
   /**
-   * What this DOES prove: against a real (single-node, primary) Postgres,
-   * `pg_is_in_recovery()` evaluates to false and Postgres picks the
-   * `pg_current_wal_lsn()` branch of the CASE without erroring — the same
-   * branch the full check's own query above already exercises every time it
-   * runs in this harness.
-   *
-   * What this does NOT prove: that the `pg_last_wal_receive_lsn()` branch
-   * returns the right value on an actual standby. This harness runs one
-   * Postgres node; there is no streaming replica to observe recovery=true
-   * against. `pg_current_wal_lsn()` itself is documented to raise
-   * "recovery is in progress" when called on a real standby — that failure
-   * mode, and the CASE's other branch, are asserted structurally above
-   * (the SQL text contains both recovery-safe calls) but not exercised.
+   * Proves only the primary branch of the CASE. The harness runs one node, so
+   * the `pg_last_wal_receive_lsn()` branch is not exercised here;
+   * `pg_current_wal_lsn()` raises "recovery is in progress" on a standby,
+   * which is why the CASE exists.
    */
   it('resolves the recovery-safe CASE to pg_current_wal_lsn() on a primary, without erroring', async () => {
     await withPostgres(async (_ctx, pool) => {
@@ -151,8 +122,6 @@ describe('slots', () => {
       );
       expect(rows[0]!.in_recovery).toBe(false);
       expect(rows[0]!.lsn).not.toBeNull();
-      // On a primary the CASE must land on the pg_current_wal_lsn() branch —
-      // confirmed by equality with a direct, unconditional call to it.
       expect(rows[0]!.lsn).toBe(rows[0]!.direct);
     });
   }, 120_000);
@@ -165,8 +134,7 @@ describe('slots', () => {
       { slots: [{ name: 's', database: 'd', active: false, slotType: 'physical', retainedBytes: bytes }] },
       t,
     ).level;
-    // I5/spec §9: each threshold at its value and one byte either side. The
-    // warn threshold had no boundary assertion at all before.
+    // Each threshold at its value and one byte either side.
     expect(at(warn - 1)).toBe('ok');
     expect(at(warn)).toBe('warn');
     expect(at(warn + 1)).toBe('warn');

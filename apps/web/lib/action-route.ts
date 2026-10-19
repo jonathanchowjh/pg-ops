@@ -1,6 +1,6 @@
-import type { CheckContext } from '@pgops/checks';
-import { ACTOR_HEADER } from '@/lib/auth';
-import { actionsAllowed } from '@/lib/actions';
+import { messageOf, type ActionMeta, type CheckContext } from '@pgops/checks';
+import { ACTOR_HEADER, authConfigured } from '@/lib/auth';
+import { actionsAllowed, publicHost } from '@/lib/config';
 import { contextFor, UnknownDatabaseError } from '@/lib/pools';
 
 export interface ActionRequest {
@@ -14,37 +14,24 @@ export interface ActionRequest {
 }
 
 /**
- * The preamble every action route shares, and every line of it is
- * load-bearing security.
- *
- * Five routes hand-maintaining sixty identical lines is five places for one of
- * them to drift, silently. It stays a bare function rather than a class:
- * nothing is shared between calls.
- *
- * THE ORDER IS NOT STYLISTIC.
+ * The preamble every action route shares. The order is a security property:
  *
  *   1. The tier gate, before the body is read. 404 and not 403, because a 403
- *      advertises an endpoint that is merely switched off. Spec §7.1: a
- *      deployment that never sets PGOPS_ALLOW_ACTIONS cannot reach these
- *      routes at all.
- *   2. The media type, BELOW the gate. A 415 from a deployment with actions
+ *      advertises an endpoint that is merely switched off.
+ *   2. The media type, below the gate. A 415 from a deployment with actions
  *      off would advertise the route the 404 exists to hide.
  *   3. Body, reason, confirmation, context.
  *
- * The media-type check is the CSRF defence, and the reason it works is the
- * non-obvious part: a cross-origin HTML form can send a body that parses as
- * JSON, but `enctype` accepts only application/x-www-form-urlencoded,
- * multipart/form-data and text/plain, and nothing else can set a request
- * header cross-origin without a preflight these routes never answer. HTTP
- * basic-auth credentials ride cross-site automatically and there is no
- * SameSite equivalent for the Authorization header, so without this an
- * operator with the console open who visits a hostile page issues whatever
- * these routes accept.
+ * The media-type check is the CSRF defence. A cross-origin HTML form can send
+ * a body that parses as JSON, but `enctype` accepts only
+ * application/x-www-form-urlencoded, multipart/form-data and text/plain, and
+ * nothing else can set a request header cross-origin without a preflight
+ * these routes never answer. HTTP basic-auth credentials ride cross-site
+ * automatically and there is no SameSite equivalent for the Authorization
+ * header.
  *
  * Returns the Response to send, or the parsed request. Callers narrow with
- * `if (opened instanceof Response) return opened;` — not a thrown error, which
- * would need a catch in every route anyway and would make the 404 path an
- * exception.
+ * `if (opened instanceof Response) return opened;`.
  */
 export async function openAction(
   req: Request,
@@ -58,18 +45,14 @@ export async function openAction(
   const body = await readJson(req);
   if (body instanceof Response) return body;
 
-  // The only free-text field in the audit record, and the only thing that
-  // distinguishes a deliberate action from an accident when someone reads the
-  // log six months from now. Required, and required to be more than spaces.
+  // The only free-text field in the audit record. Required, and required to
+  // be more than spaces.
   const { reason } = body;
   if (typeof reason !== 'string' || reason.trim() === '') {
     return bad('reason is required.');
   }
 
-  // Tier 2 (web spec §7.1). Checked HERE, not only in the browser: a
-  // confirmation the client alone enforces is one curl away from bypassed.
-  // Compared exactly — a typed confirmation that accepts a near-miss is a
-  // confirmation the operator did not actually give.
+  // Tier 2. Checked here, not only in the browser, and compared exactly.
   if (opts.confirm !== undefined && body.confirm !== opts.confirm) {
     return bad(`confirm must be exactly "${opts.confirm}".`);
   }
@@ -78,26 +61,22 @@ export async function openAction(
   try {
     ctx = await contextFor(name);
   } catch (err) {
-    // An unknown database name is a 404 for the same reason a bad path is:
-    // nothing here to act on. Anything else is the console failing to reach a
-    // database it does know about.
+    // An unknown database name is a 404. Anything else is the console failing
+    // to reach a database it does know about.
     if (err instanceof UnknownDatabaseError) return missing();
-    return bad(err instanceof Error ? err.message : String(err), 502);
+    return failed(err);
   }
 
-  // PGOPS_PUBLIC_HOST first, the request's Host header second: the whole
-  // justification for auditing a host is "a host anyone can resolve", and the
-  // fallback is the client's own claim about the console's address. Read at
-  // request time, like every other env access here.
-  const host = process.env.PGOPS_PUBLIC_HOST ?? new URL(req.url).host;
+  // PGOPS_PUBLIC_HOST first, the request's Host header second: the fallback
+  // is the client's own claim about the console's address.
+  const host = publicHost(process.env) ?? new URL(req.url).host;
 
   return {
     ctx,
     // proxy.ts sets this header after authenticating and deletes any
     // client-supplied copy first, so it is either a real authenticated
-    // username or absent. Absent means auth is not configured, recorded
-    // honestly as "anonymous" rather than falling back to the container's OS
-    // user and container id.
+    // username or absent. Absent means auth is not configured, recorded as
+    // "anonymous".
     actor: `${req.headers.get(ACTOR_HEADER) ?? 'anonymous'}@${host}`,
     reason: reason.trim(),
     body,
@@ -106,11 +85,9 @@ export async function openAction(
 
 /**
  * The CSRF defence and the body parse, shared by every JSON route: the action
- * routes reach it through `openAction`, BELOW the tier gate; the tier-0
+ * routes reach it through `openAction`, below the tier gate; the tier-0
  * explain route calls it directly. See `openAction`'s docblock for why the
- * media type IS the defence. One copy, because the explain route would
- * otherwise be the sixth hand-maintained version of exactly the lines this
- * file was written to stop drifting.
+ * media type is the defence.
  */
 export async function readJson(req: Request): Promise<Record<string, unknown> | Response> {
   const mediaType = (req.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
@@ -125,16 +102,13 @@ export async function readJson(req: Request): Promise<Record<string, unknown> | 
 }
 
 /**
- * Latched, and read from the environment at request time rather than at module
- * scope — this app's configuration model is that the environment belongs to
- * the request. One warning now covers every action route rather than one per
- * route, which is a change from the kill route's own copy and an improvement:
- * the condition it warns about is a property of the deployment, not of a path.
+ * Latched: one warning per process covers every action route. The
+ * environment is read at request time rather than at module scope.
  */
 let warned = false;
 
 function warnIfActionsAreUnauthenticated(env: Record<string, string | undefined>) {
-  if (warned || !actionsAllowed(env) || env.PGOPS_USERNAME) return;
+  if (warned || !actionsAllowed(env) || authConfigured(env)) return;
   warned = true;
   console.warn(
     'pgops: PGOPS_ALLOW_ACTIONS is on and PGOPS_USERNAME is unset — '
@@ -146,18 +120,32 @@ function warnIfActionsAreUnauthenticated(env: Record<string, string | undefined>
 }
 
 // Named `missing`, not `notFound`: next/navigation also exports a `notFound()`
-// which THROWS rather than returning a Response.
+// which throws rather than returning a Response.
 function missing() {
   return new Response('Not found', { status: 404 });
 }
 
-function bad(message: string, status = 400) {
+/** A request the caller got wrong. */
+export function bad(message: string, status = 400): Response {
   return json({ error: message }, status);
 }
 
+/**
+ * An action that threw, most likely because the role lacks the privilege.
+ * Uncaught, Next answers a bare 500 with no JSON body and the client's
+ * `res.json()` fails. The audit record was written before this runs.
+ */
+export function failed(err: unknown): Response {
+  return bad(messageOf(err), 502);
+}
+
+/** What every action records, built in one place so no route can drop the actor or the database. */
+export function auditMeta(opened: ActionRequest, name: string, subcommand: string): ActionMeta {
+  return { subcommand, reason: opened.reason, actor: opened.actor, extra: { database: name } };
+}
+
 /** Every action route answers JSON, including its errors — the clients all
- * call `res.json()` on the response, so a bare body would throw over exactly
- * the message an operator needs to read. */
+ * call `res.json()` on the response. */
 export function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
     status,

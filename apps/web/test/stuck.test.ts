@@ -9,9 +9,7 @@ const lr = (pids: number[], crossed = true) => ({
   crossed: crossed ? { level: 'warn' as const, value: 60, unit: 'seconds' as const, because: 'b', remedy: 'kill it' } : undefined,
   measuredAt: 0,
 });
-// Annotated `Waiter`, so a nested `waiters` array is not inferred as
-// `never[]` — which is what apps/web's own typecheck caught when chainPids'
-// tests started building trees more than one level deep.
+// Annotated `Waiter`, so a nested `waiters` array is not inferred as `never[]`.
 const waiter = (pid: number): Waiter => ({
   pid, user: null, app: null, query: null, state: 'active', backendStart: null,
   waitingMode: null, waitingOn: null, xactAgeSecs: null, waitSecs: 5, waiters: [], cycle: false,
@@ -55,7 +53,7 @@ describe('stuckFrom', () => {
     const s = stuckFrom(lr([103, 104]), locks(102, [103, 104]));
     expect(s.allStuck).toBe(true);
     expect(s.longRunning.ok && s.longRunning.verdict?.note).toBe('2 waiting on 102');
-    // The LEVEL is untouched: the sessions really are stuck and the panel must stay loud.
+    // The level is untouched: the sessions really are stuck.
     expect(s.longRunning.ok && s.longRunning.verdict?.level).toBe('warn');
   });
 
@@ -64,9 +62,8 @@ describe('stuckFrom', () => {
     expect(s.longRunning.ok && s.longRunning.verdict?.note).toBe('pid running');
   });
 
-  // Review item 1: `locks()` above only ever builds a single root, so it
-  // cannot exercise `soleRoot === undefined` — construct two roots inline,
-  // in the same LocksData shape, each blocking one of the two waiters.
+  // `locks()` builds a single root, so two roots are constructed inline to
+  // exercise `soleRoot === undefined`.
   it('leaves the note alone when waiters queue behind two different roots', () => {
     const twoRoots = {
       ok: true as const,
@@ -89,10 +86,8 @@ describe('stuckFrom', () => {
     expect(s.longRunning.ok && s.longRunning.verdict?.note).toBe('pid running');
   });
 
-  // Review item 2: `lr()` always returns a non-null verdict, so nothing
-  // exercised the `verdict === null` branch — "the check reports but does
-  // not judge" (see types.ts's CheckResult doc) must stay null, not become
-  // an object with a note and no level.
+  // A null verdict ("the check reports but does not judge", see types.ts)
+  // must stay null, not become an object with a note and no level.
   it('leaves the verdict null when the long-running check does not judge', () => {
     const noVerdict = {
       ok: true as const,
@@ -108,10 +103,8 @@ describe('stuckFrom', () => {
     expect(s.longRunning.ok && s.longRunning.verdict).toBeNull();
   });
 
-  // Review item 4: a root can block sessions the long-running panel never
-  // lists (waiters that have not crossed the floor, or a truncated page), so
-  // the count must come from the wait graph (locks' totalWaiters), not from
-  // queries.length. Here the root has 3 waiters but only 2 are long-running.
+  // A root can block sessions the long-running panel never lists (below the
+  // floor, or truncated). Here the root has 3 waiters but only 2 are long-running.
   it('counts from the wait graph, not the panel row count, when they differ', () => {
     const s = stuckFrom(lr([103, 104]), locks(102, [103, 104, 106]));
     expect(s.longRunning.ok && s.longRunning.verdict?.note).toBe('3 waiting on 102');
@@ -129,10 +122,8 @@ describe('stuckFrom', () => {
 });
 
 /**
- * A17. The set the triage page folds on. Every pid the lock graph accounts
- * for — roots, waiters at any depth, and cycle back-edges — so a panel in
- * any band can ask whether the verdict it is about is already explained by
- * the chain.
+ * The set the triage page folds on: every pid the lock graph accounts for —
+ * roots, waiters at any depth, and cycle back-edges.
  */
 describe('chainPids', () => {
   it('collects every pid in the graph, at any depth', () => {
@@ -146,9 +137,9 @@ describe('chainPids', () => {
   });
 
   /**
-   * A cycle back-edge names a session that is genuinely in the chain, so it
-   * belongs in this set even though `countDistinctWaiters` skips it to avoid
-   * counting one session twice. Membership is not a count.
+   * A cycle back-edge names a session that is in the chain, so it belongs in
+   * this set even though `countDistinctWaiters` skips it to avoid counting
+   * one session twice.
    */
   it('includes a cycle back-edge', () => {
     const l = locks(1, []);
@@ -156,12 +147,7 @@ describe('chainPids', () => {
     expect([...chainPids(l)].sort((a, b) => a - b)).toEqual([1, 2]);
   });
 
-  /**
-   * Empty when the lock check did not run. A fold keyed on a reading this
-   * console could not take is the false-negative the whole console is built
-   * against: it would quietly demote four real verdicts on the strength of
-   * a graph nobody saw.
-   */
+  /** A fold must not demote real verdicts on the strength of a graph that could not be read. */
   it('is empty when the lock check failed', () => {
     expect(chainPids({ ok: false, reason: 'privilege', message: 'no' }).size).toBe(0);
   });

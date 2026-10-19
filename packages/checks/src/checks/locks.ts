@@ -1,4 +1,5 @@
 import type { Check, Verdict } from '../types.js';
+import { counted } from './shared.js';
 
 export interface LockRow {
   pid: number;
@@ -12,9 +13,8 @@ export interface LockRow {
   waiting_mode: string | null;
   waiting_on: string | null;
   /**
-   * Seconds this session has been waiting, from `pg_locks.waitstart` — NULL
-   * when the session holds no ungranted lock at all (a root blocker). See
-   * the `wait_secs` note in the SQL comment below.
+   * Seconds this session has been waiting, from `pg_locks.waitstart`. NULL
+   * when the session holds no ungranted lock (a root blocker).
    */
   wait_secs: string | null;
 }
@@ -23,20 +23,14 @@ export interface Waiter {
   pid: number; user: string | null; app: string | null; query: string | null;
   state: string | null; backendStart: string | null;
   waitingMode: string | null; waitingOn: string | null;
-  /** Age of this session's transaction. NOT time spent waiting — see A8. */
+  /** Age of this session's transaction, not time spent waiting. */
   xactAgeSecs: number | null;
   /**
-   * Time this session has actually spent waiting for a lock, from
-   * `pg_locks.waitstart` (PG14+; this package's floor is 14).
+   * Time this session has spent waiting for a lock, from
+   * `pg_locks.waitstart` (PG14+). `verdict` escalates on this.
    *
-   * NULL means "not waiting": a root blocker is unblocked by definition, so
-   * it holds no ungranted lock and has no wait to report. The exception is a
-   * deadlock, where every session in the cycle is waiting and `buildChains`
-   * seeds one of them as a root anyway — that root's `waitSecs` is a real
-   * number, because it really is waiting.
-   *
-   * This is the quantity `verdict` escalates on (I3). `xactAgeSecs` above is
-   * still worth showing an operator, but it is not this.
+   * NULL means "not waiting", as for a root blocker. A deadlock's seeded
+   * root is itself waiting, so its `waitSecs` is a number.
    */
   waitSecs: number | null;
   waiters: Waiter[];
@@ -50,89 +44,33 @@ export interface RootBlocker extends Omit<Waiter, 'cycle'> {
 
 export interface LocksData {
   roots: RootBlocker[];
-  /**
-   * True when the query's LIMIT dropped rows. A partial graph an operator
-   * knows is partial is useful; one they believe is complete is worse than
-   * nothing — see the SQL comment below for why this can't just be a bigger
-   * LIMIT.
-   */
+  /** True when the query's LIMIT dropped rows, so the graph is partial. */
   truncated: boolean;
 }
 
 /**
- * Pre-port review A2. The shipped query self-joined pg_locks on
- * (locktype, database, relation, transactionid) and had two defects:
+ * Edges come from pg_blocking_pids(), not a self-join on pg_locks: it knows
+ * hard blocks, soft blocks (queue position), parallel workers and prepared
+ * transactions, so advisory locks are not confused with each other and a
+ * queued blocker can be an intermediate node.
  *
- *  1. It omitted page, tuple, classid, objid and objsubid. Advisory locks are
- *     identified entirely by classid/objid, so every advisory lock in a database
- *     matched every other one — an uninvolved session was named as a root
- *     blocker, on the view with a kill button.
- *  2. `WHERE NOT blocked.granted AND blocking.granted` meant an edge existed
- *     only when the blocker's own lock was granted, so a QUEUED blocker could
- *     never be an intermediate node. The classic migration pile-up (long read <-
- *     ACCESS EXCLUSIVE <- readers) rendered flat, hiding the amplifier.
+ * MATERIALIZED stops the planner inlining the CTE and calling
+ * pg_blocking_pids once per reference per row; the function takes exclusive
+ * access to the lock manager's shared state.
  *
- * pg_blocking_pids() knows about hard blocks, soft blocks (queue position),
- * parallel workers, and prepared transactions. It is what the cockpit's blocked
- * panel already used, which is why the two views disagreed.
+ * ORDER BY xact_start (oldest first, `pid` tiebreak) keeps the sessions most
+ * likely to be root blockers when the LIMIT clips. A dropped waiter row
+ * drops its whole subtree in `buildChains`. It sorts on `xact_start`, never
+ * the `::text` epoch alias, which would sort lexicographically.
  *
- * MATERIALIZED is load-bearing: without it the planner may inline the CTE and
- * evaluate pg_blocking_pids once per reference per row, and the function takes
- * exclusive access to the lock manager's shared state. One call per backend.
+ * LIMIT 501: `map` uses the 501st row to detect truncation, then discards
+ * it.
  *
- * Round-2 review: LIMIT 500 with no ORDER BY undermines A2 in exactly the
- * situation A2 is about. Which 500 rows survive was arbitrary, and if a
- * WAITER's own row is among the ones dropped, `byPid.get(child)` in
- * `buildChains` returns undefined and that whole subtree is silently
- * amputated — during a large incident, the only time this check matters,
- * the graph can quietly under-report and nothing said so.
- *
- * ORDER BY xact_start ASC (oldest transaction first) biases retention toward
- * the sessions most likely to BE root blockers — what you want to keep when
- * you can't keep everything — with `pid` as a deterministic tiebreak so the
- * result is stable across runs. `xact_start`, not the `::text` epoch
- * conversion below: text-sorting "10" before "9" would make the ordering as
- * arbitrary as having none. `NULLS LAST` keeps a session with no known
- * transaction age (which shouldn't occur for a row this WHERE clause
- * selects, but costs nothing to guard) from displacing a session whose age
- * is actually known.
- *
- * LIMIT 501, not 500: `map` below checks for the 501st row to detect
- * truncation and reports it on `LocksData.truncated` before discarding it,
- * rather than silently returning a 500-row graph indistinguishable from a
- * complete one.
- *
- * `wait_secs` (final review I3). `verdict` used to escalate on
- * `max(roots[*].xactAgeSecs)` — the ROOT BLOCKER's transaction age, which
- * `Waiter.xactAgeSecs`'s own doc comment says is "NOT time spent waiting",
- * and which the critical threshold's own `because` contradicts by talking
- * about how long the WAITERS have waited. A lock is held for the life of its
- * transaction, so a blocker's transaction age is always >= the blocking it
- * causes: the error was always toward false-positive. A nightly ETL job
- * holding a transaction open for forty minutes and then blocking one SELECT
- * for 200ms reported `critical`, two levels louder than `blocked` reported
- * the same event.
- *
- * `pg_locks.waitstart` (PG14, and 14 is this package's floor — see the CI
- * matrix) is the real quantity: when THIS session began waiting for the lock
- * it has not been granted. `min(waitstart)` because a session can be queued
- * on several locks at once and the earliest is the longest wait. `HAVING
- * count(*) > 0` is what keeps a root blocker's `wait_secs` NULL rather than
- * 0: an aggregate over an empty set still returns one row (of NULLs), and
- * `EXTRACT(EPOCH FROM (now() - now()))` on the COALESCE below would turn
- * "this session is not waiting at all" into "this session has waited zero
- * seconds", which is a different claim.
- *
- * `waitstart` is documented as briefly NULL for a wait that has only just
- * begun (the process sets it after entering the wait). COALESCE to `now()`
- * so that unknown reads as ~0 rather than as NULL-and-ignored. Under-
- * reporting a wait that genuinely started milliseconds ago is the safe
- * direction here; over-reporting is the entire subject of I3.
- *
- * No `ORDER BY` inside that subquery, deliberately: `min()` needs none, and
- * the package has shipped the lexicographic-::text-ORDER-BY defect three
- * times (see boundaries.test.ts). The outer ORDER BY still reaches
- * `a.xact_start`, the numeric/timestamp source, never the `::text` alias.
+ * `wait_secs` is `now() - min(waitstart)` over the session's ungranted
+ * locks; the earliest is the longest wait. `HAVING count(*) > 0` keeps it
+ * NULL, not 0, for a session that is not waiting. `waitstart` is briefly
+ * NULL for a wait that has only just begun, and the COALESCE to `now()`
+ * reads that as about 0, which under-reports rather than over-reports.
  */
 const SQL = `
 WITH act AS MATERIALIZED (
@@ -146,20 +84,10 @@ WITH act AS MATERIALIZED (
 )
 SELECT a.pid, a.usename, a.app, a.state, a.query, a.backend_start,
        a.xact_age_secs, a.blocked_by,
-       -- ORDER BY l.mode: without it, a waiter queued on two ungranted locks
-       -- of different modes (a real case — see apps/web's locks/page.tsx
-       -- comment on the DDL marker) gets this aggregate's row order from the
-       -- planner, which is free to change it between two otherwise-identical
-       -- 5-second polls. That made a stable wait render as if the modes it
-       -- wants had changed, with nothing on the server actually different.
-       -- Closing paren on its own line, deliberately (see boundaries.test.ts's
-       -- "never sorts a ::text-cast column by its own text alias"): that
-       -- guard bounds an ORDER BY clause by the next LIMIT or a closing paren
-       -- starting a line, and every paren in this statement otherwise closes
-       -- on the same line as its last argument — an inlined 'ORDER BY l.mode)'
-       -- has neither ahead of it before the outer LIMIT, so the guard's slice
-       -- would run past this clause into l.relation::regclass::text below
-       -- and flag a numeric-looking alias it never actually sorts by.
+       -- ORDER BY l.mode: a waiter queued on two ungranted locks of different
+       -- modes would otherwise get its row order from the planner, and a stable
+       -- wait would render as changed between polls. The closing paren is on its
+       -- own line because boundaries.test.ts bounds an ORDER BY clause by one.
        (SELECT string_agg(DISTINCT l.mode, ',' ORDER BY l.mode)
           FROM pg_locks l
          WHERE l.pid = a.pid AND NOT l.granted
@@ -176,19 +104,13 @@ WHERE cardinality(a.blocked_by) > 0
 ORDER BY a.xact_start ASC NULLS LAST, a.pid
 LIMIT 501`;
 
-/** Fields shared by every node in the tree — a Waiter minus `cycle`. */
+/** Fields shared by every node in the tree: a Waiter minus `cycle`. */
 function baseFields(r: LockRow, waiters: Waiter[]): Omit<Waiter, 'cycle'> {
   return {
     pid: r.pid, user: r.usename, app: r.app, query: r.query, state: r.state,
     backendStart: r.backend_start,
     waitingMode: r.waiting_mode, waitingOn: r.waiting_on,
-    // xact_age_secs arrives as text (EXTRACT(...)::text in the SQL above), so
-    // the numeric conversion happens here, not server-side — see the class
-    // comment on connections.ts's ConnectionsRow for why that split exists.
     xactAgeSecs: r.xact_age_secs == null ? null : Number(r.xact_age_secs),
-    // Same text->number split as xact_age_secs above, and the same meaning
-    // for null: the SQL's HAVING clause returns no row (hence NULL) for a
-    // session holding no ungranted lock — see Waiter.waitSecs.
     waitSecs: r.wait_secs == null ? null : Number(r.wait_secs),
     waiters,
   };
@@ -202,14 +124,10 @@ function toWaiter(r: LockRow, waiters: Waiter[], cycle: boolean): Waiter {
  * Pure: (pid, blocked_by[]) edges -> root-blocker trees.
  *
  * `path` is the ancestor chain, for cycle detection. `visited` is every pid
- * already placed under THIS root: a wait graph is a graph, not a tree, so a
- * session blocked by two blockers is reachable twice and must be shown — and
- * counted — once. That dedup is per-root only: a waiter blocked by two
- * independent root blockers (pg_blocking_pids returns every conflicting
- * holder, not just one — e.g. a DDL statement queued behind three readers)
- * genuinely belongs under each of those roots' trees. Use
- * `countDistinctWaiters` below, not a sum of `totalWaiters` across roots,
- * when the question is how many distinct sessions are stuck.
+ * already placed under this root, so a session reachable twice is shown and
+ * counted once. That dedup is per root: a waiter blocked by two independent
+ * roots appears under each. For the number of distinct stuck sessions use
+ * `countDistinctWaiters`, not a sum of `totalWaiters`.
  */
 export function buildChains(rows: LockRow[]): RootBlocker[] {
   const byPid = new Map(rows.map((r) => [r.pid, r]));
@@ -242,36 +160,19 @@ export function buildChains(rows: LockRow[]): RootBlocker[] {
     return { ...baseFields(row, waiters), totalWaiters: count };
   };
 
-  // A pid can appear as a blocker (a `children` key) without a row of its
-  // own: pg_blocking_pids() can name a parallel worker or other auxiliary
-  // process, and this check's SQL restricts its result set to
-  // backend_type = 'client backend'. Without the byPid.has(pid) guard,
-  // such a pid has no entry in `blockedBy` either, so it reads as
-  // "blocked by nothing" and would be treated as a root with no row to
-  // build one from.
+  // `byPid.has(pid)`: pg_blocking_pids() can name a non-client process,
+  // which the SQL returns no row for and so cannot be built as a root.
   const rootPids = [...children.keys()]
     .filter((pid) => byPid.has(pid) && (blockedBy.get(pid) ?? []).length === 0)
     .sort((a, b) => a - b);
 
   const roots = rootPids.map(makeRoot);
 
-  // Every session in a closed cycle is blocked, so none of them is a root and
-  // the view read "no lock contention" during a live deadlock — the one moment
-  // this check exists for. Seed one entry point per cycle (lowest pid); the
-  // `cycle` flag on the back-edge is what names it a deadlock.
-  //
-  // B8: this pass used to be gated on `roots.length === 0`, which asks "did
-  // this database produce no unblocked session at all" when the question is
-  // "is every blocked session covered by some tree". A deadlock is a property
-  // of one connected component, and components are independent: one ordinary
-  // chain anywhere else in the database answered the global question and the
-  // cycle was dropped from `roots` entirely. Its sessions are `children` keys
-  // with blockers, so they are roots of nothing and waiters under nobody —
-  // absent from the tree, from `countDistinctWaiters`, from `longestWaitSecs`
-  // and from the verdict, while Postgres was within `deadlock_timeout` of
-  // aborting one of them. So the pass runs always, and `covered` carries the
-  // ordinary roots and their whole subtrees to keep it from re-seeding a pid
-  // that is already in the forest.
+  // Every session in a closed cycle is blocked, so none is a root. Seed one
+  // entry point per cycle (lowest pid); the `cycle` flag on the back-edge
+  // names it a deadlock. This runs even when ordinary roots exist, because a
+  // deadlock is a property of one connected component; `covered` stops it
+  // re-seeding a pid already in the forest.
   const covered = new Set<number>();
   const collect = (ws: Waiter[]) => { for (const w of ws) { covered.add(w.pid); collect(w.waiters); } };
   for (const root of roots) { covered.add(root.pid); collect(root.waiters); }
@@ -287,39 +188,12 @@ export function buildChains(rows: LockRow[]): RootBlocker[] {
 }
 
 /**
- * Distinct waiting pids across every root — NOT the sum of each root's own
- * `totalWaiters`.
+ * The longest time any session in the graph has been waiting, in seconds;
+ * `verdict` escalates on this. 0 when nothing is waiting or every
+ * `waitSecs` is unknown.
  *
- * pg_blocking_pids() returns an array: a session can be, and routinely is,
- * blocked by more than one holder at once. The canonical shape in this
- * check's own problem domain is a DDL statement queued behind several
- * readers, each holding a lock the DDL conflicts with — `blocked_by` then
- * has one entry per reader. When those readers are themselves unblocked
- * (each its own root), the DDL session is a genuine member of every one of
- * their trees, and stays shown under each: an operator looking at any single
- * blocker should see that killing it alone won't free the waiter. But
- * `verdict` escalates on how many SESSIONS are stuck, and summing each
- * root's own `totalWaiters` would count that one session once per root
- * blocking it — inflating severity in exactly the incident shape this check
- * exists to diagnose, and scaling with reader count rather than with actual
- * damage. Walking every root's tree into one Set fixes that without needing
- * any "which root owns this waiter" rule — cardinality of a set needs none.
- */
-/**
- * The longest time any session in the graph has ACTUALLY been waiting, in
- * seconds. 0 when nothing is waiting, or when every waiter's `waitSecs` is
- * unknown (see `Waiter.waitSecs` on why unknown reads as ~0).
- *
- * This is what `verdict` escalates on (I3) — not `max(roots[*].xactAgeSecs)`,
- * which is how long the BLOCKER's transaction has been open and is bounded
- * below by nothing an operator cares about here.
- *
- * Unlike `countDistinctWaiters` above, this walk does NOT skip cycle
- * back-edges and does not dedup. It doesn't need to: a maximum is
- * idempotent, so seeing the same session twice cannot inflate it the way a
- * count would. Including the back-edge is what makes a deadlock — where
- * `buildChains` seeds one waiting session as a "root" because no unblocked
- * one exists — report the wait it genuinely has.
+ * Unlike `countDistinctWaiters`, this walk does not skip cycle back-edges
+ * or dedup: a maximum cannot be inflated by seeing a session twice.
  */
 export function longestWaitSecs(roots: RootBlocker[]): number {
   let longest = 0;
@@ -336,34 +210,24 @@ export function longestWaitSecs(roots: RootBlocker[]): number {
   return longest;
 }
 
+/**
+ * Distinct waiting pids across every root, not the sum of each root's
+ * `totalWaiters`: a session blocked by several roots (a DDL statement queued
+ * behind several readers) appears under each and must count once.
+ */
 export function countDistinctWaiters(roots: RootBlocker[]): number {
   const pids = new Set<number>();
   const collect = (waiters: Waiter[]): void => {
     for (const w of waiters) {
-      // A cycle back-edge re-names a pid already present as a real node
-      // elsewhere in the graph (that's the point of the flag) — counting it
-      // again here would double-count that session the same way this
-      // function exists to prevent across roots.
+      // A cycle back-edge names a pid already present as a real node.
       if (!w.cycle) pids.add(w.pid);
       collect(w.waiters);
     }
   };
   for (const root of roots) {
-    // B8: a root is normally the session doing the blocking, not one stuck
-    // behind it, and must not count. The exception is a deadlock's seeded
-    // root: every session in a cycle is waiting, so the one `buildChains`
-    // picked as an entry point is a stuck session too — and the only node in
-    // its tree the waiter walk below never reaches, since it appears there
-    // solely as the `cycle` back-edge this walk skips. Skipping it as well
-    // reported a two-session deadlock as one blocked session, on the exact
-    // quantity `verdict` escalates on.
-    //
-    // `waitSecs` is the difference, and it is the documented one: null for a
-    // root that holds no ungranted lock, a real number for one that is
-    // itself waiting (see `Waiter.waitSecs`). During the brief window where
-    // `pg_locks.waitstart` is still NULL for a wait that has only just
-    // begun, this undercounts by one, which is the same bound every other
-    // reading of that column in this file carries.
+    // A root normally is not waiting and does not count. A deadlock's seeded
+    // root is waiting, and is reached below only as the skipped back-edge;
+    // a non-null `waitSecs` identifies it.
     if (root.waitSecs != null) pids.add(root.pid);
     collect(root.waiters);
   }
@@ -371,12 +235,8 @@ export function countDistinctWaiters(roots: RootBlocker[]): number {
 }
 
 /**
- * Every pid in the wait graph that is WAITING, mapped to the root blocker it
- * is ultimately queued behind. A `cycle` edge is not recursed into.
- *
- * This is the join that lets a page say "blocked by 9401" beside a session
- * that pg_stat_activity reports as `active`, and it lives here so that every
- * page renders the same answer.
+ * Every waiting pid in the graph, mapped to the root blocker it is
+ * ultimately queued behind. A `cycle` edge is not recursed into.
  */
 export function blockedByRoot(roots: readonly RootBlocker[]): Map<number, number> {
   const out = new Map<number, number>();
@@ -398,22 +258,17 @@ export function blockingCounts(roots: readonly RootBlocker[]): Map<number, numbe
 export const locks: Check<LockRow, LocksData> = {
   id: 'locks',
   gate: 'wait',
+  home: 'session',
   title: 'Lock wait graph',
-  class: 'incident',
+  class: 'live',
   sql: SQL,
   /**
-   * `pg_locks.waitstart` is PG14+. The package floor is 14, so every
-   * supported server has it — but declaring it means a PG13 server gets
-   * `unsupported-version` in words rather than a raw `42703 column
-   * "waitstart" does not exist`. query-stats.ts declares the same floor for
-   * the same reason.
+   * `pg_locks.waitstart` is PG14+. Declared so an older server gets
+   * `unsupported-version`, not a raw `42703 column "waitstart" does not
+   * exist`.
    */
   requires: [{ kind: 'version', min: 140000 }],
-  /**
-   * The SQL fetches LIMIT 501. 501 rows back means the true result was cut
-   * off by the LIMIT 500 the graph is actually built from — see the SQL
-   * comment for why an unsignaled truncation is worse than none here.
-   */
+  /** The SQL fetches 501 rows; a 501st means the 500-row graph is partial. */
   map: (rows) => {
     const truncated = rows.length > 500;
     return { roots: buildChains(truncated ? rows.slice(0, 500) : rows), truncated };
@@ -430,31 +285,14 @@ export const locks: Check<LockRow, LocksData> = {
       remedy: 'Terminate the ROOT blocker, not a waiter. Killing a waiter frees nothing '
             + 'and the next one takes its place immediately.' },
   ],
-  /**
-   * Neither lookup uses a non-null assertion (see connections.ts's own
-   * comment on this): a level's threshold is data this check may not have
-   * been given, not a guarantee the type system can see. Absent `warn`,
-   * any blocked session still escalates rather than silently reporting ok —
-   * this check exists specifically to surface blocking, so "no threshold
-   * configured" must fail toward visible, not toward silence.
-   */
+  /** Without a `warn` threshold, any blocked session still escalates. */
   verdict: (d, t): Verdict => {
-    // countDistinctWaiters, not a sum of d.roots[*].totalWaiters — see that
-    // function's comment. A session blocked by three independent root
-    // blockers must not escalate severity threefold.
     const total = countDistinctWaiters(d.roots);
     if (total === 0) return { level: 'ok' };
     const warn = t.find((x) => x.level === 'warn');
     if (warn && total < warn.value) return { level: 'ok' };
-    // Inlined rather than a shared helper: this package has exactly one
-    // dependency and two of these, and `indexes.ts` already writes it this
-    // way. The surface's own `plural` is in apps/web and stays there.
-    const note = `${total} session${total === 1 ? '' : 's'} blocked`;
-    // I3: the LONGEST ACTUAL WAIT (pg_locks.waitstart), not the root
-    // blocker's transaction age. The critical threshold's own `because`
-    // talks about the waiters having outlived their application timeouts;
-    // this is now the quantity that sentence describes. See
-    // `longestWaitSecs` and the `wait_secs` note in the SQL comment.
+    const note = `${counted(total, 'session')} blocked`;
+    // The longest actual wait, not the root blocker's transaction age.
     const longestWait = longestWaitSecs(d.roots);
     const crit = t.find((x) => x.level === 'critical');
     if (crit && longestWait >= crit.value) return { level: 'critical', note };

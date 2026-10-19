@@ -4,27 +4,16 @@ import { databaseNames } from '@/lib/pools';
 import { ConfigError } from '@/lib/config';
 
 /**
- * The 404, which was Next's stock "This page could not be found" — a bare
- * page with no way back, no indication it belonged to pgops, and, worst of
- * the three, no answer to the only question its reader has.
+ * The 404. `app/db/[name]/layout.tsx` sends an unconfigured database name
+ * here, so the page lists the configured names: the likely cause is a typo.
  *
- * `app/db/[name]/layout.tsx` reaches this deliberately: an unconfigured name
- * is a 404 and not a 500 because, in that file's own words, "the operator
- * mistyped, pgops is not broken". But knowing you mistyped is not the same as
- * knowing what the right spelling was, and the console is the only thing that
- * knows — the names are whatever the operator put in `PGOPS_DATABASES`, and
- * they are one `databaseNames()` call away. Listing them turns a dead end
- * into the correction.
- *
- * Reads configuration, so it is dynamic like every other such route (see the
- * plan's Global Constraints on `connection()`).
+ * Reads configuration, so it awaits `connection()` to be dynamic.
  */
 export default async function NotFound() {
   await connection();
 
-  // This page must render even when it is the CONFIGURATION that is broken —
-  // it is reached by any unmatched URL, including on a misconfigured console,
-  // and a 404 that itself 500s is the least helpful page in the product.
+  // Reached by any unmatched URL, including on a misconfigured console, so
+  // it must render when the configuration is broken.
   let names: string[] = [];
   let configBroken: string | null = null;
   try {

@@ -10,16 +10,10 @@ const VARIANT = {
 } as const;
 
 /**
- * The accent a container wears when the check inside it has an opinion worth
- * interrupting for.
- *
- * Only `warn` and `critical` return anything. An `ok` accent would put a
- * coloured edge on all nine triage panels of a healthy database, and a page
- * where everything is emphasised is a page where nothing is — the badge
- * already says OK, and the reader's eye is a scarce resource during an
- * incident. `null` (a check with no opinion) and a FAILED check both fall
- * through to no accent on purpose: neither is a verdict, and gray is what
- * "no information" looks like here (see globals.css).
+ * The accent a container wears at `warn` and `critical`. Nothing at `ok`.
+ * `null` (a check with no opinion) and a failed check also get no accent on
+ * purpose: neither is a verdict, and gray is what "no information" looks
+ * like here (see globals.css).
  */
 export function accentClass(verdict: Verdict | null | undefined): string {
   if (!verdict) return '';
@@ -29,18 +23,10 @@ export function accentClass(verdict: Verdict | null | undefined): string {
 }
 
 /**
- * The tint a container wears behind that accent.
+ * The tint a container wears behind that accent, under the same rule.
  *
- * A GROUND, not a highlight, and deliberately barely there — 1.05:1 against
- * the canvas in light mode. The bar and the badge carry the signal; this only
- * joins the panel's title, reading and explanation into one block so the eye
- * takes them as one thing. tokens.test.ts holds both ends of that: the text
- * on it clears 4.5:1, and the tint itself stays between 1.02 and 1.4 against
- * the canvas, so it can neither vanish nor shout.
- *
- * Nothing at `ok`, nothing at `null`, and nothing for a FAILED check — the
- * same rule as the accent. Gray is what "no information" looks like here, and
- * a check that could not run has no verdict to tint with.
+ * Deliberately faint. tokens.test.ts holds that the text on it clears 4.5:1
+ * and that the tint stays between 1.02 and 1.4 against the canvas.
  */
 export function surfaceClass(verdict: Verdict | null | undefined): string {
   if (!verdict) return '';
@@ -56,16 +42,9 @@ export function worse(a: Verdict, b: Verdict): Verdict {
 }
 
 /**
- * Colour is never the only signal: the level is spelled out in text too. An
- * operator on a projector, colour-blind, or reading a screenshot in grayscale
- * still gets the verdict.
- *
- * What colour adds is the SCAN. The text label is what makes the badge
- * correct; the hue is what makes a WARN findable in a list of twenty rows
- * without reading twenty labels. Before these variants existed the palette
- * was entirely achromatic and `warn` rendered as the same gray as `ok`, so
- * the overview could be read correctly only by reading it word by word —
- * which is the one thing nobody does while the pager is going off.
+ * Colour is never the only signal: the level is spelled out in text too. The
+ * hue is what makes a WARN findable in a long list without reading every
+ * label.
  */
 export function VerdictBadge({ verdict, note = true }: { verdict: Verdict; note?: boolean }) {
   return (

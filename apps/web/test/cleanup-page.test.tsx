@@ -59,10 +59,6 @@ describe('the cleanup page', () => {
     expect(out).toContain('Replication slots');
   });
 
-  /**
-   * The pid this check names is one click from the row that can end it —
-   * the same convention every other actionable pid on this console follows.
-   */
   it('links a backend pinning the horizon to the session that can end it', async () => {
     overrides.set('horizon', ok({
       holders: [{
@@ -72,18 +68,13 @@ describe('the cleanup page', () => {
       truncated: false,
     }, { level: 'warn', note: 'backend 4021 pins the horizon 60000000 transactions back, open 15m' }));
     const r = await page();
-    const link = r.container.querySelector('a[href="/db/prod/sessions#pid-4021"]');
+    const link = r.container.querySelector('a[href="/db/prod#pid-4021"]');
     expect(link).not.toBeNull();
     expect(link!.textContent).toBe('4021');
     expect(r.text()).toContain('batch-worker');
   });
 
-  /**
-   * A partial list an operator knows is partial is useful; one they believe
-   * is complete is worse than nothing (Convention 6) — asserted in both
-   * directions, because a note that always renders is the same defect as one
-   * that never does.
-   */
+  /** Asserted in both directions: a note that always renders is as wrong as one that never does. */
   it('says when the list of holders was clipped', async () => {
     overrides.set('horizon', ok({
       holders: [{
@@ -109,11 +100,8 @@ describe('the cleanup page', () => {
   });
 
   /**
-   * The README's stated divergence from pgHero, held at the page rather than
-   * only in the check. pgHero answers 0 for a primary, which on a dashboard
-   * reads as "perfectly caught up" — a claim about replication health made
-   * about a server that is not replicating. `lagSeconds: null` on a primary
-   * means the question does not apply, and the page must not format it.
+   * `lagSeconds: null` on a primary means the question does not apply; a
+   * formatted 0 would read as "perfectly caught up".
    */
   it('renders a primary as a primary, never as zero seconds behind', async () => {
     const r = await page();
@@ -121,10 +109,7 @@ describe('the cleanup page', () => {
     expect(r.text()).not.toMatch(/\b0s\b|0 seconds/);
   });
 
-  /**
-   * A standby that HAS replayed is the case that must still print a number —
-   * without this, "never render a lag" passes by rendering nothing ever.
-   */
+  /** Without this, the test above passes by never rendering a lag at all. */
   it('still reports a real lag when the server is a standby', async () => {
     overrides.set('replicationLag', ok({ inRecovery: true, lagSeconds: 12, standbys: 0, receiving: true }));
     const r = await page();
@@ -138,17 +123,9 @@ describe('the cleanup page', () => {
     expect(r.text()).toContain('nothing replayed yet');
   });
 
-  /**
-   * This is the one page in P2 that legitimately polls: it renders
-   * `class: 'incident'` checks and must stay current during an incident,
-   * while its sub-routes run catalog scans on visit and must not.
-   * test/guards.test.ts holds the same fact from the other direction.
-   */
-  it('polls, because the checks it renders are incident checks', async () => {
-    // Asserted through what <Refresh> actually RENDERS — its control and its
-    // pre-first-tick readout — rather than through the source text, which is
-    // guards.test.ts's job. The two are different facts: the guard says the
-    // element appears in this file, this says the component mounted here.
+  /** This page renders `class: 'live'` checks and must stay current. */
+  it('polls, because the checks it renders are live checks', async () => {
+    // Asserts that <Refresh> mounted; guards.test.ts checks the source text.
     const r = await page();
     const buttons = [...r.container.querySelectorAll('button')].map((b) => b.textContent);
     expect(buttons).toContain('Refresh');
@@ -156,11 +133,9 @@ describe('the cleanup page', () => {
   });
 
   /**
-   * #56 lands here rather than in app/db/[name]/layout.tsx, where StatusBar
-   * renders. That layout is shared by the four incident pages and
-   * router.refresh() re-renders layouts, so a pg_settings read there would
-   * sit behind the 5-second poll — the load §4.2's poll boundary exists to
-   * prevent. This is the one keep-up page, and it does not poll settings.
+   * Settings live here, not in app/db/[name]/layout.tsx: router.refresh()
+   * re-renders layouts, so a pg_settings read there would sit behind the
+   * 5-second poll.
    */
   it('renders the settings disclosure with all three groups', async () => {
     const r = await page();
@@ -190,11 +165,7 @@ describe('the cleanup page', () => {
     expect(details!.hasAttribute('open')).toBe(false);
   });
 
-  /**
-   * A failed settings read still renders the disclosure, with the reason
-   * inside it. Omitting the section would make a permission error
-   * indistinguishable from a build that never had the feature.
-   */
+  /** Omitting the section would make a permission error look like a missing feature. */
   it('keeps the disclosure and states the reason when settings could not be read', async () => {
     overrides.set('settings', {
       ok: false, reason: 'privilege', message: 'permission denied for view pg_settings',
@@ -215,11 +186,7 @@ describe('the cleanup page', () => {
   });
 });
 
-/**
- * B4. The keep-up gate had no replication judgement at all: `replicationLag`
- * carries no threshold, so a standby arbitrarily far behind never escalated
- * on the band titled "can the server keep up with what already committed".
- */
+/** `replicationLag` carries no threshold; the standbys check is what escalates a lagging standby. */
 describe('the cleanup page — standbys as the primary sees them', () => {
   const sb = (over: Record<string, unknown> = {}) => ({
     app: 'replica-1', clientAddr: '10.0.0.2', state: 'streaming', syncState: 'async',
@@ -236,10 +203,8 @@ describe('the cleanup page — standbys as the primary sees them', () => {
   });
 
   /**
-   * The rule the check is built around, carried through to the pixel: a lag
-   * this role cannot read renders as an em dash, never as a zero. A role
-   * without pg_monitor reads another user's walsender as NULL, and "0s
-   * behind" would be a claim about a standby nobody looked at.
+   * A role without pg_monitor reads another user's walsender as NULL; that
+   * renders as an em dash, never as zero.
    */
   it('renders an unreadable lag as unknown, never as caught up', async () => {
     overrides.set('standbys', ok({ standbys: [sb({ replaySecs: null, writeSecs: null, flushSecs: null })] }));
@@ -253,14 +218,7 @@ describe('the cleanup page — standbys as the primary sees them', () => {
     expect(r.text()).toContain('No standbys are streaming from this server');
   });
 
-  /**
-   * And when the detail could not be read, the panel must not look like a
-   * primary with nothing attached — the distinction this console exists to
-   * keep. Through `CheckPanel`'s own UNAVAILABLE rendering, not a sentence
-   * written here: the task brief specified a bespoke "Standby detail
-   * unavailable — {reason}" line, which would be a second spelling of the
-   * failure state every other panel on this page already renders one way.
-   */
+  /** Uses `CheckPanel`'s own UNAVAILABLE rendering, like every other panel on this page. */
   it('does not read as "no standbys" when the standby detail could not be read', async () => {
     overrides.set('standbys', { ok: false, reason: 'privilege', message: 'permission denied' });
     const r = await page();
@@ -270,9 +228,8 @@ describe('the cleanup page — standbys as the primary sees them', () => {
   });
 
   /**
-   * B4, standby side. `lagSeconds: 0` means "I have replayed everything I
-   * received", which is also exactly what a dead walreceiver looks like. One
-   * word stops a broken standby reading as a perfect one.
+   * `lagSeconds: 0` means "replayed everything received", which is also what
+   * a dead walreceiver looks like.
    */
   it('says a standby is not receiving rather than showing it caught up', async () => {
     overrides.set('replicationLag', ok({ inRecovery: true, lagSeconds: 0, standbys: 0, receiving: false }));
@@ -288,26 +245,10 @@ describe('the cleanup page — standbys as the primary sees them', () => {
   });
 });
 /**
- * Stage 4's re-plan overlap. Driving the closed stage at 390px, these two
- * panels sat adjacent and said the same thing:
- *
- *   Role and lag   This server is a primary · replication lag does not apply · 0 streaming
- *   Standbys       No standbys are streaming from this server.
- *
- * "0 streaming" and that sentence are one fact in two consecutive panels,
- * one of which B4 had just added — the overlap the programme's re-plan step
- * exists to cut.
- *
- * Cut CONDITIONALLY rather than outright, which is the part worth recording.
- * The obvious fix is to delete the clause, and it is wrong: `replicationLag`
- * declares no `requires`, while `standbys` declares
- * `requires: [{ kind: 'role', name: 'pg_monitor' }]`. So on a role without
- * pg_monitor the Standbys panel is UNAVAILABLE and Role and lag is the only
- * thing that can report the count at all — deleting the clause would lose it
- * exactly where it is the only source.
- *
- * The rule is therefore: the specialist speaks when it can, the generalist
- * fills in when it cannot.
+ * "Role and lag" and "Standbys" would otherwise both state the standby count.
+ * The Standbys panel owns it when it can run. It requires pg_monitor and
+ * `replicationLag` does not, so without that role "Role and lag" is the only
+ * source and must report the count itself.
  */
 describe('the cleanup page — the standby count has one owner', () => {
   it('leaves the count to the Standbys panel when that panel can speak', async () => {
@@ -323,9 +264,6 @@ describe('the cleanup page — the standby count has one owner', () => {
     overrides.set('replicationLag', ok({ inRecovery: false, lagSeconds: null, standbys: 2, receiving: null }));
     overrides.set('standbys', { ok: false, reason: 'privilege', message: 'permission denied' });
     const t = (await page()).text();
-    // The one case the clause exists for: pg_monitor is missing, the
-    // specialist is UNAVAILABLE, and this is the only reading of how many
-    // standbys are attached.
     expect(t).toContain('2 streaming');
   });
 

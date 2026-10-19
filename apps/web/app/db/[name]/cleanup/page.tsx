@@ -18,20 +18,10 @@ export async function generateMetadata({
 }
 
 /**
- * The fourth tab, and the gate that had none.
+ * The tab behind the `keep-up` gate ("Replication & cleanup" in gates.ts).
  *
- * `gates.ts` titles the `keep-up` gate "Replication & cleanup" and states
- * that each gate title mirrors the tab going deeper into it. Three of four
- * tabs existed. This is a second surface over checks that already ship on the
- * triage page — exactly as `/sessions` already is for the `connect` gate —
- * and none of those checks is modified to land here.
- *
- * THIS PAGE POLLS, and it is the only page added in P2 that does. All three
- * checks below are `class: 'incident'`: a wraparound horizon and a stalled
- * replication slot both get worse while an operator watches. Its sub-routes
- * are the opposite — catalog scans that run on visit — which is why the poll
- * lives here and not in the layout the sub-routes share. test/guards.test.ts
- * holds both halves.
+ * This page polls: its checks are incident-class and get worse while an
+ * operator watches. test/guards.test.ts holds that.
  */
 export default async function Cleanup({
   params,
@@ -39,22 +29,17 @@ export default async function Cleanup({
   params: Promise<{ name: string }>;
 }) {
   const { name } = await params;
-  // Promise.all, matching every other multi-check page: three sequential
-  // awaits would be three snapshots taken at three different instants on a
-  // page that re-reads all of them every five seconds.
   const [wraparound, oldest, replication, standbys, slots, settings] = await Promise.all([
     runCheckFor(name, CHECKS.wraparound),
     runCheckFor(name, CHECKS.horizon),
     runCheckFor(name, CHECKS.replicationLag),
-    // B4: the primary's view of its standbys, beside the standby's view of
-    // itself. Two different questions, which is why this is its own check
-    // and not more columns on the one above.
+    // The primary's view of its standbys; replicationLag is this server's
+    // view of itself.
     runCheckFor(name, CHECKS.standbys),
     runCheckFor(name, CHECKS.slots),
-    // #56 is fetched HERE and not in the layout: the layout is shared by the
-    // four incident pages and re-renders on router.refresh(), so a
-    // pg_settings read there would land behind the 5s poll. See
-    // SettingsDisclosure's docblock.
+    // Fetched here, not in the layout: the layout re-renders on
+    // router.refresh(), so a pg_settings read there would land behind the 5s
+    // poll of every incident page. See SettingsDisclosure.
     runCheckFor(name, CHECKS.settings),
   ]);
 
@@ -67,10 +52,6 @@ export default async function Cleanup({
         {(d) => {
           const worst = d.worst[0];
           if (!worst) return <p className="text-sm text-muted-foreground">No databases reporting.</p>;
-          // A TABLE, not a key-value list. Two numbers joined by a middle
-          // dot in one right-aligned run cannot be compared down a column,
-          // which is the only question this panel is asked: which database is
-          // closest to the horizon. Same conversion as the Maintenance page.
           return (
             <Table>
               <TableHeader>
@@ -113,7 +94,7 @@ export default async function Cleanup({
                   <TableRow key={`${h.kind}-${h.who}`}>
                     <TableCell className="font-mono">
                       {h.kind === 'backend'
-                        ? <Link href={`/db/${name}/sessions#pid-${h.who}`} className="underline underline-offset-4">{h.who}</Link>
+                        ? <Link href={`/db/${name}#pid-${h.who}`} className="underline underline-offset-4">{h.who}</Link>
                         : h.who}
                     </TableCell>
                     <TableCell>{h.kind === 'prepared' ? 'prepared transaction' : h.kind}</TableCell>
@@ -135,22 +116,15 @@ export default async function Cleanup({
         {(d) => (
           <p className="text-sm">
             {/*
-              pgHero answers 0 for a primary's replication lag, which on a
-              dashboard reads as "perfectly caught up" — a claim about
-              replication health made about a server that is not replicating.
-              `null` here means the question does not apply, and it is never
-              formatted as a duration. The two null cases are distinguished
-              because they are different facts: a primary has no lag to have,
-              a standby that has replayed nothing has one we cannot yet read.
+              A null lag is never formatted as a duration: a primary has no
+              lag to have, and a standby that has replayed nothing has one we
+              cannot yet read.
             */}
             {/*
-              B4: `lagSeconds === 0` means "I have replayed everything I
-              RECEIVED", which is the right caught-up test for a healthy
-              standby and is also exactly what a dead walreceiver looks
-              like — nothing arriving, nothing left to replay. A standby
-              that lost the primary hours ago read "0s behind". `receiving`
-              is checked FIRST for that reason: it decides whether the lag
-              figure beside it means anything at all.
+              `lagSeconds === 0` means everything received has been replayed,
+              which is also what a dead walreceiver looks like. `receiving`
+              is checked first: it decides whether the lag figure means
+              anything.
             */}
             {d.inRecovery === null
               ? 'Role unknown.'
@@ -162,17 +136,9 @@ export default async function Cleanup({
                     : `This server is a standby · ${formatDuration(d.lagSeconds)} behind`
                 : 'This server is a primary · replication lag does not apply'}
             {/*
-              Stage 4's re-plan overlap. This clause and the Standbys panel
-              directly below said one fact twice: "primary · 0 streaming"
-              over "No standbys are streaming from this server."
-
-              Not deleted, though — rendered only when the Standbys panel
-              cannot speak. `standbys` declares
-              `requires: [{ kind: 'role', name: 'pg_monitor' }]` and this
-              check declares nothing, so on a role without pg_monitor that
-              panel is UNAVAILABLE and this clause is the only reading of
-              how many standbys are attached. The specialist owns the fact
-              when it can report it; this fills in when it cannot.
+              Rendered only when the Standbys panel below is unavailable.
+              `standbys` requires pg_monitor and this check does not, so
+              without that role this is the only standby count.
             */}
             {standbys.ok ? null : (
               <>
@@ -189,11 +155,8 @@ export default async function Cleanup({
       </CheckPanel>
 
       {/*
-        B4: its own panel rather than a table under "Role and lag", because
-        the two answer different questions — that one is this server's view
-        of itself, this one is its view of everything streaming from it —
-        and folding them would make a failed read of one look like a
-        finding about the other.
+        Its own panel, not a table under "Role and lag": merged, a failed
+        read of one would look like a finding about the other.
       */}
       <CheckPanel title="Standbys" result={standbys}>
         {(d) => {
@@ -222,10 +185,8 @@ export default async function Cleanup({
                     <TableCell>{sb.state ?? '—'}</TableCell>
                     <TableCell>{sb.syncState ?? '—'}</TableCell>
                     {/*
-                      Every lag cell is an em dash when null, never a zero.
-                      A role without pg_monitor reads another user's
-                      walsender lag as NULL, and "0s" there would be a claim
-                      about a standby nobody was able to look at.
+                      Null lag is an em dash, never a zero: a role without
+                      pg_monitor reads another user's walsender lag as NULL.
                     */}
                     <TableCell className="tabular-nums">{sb.writeSecs === null ? '—' : formatDuration(sb.writeSecs)}</TableCell>
                     <TableCell className="tabular-nums">{sb.flushSecs === null ? '—' : formatDuration(sb.flushSecs)}</TableCell>
@@ -258,9 +219,8 @@ export default async function Cleanup({
                 {d.slots.map((s) => (
                   <TableRow key={s.name}>
                     <TableCell className="font-mono font-medium">{s.name}</TableCell>
-                    {/* INACTIVE stays shouted. An inactive slot is the one
-                        that pins WAL forever, and it is the whole reason this
-                        panel exists. */}
+                    {/* INACTIVE is capitalised on purpose: an inactive slot
+                        pins WAL indefinitely. */}
                     <TableCell>{s.active ? 'active' : 'INACTIVE'}</TableCell>
                     <TableCell>{s.slotType}</TableCell>
                     <TableCell className="text-right tabular-nums">

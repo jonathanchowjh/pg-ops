@@ -1,15 +1,14 @@
 import type { SqlQuery, Tool } from '../types.js';
 import { queryStats, type QueryStatRow, type QueryStatsOpts } from '../checks/query-stats.js';
 import { MAX_STATEMENT_LENGTH, planStatements } from './explain.js';
-import { adviseOn, type IndexAdvice, type IndexSuggestion } from './advice.js';
+import { adviseOn, byName, type IndexAdvice, type IndexSuggestion } from './advice.js';
 import { ownSql } from '../run.js';
 
 /**
- * pgHero's dashboard thresholds (`home_controller.rb`, v4.0.1:
- * `set_suggested_indexes(params[:min_average_time] || 20, params[:min_calls] || 50)`),
- * and a cap on how many shapes get planned.
+ * pgHero's dashboard thresholds (mean of 20ms, 50 calls), and a cap on how
+ * many shapes are read.
  */
-export const SUGGESTION_DEFAULTS = { minMeanMs: 20, minCalls: 50, limit: 100 } as const;
+const SUGGESTION_DEFAULTS = { minMeanMs: 20, minCalls: 50, limit: 100 } as const;
 
 export interface SuggestedIndexOpts { minMeanMs?: number; minCalls?: number; limit?: number }
 
@@ -18,7 +17,7 @@ export interface QueryAdvice {
   query: string;
   calls: number;
   meanMs: number;
-  /** Why this shape could not be planned — a `SET`, a dropped table, a privilege. */
+  /** Why this shape could not be planned: a `SET`, a dropped table, a privilege. */
   error?: string;
   advice: IndexAdvice[];
 }
@@ -28,20 +27,18 @@ export interface SuggestedIndex extends IndexSuggestion {
 }
 
 export interface SuggestedIndexes {
-  /** #58 — distinct indexes, found and not already covered. */
+  /** Distinct indexes, found and not already covered. */
   indexes: SuggestedIndex[];
-  /** #63 — every shape that cleared the thresholds, and what was concluded about it. */
+  /** Every shape that cleared the thresholds, and what was concluded about it. */
   byQuery: QueryAdvice[];
   /** Shapes read, before the thresholds were applied. */
   examined: number;
-  /** Every shape pg_stat_statements holds for this database — what `limit` left unread. */
+  /** Every shape pg_stat_statements holds for this database. */
   totalShapes: number;
   statsResetAt: string | null;
 }
 
-const byKey = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
-
-/** pgHero's `suggested_indexes`: found, not covered, grouped by index, sorted by table then columns. */
+/** Suggestions found and not covered, grouped by index, sorted by table then columns. */
 export function groupSuggestions(byQuery: readonly QueryAdvice[]): SuggestedIndex[] {
   const groups = new Map<string, SuggestedIndex>();
   for (const q of byQuery) {
@@ -53,21 +50,18 @@ export function groupSuggestions(byQuery: readonly QueryAdvice[]): SuggestedInde
     }
   }
   const key = (g: SuggestedIndex) => JSON.stringify([g.schema, g.table, ...g.columns]);
-  return [...groups.values()].sort((a, b) => byKey(key(a), key(b)));
+  return [...groups.values()].sort((a, b) => byName(key(a), key(b)));
 }
 
 /**
- * #58 `suggested_indexes` and #63 `suggested_indexes_by_query`, in one pass —
- * pgHero computes the first FROM the second too
- * (`suggested_indexes(suggested_indexes_by_query: …)`).
+ * Index suggestions per query shape, and grouped by index, in one pass.
  *
- * Reads the `queryStats` check's OWN sql and map rather than restating them,
- * so the redaction and per-database scoping that check documents at length
- * apply here unchanged. Its errors propagate raw, so `runTool` classifies a
- * missing pg_stat_statements exactly as the check does, remedy included.
+ * Uses the `queryStats` check's own sql and map, so its redaction and
+ * per-database scoping apply here unchanged. Its errors propagate raw, so
+ * `runTool` classifies a missing pg_stat_statements as the check does.
  *
- * Divergence D3: live statistics since the last reset, not pgHero's three
- * captured hours. History is optional in pgops; pg_stat_statements is not.
+ * Reads live statistics since the last reset, not captured history as
+ * pgHero does: the store is optional, pg_stat_statements is not.
  */
 export const suggestedIndexes: Tool<SuggestedIndexOpts, SuggestedIndexes> = {
   id: 'suggestedIndexes',
@@ -77,10 +71,8 @@ export const suggestedIndexes: Tool<SuggestedIndexOpts, SuggestedIndexes> = {
     const o = { ...SUGGESTION_DEFAULTS, ...opts };
     const sql = queryStats.sql as (x: QueryStatsOpts) => SqlQuery;
     const { text, values } = sql({ sort: 'total', limit: o.limit });
-    // Reusing `queryStats`'s own sql() runs it OUTSIDE runCheck, so it never
-    // passes through toQuery — the one place that calls `ownSql`. Without
-    // this, this recurring pg_stat_statements read would rank on the Queries
-    // page as if it were an operator's own query.
+    // This runs outside runCheck, so the marker toQuery would add is added
+    // here.
     const { rows } = await ctx.target.query(ownSql(text), values);
     const stats = queryStats.map(rows as QueryStatRow[]);
 

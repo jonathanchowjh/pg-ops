@@ -1,9 +1,10 @@
 import { connection } from 'next/server';
 import { ACTIONS } from '@pgops/checks';
-import { json, openAction } from '@/lib/action-route';
+import { auditMeta, failed, json, openAction } from '@/lib/action-route';
+import { eventFor } from '@/lib/samples';
 
 /**
- * #20. Tier 2 (web spec §7.1): the gate, plus the database name typed back.
+ * Tier 2: the gate, plus the database name typed back.
  *
  * Scoped to this database inside the action — pg_stat_statements is shared
  * across the cluster and the unscoped reset wipes every database's
@@ -17,14 +18,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ name: s
   if (opened instanceof Response) return opened;
 
   try {
-    await ACTIONS.resetQueryStats(opened.ctx, {
-      subcommand: 'web/queries',
-      reason: opened.reason,
-      actor: opened.actor,
-      extra: { database: name },
-    });
+    await ACTIONS.resetQueryStats(opened.ctx, auditMeta(opened, name, 'web/queries'));
   } catch (err) {
-    return json({ error: err instanceof Error ? err.message : String(err) }, 502);
+    return failed(err);
   }
+  await eventFor(name, 'reset');
   return json({ ok: true }, 200);
 }

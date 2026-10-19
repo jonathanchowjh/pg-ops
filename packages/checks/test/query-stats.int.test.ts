@@ -15,15 +15,9 @@ describe('queryStats', () => {
       if (!byMean.ok) throw new Error(byMean.message);
       const means = byMean.data.rows.map((r) => r.meanMs);
       expect([...means].sort((a, b) => b - a)).toEqual(means);
-      // The header this data feeds must claim the sort that was actually
-      // applied, not a constant — see the map-level A4 test in
-      // query-stats.test.ts for the case a Postgres round trip can't cover
-      // (an empty result has no row to echo `requested_sort` back on).
+      // The header must claim the sort that was actually applied.
       expect(byMean.data.sort).toBe('mean');
 
-      // 'total' is otherwise only exercised by the truncation test below,
-      // which never checks order — this is the one direct ordering proof
-      // for it, same as every other key in the closed ORDER record gets.
       const byTotal = await runCheck(ctx, queryStats, { sort: 'total', limit: 20 });
       if (!byTotal.ok) throw new Error(byTotal.message);
       const totals = byTotal.data.rows.map((r) => r.totalMs);
@@ -32,16 +26,10 @@ describe('queryStats', () => {
     });
   }, 120_000);
 
-  // A4, every remaining key: 'total' and 'mean' are proven above/below by
-  // distinct assertions; 'calls' and 'cache' get their own proof here so a
-  // regression that hardcodes (or drops) any one ORDER BY branch — including
-  // the 'cache' key the shipped defect named but the brief's own draft SQL
-  // omitted — still fails a test, not just a code review.
+  // Every sort key gets its own ordering assertion, so hardcoding or
+  // dropping any one ORDER BY branch fails a test.
   it('sorts by calls and by cache hit rate too, in SQL (A4)', async () => {
     await withPostgres(async (ctx, pool) => {
-      // Distinct call counts across distinct shapes: three different
-      // one-column literals so each becomes its own pg_stat_statements
-      // entry, called a different number of times.
       for (let i = 0; i < 1; i++) await pool.query('SELECT 101');
       for (let i = 0; i < 3; i++) await pool.query('SELECT 102');
       for (let i = 0; i < 7; i++) await pool.query('SELECT 103');
@@ -54,8 +42,7 @@ describe('queryStats', () => {
 
       const byCache = await runCheck(ctx, queryStats, { sort: 'cache', limit: 50 });
       if (!byCache.ok) throw new Error(byCache.message);
-      // Ascending by cache hit rate (worst cache behaviour first) with
-      // no-I/O shapes (null) sorted last, regardless of direction.
+      // Ascending by cache hit rate (worst first), no-I/O shapes (null) last.
       const withData = byCache.data.rows.filter((r) => r.cacheHitPct != null);
       const pcts = withData.map((r) => r.cacheHitPct as number);
       expect([...pcts].sort((a, b) => a - b)).toEqual(pcts);
@@ -66,27 +53,11 @@ describe('queryStats', () => {
   }, 120_000);
 
   /**
-   * Fix round 1 made `totalShapes >= rows.length` strict, because equal
-   * counts satisfied `>=` and the assertion used to pass without ever
-   * exercising truncation. M4 (final review) found the replacement fixture
-   * was still not doing what its comment claimed: `SELECT 201..205` are not
-   * "five distinct one-literal shapes" — pg_stat_statements NORMALISES
-   * integer literals, so all five collapse into ONE row, `SELECT $1`, with
-   * `calls = 5`. The margin that made the assertion pass came from
-   * elsewhere: cluster-wide noise (CREATE DATABASE, testcontainers' probe,
-   * every sibling integration file's statements). I2 has now scoped this
-   * check to the current database and removed exactly that noise, so the
-   * fixture has to earn its own margin.
-   *
-   * Varying ARITY is what normalisation preserves: `SELECT 1` and
-   * `SELECT 1, 2` are `SELECT $1` and `SELECT $1, $2`, genuinely different
-   * rows. The first assertion checks that directly, so a future edit that
-   * goes back to varying literal VALUES fails here rather than silently
-   * shrinking the margin to zero again.
-   *
-   * SHAPES is deliberately above LIMIT, and the margin is the fixture's own:
-   * verified non-vacuous by lowering SHAPES below LIMIT, which makes
-   * `totalShapes > rows.length` fail (see the fix report).
+   * pg_stat_statements normalises integer literals, so `SELECT 201` and
+   * `SELECT 202` are one row, `SELECT $1`. Arity survives normalisation:
+   * `SELECT 1` and `SELECT 1, 2` are different rows. The first assertion
+   * checks that the fixture really made SHAPES distinct shapes, and SHAPES is
+   * above LIMIT so the truncation margin is the fixture's own.
    */
   it('reports how many shapes it did not return (A4, M4)', async () => {
     const SHAPES = 6;
@@ -99,9 +70,7 @@ describe('queryStats', () => {
       const all = await runCheck(ctx, queryStats, { sort: 'calls', limit: 500 });
       if (!all.ok) throw new Error(all.message);
       // One entry per distinct arity among the normalised `SELECT $1[, $n]`
-      // rows — i.e. the fixture's own shapes, and nothing the harness's own
-      // two statements (CREATE EXTENSION, SELECT current_setting($1) AS v)
-      // could contribute.
+      // rows; the harness's own statements cannot match the pattern.
       const arities = new Set(
         all.data.rows
           .filter((r) => r.query != null && /^SELECT\s+\$1(\s*,\s*\$\d+)*\s*$/.test(r.query))
@@ -117,18 +86,12 @@ describe('queryStats', () => {
   }, 120_000);
 
   /**
-   * I2. `pg_stat_statements` is cluster-wide: before the `dbid` predicate,
-   * a connection to `app_prod` ranked `app_staging`'s statements alongside
-   * its own, and `QueryStatRow` carries no column an operator could use to
-   * tell which database a row came from. This runs a marker statement in a
-   * DIFFERENT database on the same container and asserts it does not appear.
+   * `pg_stat_statements` is cluster-wide; without the `dbid` predicate
+   * another database's statements are ranked alongside this one's.
    *
-   * The marker is a column ALIAS, not a literal: pg_stat_statements
-   * normalises `SELECT 'marker'` to `SELECT $1`, so a literal marker would
-   * be invisible in the stored query text whether the scoping worked or not
-   * — the test would pass for the wrong reason. Aliases survive
-   * normalisation. The local half of the assertion is what proves the
-   * foreign half is about SCOPE rather than about markers being unfindable.
+   * The marker is a column alias because a literal is normalised to `$1` and
+   * would be invisible in the stored text either way. The local half of the
+   * assertion proves the marker is findable at all.
    */
   it('ranks only the current database\'s statements (I2)', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -136,8 +99,7 @@ describe('queryStats', () => {
       const foreignMarker = `i2_foreign_${suffix}`;
       const localMarker = `i2_local_${suffix}`;
 
-      // The container's own default database — a genuinely different one
-      // from the per-test database `withPostgres` created.
+      // The container's default database, not the per-test one.
       const other = new pg.Client({ connectionString: inject('pgConnectionUri') });
       try {
         await other.connect();
@@ -163,22 +125,14 @@ describe('queryStats', () => {
     });
   }, 120_000);
 
-  // A5, behaviourally: proves the filter changes the answer, not just that
-  // the SQL text mentions the column. With pg_stat_statements.track = 'all',
-  // a PL/pgSQL function's body statements (the PERFORMs below) become their
-  // own, non-toplevel, pg_stat_statements rows. Without `WHERE toplevel`,
-  // this check's `totalShapes` — and its candidate pool for LIMIT/ORDER BY —
-  // would include them, letting a function compete against its own internals
-  // for the top slot, exactly as the defect describes.
+  // With pg_stat_statements.track = 'all', a PL/pgSQL function's body
+  // statements become their own non-toplevel rows. Without `WHERE toplevel`
+  // they would enter `totalShapes` and compete with the function's own call.
   it('does not let a function\'s own body statements inflate totalShapes (A5)', async () => {
     await withPostgres(async (ctx, pool) => {
-      // `SET pg_stat_statements.track` is session-scoped. `pool` hands out
-      // one of up to four pooled connections per `.query()` call, so
-      // setting it via `pool.query(...)` and then calling the function via
-      // another `pool.query(...)` can silently land on two DIFFERENT
-      // backends — the SET never in effect for the call it was meant to
-      // cover. A single checked-out client keeps every statement on the
-      // same backend.
+      // `SET pg_stat_statements.track` is session-scoped, and two
+      // `pool.query()` calls can land on different backends. A checked-out
+      // client keeps every statement on the same one.
       const client = await pool.connect();
       try {
         await client.query("SET pg_stat_statements.track = 'all'");
@@ -194,15 +148,11 @@ describe('queryStats', () => {
         client.release();
       }
 
-      // Fixture sanity: `track = 'all'` really did record the function
-      // body's `PERFORM` (normalized to `SELECT $1 + $2`) as its own,
-      // non-toplevel pg_stat_statements row — proof the fixture exercises
-      // the exact shape A5 is about, not just that some row is non-toplevel.
-      // Every count query below (including this one) becomes a new
-      // pg_stat_statements row itself the moment it finishes, one step
-      // AFTER the count it just returned — so counts taken at different
-      // points in this test are never safe to compare for exact equality,
-      // only for the presence/absence of one specific known shape.
+      // Guard the fixture: the function body's `PERFORM` (normalised to
+      // `SELECT $1 + $2`) was recorded as a non-toplevel row.
+      // Every count query here becomes a pg_stat_statements row itself once
+      // it finishes, so counts taken at different points cannot be compared
+      // for exact equality.
       const nested = await pool.query<{ n: string }>(
         "SELECT count(*)::text AS n FROM pg_stat_statements WHERE NOT toplevel AND query = 'SELECT $1 + $2'",
       );
@@ -210,13 +160,9 @@ describe('queryStats', () => {
 
       const r = await runCheck(ctx, queryStats, { sort: 'calls', limit: 200 });
       if (!r.ok) throw new Error(r.message);
-      // The defect: without `WHERE toplevel`, this exact non-toplevel shape
-      // would be a candidate for LIMIT/ORDER BY and could appear here,
-      // competing against `t_nested_a5()`'s own toplevel call for a slot.
       expect(r.data.rows.some((row) => row.query === 'SELECT $1 + $2')).toBe(false);
-      // totalShapes — the universe LIMIT drew from — is the toplevel-only
-      // count as of (at latest) queryStats' own scan, which can only be
-      // less than or equal to a toplevel recount taken strictly afterward.
+      // totalShapes is the toplevel-only count as of the check's own scan,
+      // so it can only be <= a toplevel recount taken afterward.
       const toplevelNow = await pool.query<{ n: string }>(
         'SELECT count(*)::text AS n FROM pg_stat_statements WHERE toplevel',
       );
@@ -237,29 +183,19 @@ describe('queryStats', () => {
     });
   }, 120_000);
 
-  // Fix round 1: the primary finding. Verified empirically against a live
-  // PostgreSQL 17.11 that Postgres redacts a foreign row's queryid/query
-  // rather than dropping it — this is the same proof reproduced against
-  // this suite's own container. `q_monitor` below has neither ownership of
-  // `q_owner`'s statement nor `pg_read_all_stats`: under the deleted
-  // privilege-filter clause, `q_owner`'s row would have silently vanished
-  // from `q_monitor`'s result (indistinguishable from "no such query
-  // exists"). It must not vanish now.
+  // Postgres redacts a foreign row's queryid/query rather than dropping it.
+  // `q_monitor` neither owns `q_owner`'s statement nor has
+  // `pg_read_all_stats`; the row must still appear, not silently vanish.
   it('surfaces a row it cannot identify rather than dropping it (fix round 1)', async () => {
     await withPostgres(async (ctx, pool) => {
       const suffix = Math.random().toString(36).slice(2, 10);
       const owner = `q_owner_${suffix}`;
       const monitor = `q_monitor_${suffix}`;
       await pool.query(`CREATE ROLE ${owner} LOGIN PASSWORD 'owner_pw'`);
-      // No GRANT of pg_read_all_stats, and no ownership relationship to
-      // `owner` — the exact role shape this check exists to serve: a
-      // monitoring/ops role distinct from the application roles.
+      // A monitoring role distinct from the application roles: no
+      // pg_read_all_stats, no ownership relationship to `owner`.
       await pool.query(`CREATE ROLE ${monitor} LOGIN PASSWORD 'monitor_pw'`);
 
-      // `pool.options.connectionString` is typed `string | undefined` (PoolConfig
-      // leaves it optional even though this harness always sets it) — the same
-      // widening blocked.int.test.ts/locks.int.test.ts already use for `pool.options`
-      // narrows it to the `string` it genuinely is here.
       const baseUri = new URL(
         (pool as unknown as { options: { connectionString: string } }).options.connectionString,
       );
@@ -285,18 +221,12 @@ describe('queryStats', () => {
           const r = await runCheck(monitorCtx, queryStats, { sort: 'calls', limit: 200 });
           if (!r.ok) throw new Error(r.message);
 
-          // The old, deleted clause would have filtered `owner`'s row out
-          // of `visible` entirely before `monitor` ever saw it. Now it must
-          // be present, with its identity redacted but its cost intact —
-          // exactly what a live PG17.11 query returned when the reviewer
-          // ran this scenario by hand.
+          // `owner`'s row is present, identity redacted, cost intact.
           const foreign = r.data.rows.filter((row) => row.redacted);
           expect(foreign.length).toBeGreaterThan(0);
           for (const row of foreign) {
             expect(row.queryid).toBeNull();
             expect(row.query).toBe('<insufficient privilege>');
-            // The row survived: cost figures are real numbers, not zeroed
-            // out alongside the identity.
             expect(row.calls).toBeGreaterThan(0);
             expect(Number.isFinite(row.totalMs)).toBe(true);
           }
@@ -304,9 +234,8 @@ describe('queryStats', () => {
           await monitorPool.end();
         }
       } finally {
-        // Roles are cluster-wide, not scoped to withPostgres's per-test
-        // database — must be dropped explicitly or a later run in the same
-        // container collides on CREATE ROLE.
+        // Roles are cluster-wide, so the per-test database teardown does not
+        // drop them.
         await pool.query(`DROP ROLE ${owner}`);
         await pool.query(`DROP ROLE ${monitor}`);
       }
@@ -315,15 +244,12 @@ describe('queryStats', () => {
 
   it('carries the last stats_reset time when readable', async () => {
     await withPostgres(async (ctx, pool) => {
-      // pg_stat_statements_reset() clears counters — a reset, not DDL/DML
-      // (the task's own carve-out), acceptable in a test fixture.
       await pool.query('SELECT pg_stat_statements_reset()');
       await pool.query('SELECT 424242');
 
       const r = await runCheck(ctx, queryStats, { sort: 'total', limit: 5 });
       if (!r.ok) throw new Error(r.message);
       expect(r.data.statsResetAt).not.toBeNull();
-      // The reset just ran; the reported timestamp should parse as recent.
       const resetAt = new Date(r.data.statsResetAt as string).getTime();
       expect(Date.now() - resetAt).toBeLessThan(60_000);
     });
@@ -331,22 +257,13 @@ describe('queryStats', () => {
 
   it('hides the console\'s own shapes by default, counts them, and shows them on request', async () => {
     await withPostgres(async (ctx, pool) => {
-      // Distinct ARITY, not just a distinct alias: pg_stat_statements'
-      // queryid jumbling ignores a target list entry's alias entirely
-      // (measured against a live PG17 — `SELECT 42 AS marked` and `SELECT 43
-      // AS unmarked` collapse into ONE row, keeping whichever text ran
-      // first), so `SELECT 42 AS marked` and `SELECT 43 AS unmarked` would
-      // be indistinguishable to Postgres and this fixture would silently
-      // test nothing. Two columns is a genuinely different shape.
-      // The marker TRAILS, on its own line, and the literal is spelled out
-      // here rather than built with `ownSql` on purpose: this test is the only
-      // place that checks the marker against a real server, so it has to state
-      // the wire format independently instead of agreeing with whatever
-      // production currently produces. A LEADING marker is what this test
-      // caught on PostgreSQL 18, which excludes a leading comment from the
-      // text pg_stat_statements stores — see run.ts's comment on
-      // OWN_SQL_MARKER. 14, 16 and 17 all kept it, so only the four-version
-      // gate matrix could find this.
+      // Distinct arity, not just a distinct alias: queryid jumbling ignores
+      // aliases, so `SELECT 42 AS marked` and `SELECT 43 AS unmarked` would
+      // collapse into one row keeping whichever text ran first.
+      // The marker is spelled out rather than built with `ownSql` so this
+      // test states the wire format independently of production. It trails
+      // because PostgreSQL 18 excludes a leading comment from the text
+      // pg_stat_statements stores (14, 16 and 17 keep it).
       await pool.query('SELECT 42 AS marked\n/* pgops */');
       await pool.query('SELECT 43, 44 AS unmarked');
 
@@ -359,12 +276,25 @@ describe('queryStats', () => {
       const shown = await runCheck(ctx, queryStats, { sort: 'calls', limit: 500, showOurs: true });
       if (!shown.ok) throw new Error(shown.message);
       expect(shown.data.rows.some((r) => r.query?.endsWith('/* pgops */'))).toBe(true);
-      // NOT strict equality: `hidden`'s own marked statement is recorded by
-      // pg_stat_statements only once IT finishes — same self-observation lag
-      // this file's other tests already account for (see "reports how many
-      // shapes it did not return"'s own note on this). So `shown`, run right
-      // after, sees one more shape than `hidden` counted: `hidden`'s own.
+      // Not strict equality: `hidden`'s own statement is recorded only once
+      // it finishes, so `shown` may see one more shape than `hidden` counted.
       expect(shown.data.totalShapes).toBeGreaterThanOrEqual(hidden.data.totalShapes);
+    });
+  }, 120_000);
+  it('sums every shape\'s time, and can be asked about one shape', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE TABLE t (id int)');
+      for (let i = 0; i < 3; i++) await pool.query('INSERT INTO t VALUES ($1)', [i]);
+      await pool.query('SELECT count(*) FROM t');
+      const all = await runCheck(ctx, queryStats, { sort: 'total', limit: 50, showOurs: true });
+      if (!all.ok) throw new Error(all.message);
+      expect(all.data.allMs).toBeGreaterThanOrEqual(all.data.rows.reduce((a, r) => a + r.totalMs, 0) - 0.001);
+      const insert = all.data.rows.find((r) => r.query?.startsWith('INSERT INTO t'))!;
+      const one = await runCheck(ctx, queryStats, { sort: 'total', queryid: insert.queryid! });
+      if (!one.ok) throw new Error(one.message);
+      expect(one.data.rows.map((r) => r.queryid)).toEqual([insert.queryid]);
+      // The sum is still every shape's, not the one asked about.
+      expect(one.data.allMs).toBeGreaterThan(one.data.rows[0]!.totalMs);
     });
   }, 120_000);
 });

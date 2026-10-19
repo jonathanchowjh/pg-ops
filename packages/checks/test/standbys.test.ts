@@ -25,10 +25,9 @@ describe('standbys.map', () => {
   });
 
   /**
-   * The rule this whole check is written around. A role without pg_monitor
-   * reads another user's walsender lag columns as NULL, and a standby whose
-   * lag cannot be read must never render as caught up — 0 is a claim, null
-   * is the absence of one.
+   * A role without pg_monitor reads another user's walsender lag columns as
+   * NULL, and a standby whose lag cannot be read must never render as caught
+   * up.
    */
   it('maps an unreadable lag to null, never to zero', () => {
     const d = standbys.map([row({ write_secs: null, flush_secs: null, replay_secs: null, replay_bytes: null })]);
@@ -66,9 +65,8 @@ describe('standbys.verdict', () => {
   });
 
   /**
-   * A standby whose lag this role cannot read is not a standby that is fine.
-   * It yields no verdict rather than a green one — and must not drag a
-   * READABLE standby's verdict down with it either.
+   * A standby whose lag this role cannot read is not judged, and must not
+   * drag a readable standby's verdict down with it.
    */
   it('does not judge a standby whose lag it cannot read', () => {
     expect(standbys.verdict!({ standbys: [sb(null)] }, t)).toEqual({ level: 'ok' });
@@ -77,7 +75,7 @@ describe('standbys.verdict', () => {
     expect(mixed.note).toContain('replica-2');
   });
 
-  // Convention 3, the proof every other check in this package carries.
+  // The threshold lookups must not use a non-null assertion.
   it('does not throw, and stays visible, when a threshold level is absent', () => {
     const warnOnly = t.filter((x) => x.level === 'warn');
     expect(standbys.verdict!({ standbys: [sb(99999)] }, warnOnly).level).toBe('warn');
@@ -87,10 +85,8 @@ describe('standbys.verdict', () => {
 
 describe('standbys.requires', () => {
   /**
-   * The lag columns read NULL for another user's walsender without this
-   * role, which is indistinguishable from a standby with no lag to report.
-   * Declared so a privilege failure prints the GRANT rather than a bare
-   * permission error — see run.ts's `grantRemedy`.
+   * Without this role the lag columns read NULL for another user's
+   * walsender. Declared so a privilege failure prints the GRANT.
    */
   it('names the role its lag columns need', () => {
     expect(standbys.requires).toEqual([{ kind: 'role', name: 'pg_monitor' }]);

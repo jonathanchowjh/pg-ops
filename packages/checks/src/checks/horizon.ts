@@ -1,4 +1,5 @@
 import type { Check, Verdict } from '../types.js';
+import { escalate, ownSession } from './shared.js';
 
 export interface HorizonRow {
   kind: 'backend' | 'slot' | 'prepared';
@@ -6,33 +7,23 @@ export interface HorizonRow {
   xmin_age: number;
   age_secs: string | null;
   detail: string;
-  /** Holders that existed BEFORE the limit. Same pattern as long-running.ts. */
+  /** Holders that existed before the limit. */
   total: number;
 }
 export interface HorizonHolder { kind: 'backend' | 'slot' | 'prepared'; who: string; xminAge: number; ageSecs: number | null; detail: string }
 export interface HorizonData { holders: HorizonHolder[]; truncated: boolean }
 
 /**
- * Vacuum cannot remove any row version that some snapshot might still need. The
- * oldest such snapshot — the xmin horizon — is held by exactly three kinds of
- * thing: a backend with an open transaction, a replication slot, or a prepared
- * transaction. When bloat grows while autovacuum runs on schedule, one of these
- * is why, and this lists them furthest-back first.
+ * Vacuum cannot remove a row version some snapshot might still need. The
+ * oldest such snapshot, the xmin horizon, is held by a backend with an open
+ * transaction, a replication slot, or a prepared transaction. This lists the
+ * holders furthest-back first.
  *
- * JUDGED ON TRANSACTIONS, NOT SECONDS, and the distinction is the whole point.
- * `age(xid)` is how far back the horizon sits in xid space, which is what decides
- * how much garbage cannot be reclaimed. Wall-clock age does not: eleven minutes
- * on a quiet database pins a couple of dozen transactions, and eleven minutes on
- * a busy primary pins millions. Seconds are reported for the two kinds that have
- * them because "open for 11m" is how an operator spots the culprit, but they are
- * information, not the basis of the verdict.
- *
- * The first draft judged on seconds and therefore could not judge a slot at all,
- * which made the single most common cause of unreclaimable bloat render green.
- * `slots.ts` does not cover it either — it judges retained WAL bytes, and a
- * logical slot with a stuck `catalog_xmin` can retain almost none. If you are
- * tempted to move the verdict back onto seconds, that is the hole you are
- * reopening.
+ * Judged on transactions, not seconds: `age(xid)` decides how much garbage
+ * cannot be reclaimed, and wall-clock age does not. A slot has no start
+ * time, so a verdict on seconds could not judge one, and `slots.ts` judges
+ * retained WAL bytes, which a logical slot with a stuck `catalog_xmin` can
+ * keep near zero. Seconds are reported for information only.
  */
 const SQL = `
 SELECT kind, who, xmin_age, age_secs, detail, count(*) OVER ()::int AS total
@@ -42,19 +33,12 @@ FROM (
          coalesce(nullif(application_name, ''), '—') || ' · ' || coalesce(state, 'unknown') AS detail
   FROM pg_stat_activity
   WHERE backend_xmin IS NOT NULL AND pid <> pg_backend_pid()
-    -- Task 8, step 3b — same clause and same reasoning as activity.ts's own
-    -- act CTE (see its comment for the full explanation): one page render
-    -- fires about six checks in parallel on separate pool connections, and
-    -- without this, pgops names one of its own backends as pinning the xmin
-    -- horizon. Filtered on application_name rather than the OWN_SQL_MARKER
-    -- this task adds, because a role without pg_read_all_stats can see a
-    -- foreign backend's application_name but not its query (measured on live
-    -- PG17). The empty-string guard stops an unnamed connection turning the
-    -- pattern into '%', which would exclude every backend and leave this
-    -- check permanently blind; pid <> pg_backend_pid() above still excludes
-    -- the checking backend itself in exactly that case.
-    AND (current_setting('application_name') = ''
-         OR application_name NOT LIKE current_setting('application_name') || '%')
+    -- A backend in another database does not hold this one's tables back;
+    -- one with no database, a walsender, does.
+    AND (datid IS NULL OR datname = current_database())
+    -- pgops's own backends are excluded: otherwise pgops names one of its own
+    -- parallel checks as pinning the xmin horizon.
+    AND NOT ${ownSession('application_name')}
   UNION ALL
   SELECT 'slot', slot_name::text, greatest(age(xmin), age(catalog_xmin))::int, NULL,
          CASE WHEN active THEN 'active' ELSE 'inactive' END
@@ -71,8 +55,9 @@ LIMIT 10`;
 export const horizon: Check<HorizonRow, HorizonData> = {
   id: 'horizon',
   gate: 'keep-up',
+  home: 'server',
   title: 'Oldest snapshot',
-  class: 'incident',
+  class: 'live',
   sql: SQL,
   map: (rows) => ({
     holders: rows.map((r) => ({
@@ -97,24 +82,16 @@ export const horizon: Check<HorizonRow, HorizonData> = {
             + 'the Maintenance page for the tables carrying the most dead rows.' },
   ],
   /**
-   * The worst holder by xid distance, whatever kind it is.
-   *
-   * Every kind is judged on the same axis, so there is no holder this function
-   * has to stay silent about. The note names the kind because the remedy differs
-   * completely between them, and reports seconds only for a holder that has them
-   * — a slot has no start time, and inventing one would be the same over-claim as
-   * calling it fine.
+   * The worst holder by xid distance, whatever kind it is. The note names the
+   * kind because the remedy differs, and gives seconds only where the holder
+   * has a start time.
    */
   verdict: (d, t): Verdict => {
     const worst = d.holders.reduce<HorizonHolder | null>(
       (o, h) => (o === null || h.xminAge > o.xminAge ? h : o), null);
     if (worst === null) return { level: 'ok' };
     const when = worst.ageSecs === null ? '' : `, open ${Math.round(worst.ageSecs / 60)}m`;
-    const note = `${worst.kind} ${worst.who} pins the horizon ${worst.xminAge} transactions back${when}`;
-    const crit = t.find((x) => x.level === 'critical');
-    if (crit && worst.xminAge >= crit.value) return { level: 'critical', note };
-    const warn = t.find((x) => x.level === 'warn');
-    if (warn && worst.xminAge >= warn.value) return { level: 'warn', note };
-    return { level: 'ok' };
+    return escalate(worst.xminAge, t,
+      `${worst.kind} ${worst.who} pins the horizon ${worst.xminAge} transactions back${when}`);
   },
 };

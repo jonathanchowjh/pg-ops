@@ -1,80 +1,64 @@
 import { redactSecrets } from '@pgops/checks';
+import type { StatementNode, TableNode, Tree } from '@/lib/tree';
 
 /**
- * THE ONLY component permitted to render a query string.
+ * A statement safe to put anywhere: collapsed to one line, then redacted.
  *
- * Spec §7.3 requires `redactSecrets` on every rendered query, not just on
- * export — and "remember to call it" is not a mechanism. Routing every query
- * through one component makes the rule mechanically checkable: Task 11's guard
- * asserts that no page renders a `query` field outside this component.
- */
-/**
- * A statement safe to put anywhere: collapsed to ONE LINE, then redacted.
- *
- * That order is the whole point, and it is why this is a function rather
- * than two calls at each site. `redactSecrets`'s quoted-literal rules are
- * scoped to a single line on purpose — an unterminated literal must not
- * swallow a document up to some unrelated apostrophe — so a secret split
- * across two lines gets only its first line masked:
+ * The order matters. `redactSecrets`'s quoted-literal rules are scoped to a
+ * single line on purpose, so a secret split across two lines gets only its
+ * first line masked:
  *   ALTER USER app WITH PASSWORD 'hun\nter2';  ->  … PASSWORD ***\nter2';
  *
- * Exported because `Sql` is not the only thing that needs it. Anything
- * handed to a CLIENT component is serialised into the RSC payload embedded
- * in the page, before that component runs — so a client component cannot
- * redact its own props, and the call site must. `ExplainLink` is the case
- * that proved it: A9 passed `pg_stat_statements` text straight through and
- * `routes.int.test.ts` caught a real password in the HTML of
- * `/db/<name>/queries`. The guard in test/guards.test.ts requires this
- * function at every such call site.
+ * Exported because anything handed to a client component is serialised into
+ * the RSC payload before that component runs, so a client component cannot
+ * redact its own props and the call site must. The guard in
+ * test/guards.test.ts requires this function at every such call site.
  */
 export function safeStatement(text: string): string {
   return redactSecrets(text.replace(/\s+/g, ' ').trim());
 }
 
-export function Sql({ children }: { children: string | null | undefined }) {
+/**
+ * The tree as it may be handed to a client component: every statement
+ * through `safeStatement`. Every text the tree holds is already a shape,
+ * from the sampler or the capture; this is the guard that the page does not
+ * depend on it. guards.test.ts holds that the page calls this at the
+ * `<TreeView>` and `<RowsView>` call sites.
+ */
+export function redactTree(tree: Tree): Tree {
+  const statement = (s: StatementNode): StatementNode => ({ ...s, text: s.text === null ? null : safeStatement(s.text) });
+  const table = (t: TableNode): TableNode => ({ ...t, statements: t.statements.map(statement) });
+  return { ...tree, tables: tree.tables.map(table), none: tree.none === null ? null : table(tree.none), flat: tree.flat.map(statement) };
+}
+
+/**
+ * The only component permitted to render a query string, so that
+ * `redactSecrets` runs on every rendered query. A guard test asserts that no
+ * page renders a `query` field outside it.
+ */
+export function Sql({ children, whole = false }: {
+  children: string | null | undefined;
+  /** The statement once, in full: wrapped, never clamped. */
+  whole?: boolean;
+}) {
   if (children == null) return <span>—</span>;
 
-  // Collapsed to one line BEFORE redacting, and that order is the whole point
-  // (F2, final review). `redactSecrets`'s quoted-literal rules are scoped to a
-  // single line on purpose — an unterminated literal must not be able to
-  // swallow a whole document up to some unrelated apostrophe — so a secret
-  // that a newline splits across two lines gets only its first line masked:
-  //   ALTER USER app WITH PASSWORD 'hun\nter2';  →  … PASSWORD ***\nter2';
-  // The TUI used to guarantee single-line input to that matcher
-  // (core/format.ts's `truncateQuery`); P1b deleted that file, and this
-  // component was handing `pg_stat_activity.query` through raw. Nothing
-  // replaced the guarantee, so it is restored here, at the one caller that
-  // renders a query — `packages/checks` gains no behaviour this phase.
-  //
-  // Lossless for the reader either way: a rendered statement is wrapped and
-  // clamped, never laid out as source, so the newlines were never visible as
-  // newlines.
+  // Collapsing loses nothing for the reader: a rendered statement is wrapped
+  // and clamped, never laid out as source.
   const oneLine = safeStatement(children);
   if (oneLine === '') return <span>—</span>;
 
-  // CLAMPED, NOT SCROLLED, and the reason is a rule in the overflow spec
-  // rather than a taste: `overflow-x: auto` computes the OTHER axis from
-  // `visible` to `auto` too, so every statement on the page was a two-axis
-  // scroll container. The Queries page rendered a hundred of them, each 16px
-  // tall and 900px wide over a line that could be 23,000px long, and a
-  // trackpad gesture that begins over any one of them is captured by it —
-  // the page stopped scrolling under the pointer for most of its own area.
+  if (whole) return <code className="block font-mono text-xs/5 break-words whitespace-pre-wrap">{oneLine}</code>;
+
+  // Clamped, not scrolled: `overflow-x: auto` computes the other axis from
+  // `visible` to `auto` too, so each statement would be a two-axis scroll
+  // container that captures a trackpad gesture beginning over it. `ui/table`
+  // still scrolls the table sideways as one piece.
   //
-  // Two lines is about 200 characters, which identifies a statement; the
-  // whole text belongs on the query's own page, where there is room to read
-  // it. Inside a table the row also stays one height whatever it holds, and
-  // `ui/table` still scrolls the table sideways as ONE piece, which is the
-  // single horizontal scroller this console ever wanted.
-  // `whitespace-normal` is load-bearing and was missing. `ui/table`'s
-  // TableCell carries `whitespace-nowrap` — right for a column of numbers,
-  // fatal here: it inherits into this element, so the statement never wrapped,
-  // `line-clamp-2` had no second line to clamp to, and the text ran under
-  // line-clamp's own `overflow: hidden`. Measured on /queries at 1440: the
-  // code box is 907px, the statement inside it is not, and the remainder was
-  // CLIPPED MID-TOKEN with no ellipsis to admit it — `…ON d.id = l.dat`. A
-  // console that shows a fragment of SQL shaped exactly like whole SQL is
-  // worse than one that shows none. The comment below described wrapping this
-  // element had never done.
+  // `whitespace-normal` is load-bearing. `ui/table`'s TableCell carries
+  // `whitespace-nowrap`, which inherits into this element; without the
+  // override the statement never wraps and `line-clamp-2` clips it mid-token
+  // with no ellipsis.
   return (
     <code className="line-clamp-2 max-w-full font-mono text-xs break-words whitespace-normal">
       {oneLine}

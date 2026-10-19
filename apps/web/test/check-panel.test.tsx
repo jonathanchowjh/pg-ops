@@ -16,10 +16,8 @@ describe('CheckPanel', () => {
   });
 
   /**
-   * The !ok path is the one that matters. runCheck never rejects, so a denied
-   * or broken check arrives here as data — and if this component rendered
-   * nothing for it, the page would show a silently missing panel, which reads
-   * as "everything is fine" during an incident. It must say what went wrong.
+   * runCheck never rejects, so a denied or broken check arrives as data. A
+   * silently missing panel would read as "everything is fine".
    */
   it('renders the failure reason and message when the check failed', async () => {
     const r = await render(
@@ -48,16 +46,8 @@ describe('CheckPanel', () => {
 });
 
 /**
- * The guidance block, which is the reason `Threshold.because` exists at all.
- *
- * The checks package documents that field as "the sentence justifying this
- * number. MUST NOT be empty" and unit-tests it, and a grep for it across
- * apps/web returned NOTHING: the console rendered `CRITICAL` and a duration
- * and never once said why that duration was bad. `remedy` beside it is the
- * other half — registry.ts already names the rule ("pgHero's capability is
- * the probe plus the remedy") and the package had applied it only to the
- * path where a check BROKE, never to the path where a check worked and found
- * something.
+ * The guidance block: where a crossed threshold's `because` and `remedy`
+ * reach the reader.
  */
 describe('CheckPanel guidance', () => {
   const crossed = {
@@ -81,14 +71,7 @@ describe('CheckPanel guidance', () => {
     expect(r.text()).toContain('Terminate idle-in-transaction sessions now.');
   });
 
-  /**
-   * The other half, and the reason `crossed` is resolved in run.ts rather
-   * than looked up here from the verdict level. A healthy check crossed no
-   * threshold, so there is no sentence that applies to it — and inventing
-   * one ("connections are fine because below a tenth...") would attach a
-   * critical rationale to an OK reading, which is the same over-claim as
-   * substituting `{level:'ok'}` for a check that does not judge.
-   */
+  /** A healthy check crossed no threshold, so no rationale applies to it. */
   it('says nothing at all when no threshold was crossed', async () => {
     const r = await render(
       <CheckPanel
@@ -102,11 +85,7 @@ describe('CheckPanel guidance', () => {
     expect(r.text()).not.toContain('Why this matters');
   });
 
-  /**
-   * A threshold may legitimately carry no remedy: some crossings have no one
-   * safe action, and the package's own docblock says silence is correct where
-   * advice would be a guess. The explanation must still render.
-   */
+  /** A threshold may carry no remedy: some crossings have no one safe action. */
   it('renders the explanation alone when the threshold carries no remedy', async () => {
     const { remedy: _drop, ...noRemedy } = crossed;
     const r = await render(
@@ -121,12 +100,7 @@ describe('CheckPanel guidance', () => {
     expect(r.text()).not.toContain('Terminate idle-in-transaction');
   });
 
-  /**
-   * Compact is how the triage page stops spending a full card on good news.
-   * The value and the badge must survive it — this is a change of weight,
-   * not a change of what is reported — but the guidance must not, because a
-   * compact panel is by definition one that crossed nothing.
-   */
+  /** Compact changes the weight of a healthy panel, not what it reports. */
   it('keeps the value and the badge when compact', async () => {
     const r = await render(
       <CheckPanel
@@ -143,18 +117,9 @@ describe('CheckPanel guidance', () => {
 });
 
 /**
- * A box means look here.
- *
- * Compact halved the space a healthy check took and left it wearing the same
- * bordered card as an incident, so a triage page with nothing wrong was still
- * nine outlined boxes — furniture at the weight of a signal. The border is
- * now the third thing, after the accent bar and the badge, that says the same
- * one word.
- *
- * Asserted on the CLASS, which this suite otherwise avoids — every other test
- * here reads text and roles. There is no other way to see it: the rule is
- * entirely visual, it is the whole content of this phase, and "renders a
- * border" is not something a screen reader or a text assertion can observe.
+ * Only a warn, critical or failed check gets a bordered card. Asserted on the
+ * class, which this suite otherwise avoids: the rule is purely visual, so
+ * text and roles cannot observe it.
  */
 describe('a box means look here', () => {
   const box = (el: Element | null) => el!.className.includes('border') && !el!.className.includes('border-b');
@@ -182,7 +147,7 @@ describe('a box means look here', () => {
   it('draws no card around a healthy check', async () => {
     const r = await panel(ok);
     expect(box(r.container.querySelector('section'))).toBe(false);
-    // Still says OK, in words. This is a change of weight, not of content.
+    // Still says OK, in words.
     expect(r.text()).toContain('OK');
     expect(r.text()).toContain('0 slots');
   });
@@ -205,10 +170,8 @@ describe('a box means look here', () => {
   );
 
   /**
-   * "We could not look" keeps its box. It is not a quiet state — it is the
-   * one this console exists to hold apart from "we looked and it is fine" —
-   * but it gets NO tint and NO bar, because gray is what the absence of a
-   * verdict looks like here and a failed check has no level to colour with.
+   * "We could not look" is not a quiet state, so it keeps its box; it has no
+   * level, so it gets no tint and no bar.
    */
   it('keeps the card for a check that could not run, without colouring it', async () => {
     const r = await panel(broken);

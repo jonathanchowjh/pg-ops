@@ -1,13 +1,7 @@
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CHECKS } from '@pgops/checks';
-
-/**
- * I4 (final review): hardcoded `postgres:17-alpine` until now, so every CI
- * matrix leg ran this file against 17 regardless of which version it claimed
- * to be testing. Same expression as packages/checks/test/global-setup.ts.
- */
-const IMAGE = `postgres:${process.env.PGOPS_TEST_PG_VERSION ?? '17'}-alpine`;
+import { IMAGE } from './harness';
 
 let pg: StartedPostgreSqlContainer;
 
@@ -27,10 +21,8 @@ describe('runCheckFor', () => {
   });
 
   /**
-   * The serverVersion in the context must be the REAL one read from the
-   * server, not a constant. A hardcoded floor would make every version-gated
-   * check appear supported on a server that does not support it -- the exact
-   * failure `requires: {kind:'version'}` exists to prevent.
+   * A hardcoded version would make every version-gated check appear supported
+   * on a server that does not support it.
    */
   it('probes the real server version into the context', async () => {
     const { contextFor } = await import('../lib/pools.js');
@@ -40,11 +32,7 @@ describe('runCheckFor', () => {
     expect(ctx.serverVersion).toBe(Number(rows[0]!.server_version_num));
   });
 
-  /**
-   * One pool per database for the process lifetime. A pool per request would
-   * exhaust max_connections on the database this tool exists to diagnose,
-   * during the incident it exists to diagnose it.
-   */
+  /** A pool per request would exhaust max_connections on the database being diagnosed. */
   it('reuses one pool across calls for the same database', async () => {
     const { contextFor } = await import('../lib/pools.js');
     const a = await contextFor('primary');
@@ -57,10 +45,7 @@ describe('runCheckFor', () => {
     await expect(contextFor('nope')).rejects.toThrow(UnknownDatabaseError);
   });
 
-  /**
-   * runCheck never rejects, and neither does this. A page renders a failed
-   * check; it must never render a stack trace.
-   */
+  /** A page renders a failed check; it must never render a stack trace. */
   it('returns ok:false rather than rejecting when a check cannot run', async () => {
     const { runCheckFor } = await import('../lib/check.js');
     const broken = { ...CHECKS.connections, sql: 'SELECT * FROM does_not_exist' };
@@ -70,10 +55,8 @@ describe('runCheckFor', () => {
 });
 
 /**
- * Final review. Only `pool.query` was counted, and the health tick samples
- * on a checked-out client: the commit chart showed a floor of pgops's own
- * making while "statements pgops itself sent" read zero, which is the case
- * that line was added for.
+ * The health tick samples on a checked-out client, so counting only
+ * `pool.query` would report zero for statements pgops itself sent.
  */
 describe('ownStatementsTotal', () => {
   it('counts statements sent on a checked-out client, but not transaction control', async () => {
@@ -99,5 +82,49 @@ describe('ownStatementsTotal', () => {
       again.release();
     }
     expect(ownStatementsTotal('primary') - before).toBe(3);
+  });
+
+  /**
+   * `pool.query` checks a client out itself. Once that client had been
+   * through `connect()`, the statement was counted at the pool and again at
+   * the client, and the Health page's own-statement rate read double.
+   */
+  it('counts a pool.query once, on a client that has been checked out before', async () => {
+    const { contextFor, ownStatementsTotal } = await import('../lib/pools.js');
+    const ctx = await contextFor('primary');
+    // Every idle client goes through `connect()` once, as a timed check does.
+    const held = await Promise.all(Array.from({ length: 3 }, () => ctx.target.connect()));
+    held.forEach((c) => c.release());
+    const before = ownStatementsTotal('primary');
+    await ctx.target.query('SELECT 1');
+    expect(ownStatementsTotal('primary') - before).toBe(1);
+  });
+});
+
+/**
+ * A table page 404s only when the catalog was read without the table in it.
+ * A migration's lock fails the read, so the page must say it could not look.
+ */
+describe('catalogFor', () => {
+  it('reads a table a migration holds as could not be read, never as missing', async () => {
+    const { Client } = await import('pg');
+    const { catalogFor } = await import('../lib/catalog.js');
+    const holder = new Client({ connectionString: pg.getConnectionUri() });
+    await holder.connect();
+    try {
+      await holder.query('CREATE TABLE IF NOT EXISTS migrating (id int)');
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE migrating IN ACCESS EXCLUSIVE MODE');
+      const started = Date.now();
+      const c = await catalogFor('primary', 'public.migrating');
+      expect(Date.now() - started).toBeLessThan(5_000);
+      // What the page decides on: no table, and no reading, so not a 404.
+      expect(c.tables).toEqual([]);
+      expect(c.at).toBeNull();
+      expect(c.failed).toEqual([{ read: 'tables', message: expect.stringMatching(/lock timeout/) }]);
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {});
+      await holder.end().catch(() => {});
+    }
   });
 });

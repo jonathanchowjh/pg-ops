@@ -5,10 +5,9 @@ import { withPostgres, seed } from './harness.js';
 
 describe('indexBloat against a real server', () => {
   /**
-   * §6 asks for a smoke test: that the transcribed estimator parses and
-   * returns the expected shape. It deliberately does NOT assert a bloat
-   * figure — the estimate is approximate by construction, and pinning a
-   * number would fail on every Postgres bump for no diagnostic gain.
+   * A smoke test: the estimator parses and returns the expected shape. No
+   * bloat figure is asserted, because the estimate is approximate and a
+   * pinned number would fail on every Postgres bump.
    */
   it('parses and returns an empty list below the 100 MB floor', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -22,8 +21,8 @@ describe('indexBloat against a real server', () => {
       if (!result.ok) return;
       expect(Array.isArray(result.data.indexes)).toBe(true);
       expect(typeof result.data.total).toBe('number');
-      // Nothing here is within four orders of magnitude of 100 MB of WASTED
-      // space, so an empty list is what proves the floor is applied at all.
+      // Nothing here is near 100 MB of wasted space, so an empty list proves
+      // the floor is applied.
       expect(result.data.indexes).toEqual([]);
       expect(result.data.total).toBe(0);
       expect(result.verdict).toBeNull();
@@ -31,10 +30,9 @@ describe('indexBloat against a real server', () => {
   });
 
   /**
-   * The floor lowered to zero, which is the only way to see the estimator
-   * actually produce rows without building a genuinely 100 MB-bloated index.
-   * This is what exercises the five CTEs, the pg_stats join and the mapping —
-   * the test above only proves the SQL parses.
+   * The floor is lowered to zero so the estimator produces rows without a
+   * 100 MB-bloated index. This exercises the CTEs, the pg_stats join and the
+   * mapping; the test above only proves the SQL parses.
    */
   it('returns real rows, with both byte figures and a definition, once the floor is lowered', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -116,11 +114,8 @@ describe('indexBloat against a real server', () => {
   });
 
   /**
-   * A table that has never been analysed has no `pg_stats` rows, so its
-   * indexes drop out of the estimator's join entirely. That is an ABSENCE,
-   * not a zero — the check cannot estimate bloat it has no statistics for,
-   * and reporting such an index at 0 wasted bytes would be a measurement
-   * nobody took.
+   * A never-analysed table has no `pg_stats` rows, so its indexes drop out
+   * of the estimator's join. That is an absence, not 0 wasted bytes.
    */
   it('omits an index on a never-analysed table rather than reporting it as unbloated', async () => {
     await withPostgres(async (ctx, pool) => {

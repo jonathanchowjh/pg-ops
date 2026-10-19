@@ -18,15 +18,10 @@ describe('settings against a real server', () => {
   });
 
   /**
-   * There is no version branch in the code; the SERVER is the branch. We ask
-   * for `io_method` on every version and `map` skips it when no row comes
-   * back, so this asserts the end result the branch used to produce —
-   * from ctx.serverVersion rather than a literal, the only form that covers
-   * the whole 14/16/17/18 CI matrix from one test.
-   *
-   * Verified by hand on both sides: absent from `pg_settings` on 17.11,
-   * present on 18.0.6 (`server_version_num` 180006) with the value `worker`,
-   * and asking for it on 17 returns no row rather than an error.
+   * There is no version branch in the code: `io_method` is asked for on every
+   * version and `map` skips it when no row comes back (below 18 the query
+   * returns no row rather than an error). Asserted from ctx.serverVersion so
+   * one test covers the whole version matrix.
    */
   it('includes io_method exactly when the server is 18 or newer', async () => {
     await withPostgres(async (ctx) => {
@@ -39,10 +34,9 @@ describe('settings against a real server', () => {
   });
 
   /**
-   * The typo guard, stated as a property rather than carved out as an
-   * exception. Every name must exist on every server in the support matrix —
-   * `io_method` below 18 is the ONE permitted absence, and naming it exactly
-   * is what keeps a real typo from being waved through with it.
+   * Every name must exist on every supported server. `io_method` below 18 is
+   * the one permitted absence, named exactly so a real typo is not waved
+   * through with it.
    */
   it('names every setting it asks for, so a typo fails here rather than rendering blank', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -55,14 +49,9 @@ describe('settings against a real server', () => {
   });
 
   /**
-   * The divergence that matters, and the one a `pg_settings` port walks into.
-   *
-   * pgHero issues `SHOW shared_buffers` and gets `128MB`. `pg_settings` for
-   * the same setting is `setting = '16384'`, `unit = '8kB'` — so a port that
-   * reads the obvious column reports a number 8192 times too small, and one
-   * that concatenates the two reports `16384 8kB`, which is not a value an
-   * operator can paste into postgresql.conf. `current_setting(name)` is the
-   * SHOW-equivalent and the only one of the three that is right.
+   * `SHOW shared_buffers` gives `128MB`; `pg_settings` gives
+   * `setting = '16384'`, `unit = '8kB'`. Reading `setting` reports a number
+   * 8192 times too small. `current_setting(name)` is the SHOW-equivalent.
    */
   it('reports the value an operator would paste back, not the raw block count', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -83,10 +72,8 @@ describe('settings against a real server', () => {
   });
 
   /**
-   * Presentation order is pgHero's array order, not the server's. `pg_settings`
-   * returns rows in catalog order and the obvious fix — `ORDER BY name` — would
-   * scatter the memory settings among the planner ones. So `map` orders, and
-   * this asserts it against rows the server did not hand back in that order.
+   * `pg_settings` returns rows in catalog order and `ORDER BY name` would
+   * scatter the memory settings among the planner ones, so `map` orders.
    */
   it('renders in pgHero group order rather than however the catalog answered', async () => {
     await withPostgres(async (ctx) => {

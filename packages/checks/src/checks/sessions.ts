@@ -1,184 +1,271 @@
-import type { Check, Verdict } from '../types.js';
+import type { Check, Threshold, Verdict } from '../types.js';
+import { escalate, ownSession, unreadableClient, visibleSchemas } from './shared.js';
+
+export type SessionClass = 'cpu' | 'io' | 'idle' | 'other' | 'lock';
+
+/** Stacking order, bottom up. The band, every strip and the palette test read it. */
+export const CLASSES: readonly SessionClass[] = ['cpu', 'io', 'idle', 'other', 'lock'];
+
+/**
+ * What a session is doing, or null when it is doing nothing or cannot be
+ * seen. Idle in transaction is a state, not a wait: it is its own class
+ * whatever the session waits on. CPU is active and not waiting.
+ */
+export function classOf(state: string | null, waitEventType: string | null): SessionClass | null {
+  if (isIdleInTransaction(state)) return 'idle';
+  if (state !== 'active' && state !== 'fastpath function call') return null;
+  if (waitEventType === null) return 'cpu';
+  if (waitEventType === 'IO') return 'io';
+  if (waitEventType === 'Lock') return 'lock';
+  return 'other';
+}
+
+export interface SessionOpts {
+  limit?: number;
+  /** An exact pid to look up, applied in SQL ahead of the LIMIT. */
+  pid?: number;
+}
+
+/** The one definition of idle-in-transaction in this package. */
+export function isIdleInTransaction(state: string | null | undefined): boolean {
+  return state === 'idle in transaction' || state === 'idle in transaction (aborted)';
+}
+
+export interface Session {
+  pid: number;
+  /** As Postgres printed it. With `pid` it is the session. */
+  backendStart: string | null;
+  user: string | null;
+  app: string | null;
+  clientAddr: string | null;
+  state: string | null;
+  /** Null: idle, or not visible to this role. */
+  cls: SessionClass | null;
+  /** One of pgops's own connections. */
+  own: boolean;
+  queryId: string | null;
+  query: string | null;
+  inStateSecs: number | null;
+  /** Age of the current query, or of the last one if idle. Not time waiting. */
+  queryAgeSecs: number | null;
+  /**
+   * How long the current transaction has been open; null outside one. For
+   * an idle-in-transaction session this is the number that matters:
+   * `queryAgeSecs` there is time since its last query ended.
+   */
+  xactAgeSecs: number | null;
+  /** The pids it waits behind. Empty when it waits on nothing. */
+  blockedBy: number[];
+  /** Tables it holds or wants a lock on, strongest first. */
+  relations: string[];
+  /** The table whose lock it is waiting for. */
+  wanted: string | null;
+  /** How long it has waited for that lock. */
+  waitSecs: number | null;
+}
+
+export interface SessionsData {
+  sessions: Session[];
+  /** True when the LIMIT dropped rows. */
+  truncated: boolean;
+  /**
+   * Rows this role cannot read. Not a count of sessions: background
+   * processes are nulled the same way. Zero or not is all it says.
+   */
+  hidden: number;
+}
 
 export interface SessionRow {
-  pid: number;
+  /** Null on the carrier row: the one row an empty database still returns, for `hidden`. */
+  pid: number | null;
   state: string | null;
   usename: string | null;
   app: string | null;
   client_addr: string | null;
   backend_start: string | null;
+  wait_event_type: string | null;
+  query_id: string | null;
+  query: string | null;
+  own: boolean | null;
   in_state_secs: string | null;
   query_age_secs: string | null;
   xact_age_secs: string | null;
-  query: string | null;
-  /**
-   * `count(*) OVER ()` (int4, cast `::int` below — see connections.ts's
-   * `used` for the same server-side-cast convention) computed over every row
-   * that matched WHERE (including the optional `pid` predicate below),
-   * BEFORE `ORDER BY`/`LIMIT` clip the result. Postgres's execution order
-   * runs window functions ahead of ORDER BY/LIMIT, so every returned row
-   * carries the true pre-LIMIT count regardless of how many rows survive the
-   * cap. That is what lets `map` — a pure function of `rows` alone, with no
-   * access to the `limit` the caller requested — still detect A7 truncation
-   * correctly for a runtime-configurable limit.
-   */
+  blocked_by: number[] | null;
+  relations: string[];
+  wanted: string | null;
+  wait_secs: string | null;
+  hidden: number;
+  /** `count(a.pid) OVER ()`: sessions matched before LIMIT. Zero on the carrier row. */
   total_matching: number;
 }
 
-export interface Session {
-  pid: number;
-  state: string | null;
-  user: string | null;
-  app: string | null;
-  clientAddr: string | null;
-  backendStart: string | null;
-  inStateSecs: number | null;
-  /** Age of the CURRENT (or, if idle, the LAST) query. Not "time waiting" — see A8. */
-  queryAgeSecs: number | null;
-  /**
-   * How long the CURRENT TRANSACTION has been open — null when the session
-   * isn't in one. For an idle-in-transaction blocker this is the number that
-   * matters: `queryAgeSecs` for that session is time since its last query
-   * ENDED, which says nothing about how long it has been sitting there
-   * holding locks. `xact_start` is null outside a transaction, which is what
-   * makes null here mean "not in a transaction" rather than "just started".
-   */
-  xactAgeSecs: number | null;
-  query: string | null;
-}
-
-export interface SessionOpts {
-  limit?: number;
-  /**
-   * Fix-round 1: an exact pid to look up, answered by Postgres directly
-   * rather than by filtering the already-capped page (see the SQL comment
-   * below, and `prepareSessions`'s comment on why the client-side text
-   * filter can't do this on its own).
-   */
-  pid?: number;
-}
-
-/**
- * A11: the shipped TUI had two definitions of this — `state.startsWith('idle
- * in transaction')` in home/query.ts, and an explicit two-literal
- * enumeration in sessions/model.ts. One concept, one implementation,
- * exported so nothing in this package has an excuse to write a third.
- */
-export function isIdleInTransaction(state: string | null | undefined): boolean {
-  return state === 'idle in transaction' || state === 'idle in transaction (aborted)';
-}
-
-/** Default cap when the caller doesn't specify one — see the SQL comment below. */
 const DEFAULT_LIMIT = 500;
 
 /**
- * A7: pg_stat_activity is unbounded. On a 2,000-connection instance
- * mid-incident this query — with no cap — would return 2,000 rows, each
- * carrying up to track_activity_query_size (1 kB default) of query text,
- * every poll. That is precisely the moment this check exists to serve, and
- * precisely the moment a slow, oversized response is least tolerable.
+ * Every client session of this database, with the tables it holds or wants
+ * a lock on and the pids it waits behind.
  *
- * The ORDER BY buys two DIFFERENT properties, and both matter:
+ * `datname = current_database()` and `pg_locks.database`: pg_stat_activity
+ * and the lock manager are cluster-wide, and a relation's name resolves
+ * only from inside its own database.
  *
- *  1. Determinism: `pid` as the final tiebreak means the same 500 rows (for
- *     an unchanged database) survive every poll, rather than an arbitrary
- *     500 reshuffling for no reason between polls.
- *  2. Severity priority: the CASE expression mirrors `rank()` below — idle-
- *     in-transaction first, then active, then everything else — so that
- *     when not everything fits, what's KEPT is what matters. This is the
- *     same principle as locks.ts's `ORDER BY xact_start ASC` (oldest
- *     transaction survives the cap), and it is load-bearing, not cosmetic:
- *     Postgres assigns pids roughly monotonically within a server's uptime,
- *     so a plain `ORDER BY pid` keeps the LOWEST-numbered 500 sessions
- *     regardless of state. During the very incident A7 describes, a fresh
- *     burst of idle-in-transaction sessions has the HIGHEST pids and would
- *     be dropped wholesale — before `prepareSessions`'s triage rank, which
- *     exists to surface exactly those sessions, ever saw them. The check
- *     would confidently report no idle-in-transaction sessions during an
- *     idle-in-transaction incident. `state LIKE 'idle in transaction%'`
- *     mirrors `isIdleInTransaction` above (SQL can't call it directly); both
- *     known Postgres spellings share that prefix, same as the old, single-
- *     literal half of A11's `startsWith` implementation.
+ * `held` is one row per session and table, with the strongest mode on it;
+ * `placed` orders a session's tables strongest first. A lock the session is
+ * still waiting for counts: a DDL statement queued on a table belongs under
+ * that table although it holds nothing there yet.
  *
- * `total_matching` (see SessionRow) carries the pre-LIMIT row count on every
- * returned row, which is what lets `map` set `truncated` without needing the
- * `limit` value itself — locks.ts's LIMIT-501-then-slice trick can't apply
- * here because its LIMIT is a fixed module constant, while this check's
- * limit is a runtime `SessionOpts` the `map` function (deliberately pure
- * over `rows` alone, per the `Check` interface) never sees.
+ * `hidden` LEFT JOINs the sessions so an empty database still returns one
+ * row. It counts the clients of this database a role without
+ * pg_read_all_stats cannot read: their database is visible, their state and
+ * query are not, so they are counted and never listed.
  *
- * Fix-round 1 (A7 defeating A10): `prepareSessions`'s text filter runs
- * client-side, over whatever page this LIMIT already returned — it cannot
- * find a session the server never sent. `pid = $2` answers the one case
- * A10 exists for (an operator holding nothing but a pid) directly in
- * Postgres, so that lookup is immune to the cap: pid is unique, so at most
- * one row can ever match it, regardless of `LIMIT`/`ORDER BY`.
+ * `pg_blocking_pids` is asked only of a session waiting on a lock: each call
+ * takes the lock manager's partition locks, and asking it of two thousand
+ * idle connections on every poll is load on the thing an incident is about.
+ *
+ * `own` marks pgops's connections by the names its pools set.
  */
 const SQL = (o: SessionOpts) => ({
   text: `
-    SELECT pid, state, usename, application_name AS app,
-           client_addr::text AS client_addr, backend_start::text AS backend_start,
-           EXTRACT(EPOCH FROM (now() - state_change))::text AS in_state_secs,
-           EXTRACT(EPOCH FROM (now() - query_start))::text  AS query_age_secs,
-           EXTRACT(EPOCH FROM (now() - xact_start))::text AS xact_age_secs,
-           query,
-           count(*) OVER ()::int AS total_matching
-    FROM pg_stat_activity
-    WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()
-      AND ($2::int IS NULL OR pid = $2)
-    ORDER BY
-      CASE WHEN state LIKE 'idle in transaction%' THEN 0
-           WHEN state = 'active' THEN 1
-           ELSE 2 END,
-      CASE WHEN state = 'active' THEN query_start ELSE state_change END ASC NULLS LAST,
-      pid
-    LIMIT $1`,
+    WITH me AS (
+      SELECT oid AS dbid FROM pg_database WHERE datname = current_database()
+    ),
+    act AS MATERIALIZED (
+      SELECT a.pid, a.backend_start, a.usename, a.application_name AS app,
+             a.client_addr, a.state, a.wait_event_type, a.query_id, a.query,
+             a.state_change, a.query_start, a.xact_start,
+             CASE WHEN a.wait_event_type = 'Lock' THEN pg_blocking_pids(a.pid)
+                  ELSE '{}'::int[] END AS blocked_by,
+             ${ownSession('a.application_name')} AS own
+        FROM pg_stat_activity a
+       WHERE a.backend_type = 'client backend'
+         AND a.datname = current_database()
+         AND a.pid <> pg_backend_pid()
+         AND ($2::int IS NULL OR a.pid = $2)
+    ),
+    held AS (
+      SELECT l.pid, n.nspname || '.' || c.relname AS relation,
+             bool_or(NOT l.granted) AS wanted,
+             max(CASE l.mode
+                   WHEN 'AccessShareLock' THEN 1 WHEN 'RowShareLock' THEN 2
+                   WHEN 'RowExclusiveLock' THEN 3 WHEN 'ShareUpdateExclusiveLock' THEN 4
+                   WHEN 'ShareLock' THEN 5 WHEN 'ShareRowExclusiveLock' THEN 6
+                   WHEN 'ExclusiveLock' THEN 7 ELSE 8 END) AS strength
+        FROM pg_locks l
+        JOIN pg_class c ON c.oid = l.relation
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE l.locktype = 'relation'
+         AND l.database = (SELECT dbid FROM me)
+         AND c.relkind IN ('r', 'p', 'm')
+         AND ${visibleSchemas('n.nspname')}
+       GROUP BY l.pid, n.nspname, c.relname
+    ),
+    placed AS (
+      SELECT h.pid,
+             array_agg(h.relation ORDER BY h.strength DESC, h.relation
+             ) AS relations,
+             min(h.relation) FILTER (WHERE h.wanted) AS wanted
+        FROM held h
+       GROUP BY h.pid
+    ),
+    hidden AS (
+      SELECT count(*)::int AS hidden
+        FROM pg_stat_activity
+       WHERE ${unreadableClient()} AND datname = current_database()
+    )
+    SELECT a.pid, a.backend_start::text AS backend_start, a.usename, a.app,
+           a.client_addr::text AS client_addr, a.state, a.wait_event_type,
+           a.query_id::text AS query_id, a.query, a.own,
+           EXTRACT(EPOCH FROM (now() - a.state_change))::text AS in_state_secs,
+           EXTRACT(EPOCH FROM (now() - a.query_start))::text  AS query_age_secs,
+           EXTRACT(EPOCH FROM (now() - a.xact_start))::text   AS xact_age_secs,
+           a.blocked_by,
+           COALESCE(p.relations, '{}') AS relations,
+           p.wanted,
+           (SELECT EXTRACT(EPOCH FROM (now() - COALESCE(min(l.waitstart), now())))::text
+              FROM pg_locks l
+             WHERE l.pid = a.pid AND NOT l.granted
+            HAVING count(*) > 0) AS wait_secs,
+           h.hidden,
+           count(a.pid) OVER ()::int AS total_matching
+      FROM hidden h
+      LEFT JOIN act a ON true
+      LEFT JOIN placed p ON p.pid = a.pid
+     ORDER BY
+       CASE WHEN a.state LIKE 'idle in transaction%' THEN 0
+            WHEN a.state = 'active' THEN 1
+            ELSE 2 END,
+       CASE WHEN a.state = 'active' THEN a.query_start ELSE a.state_change END ASC NULLS LAST,
+       a.pid
+     LIMIT $1`,
   values: [o.limit ?? DEFAULT_LIMIT, o.pid ?? null],
 });
 
-export interface SessionsData {
-  sessions: Session[];
-  /**
-   * True when the LIMIT dropped rows. Convention 6: a partial session list
-   * an operator knows is partial is useful; one they believe is complete is
-   * worse than nothing.
-   */
-  truncated: boolean;
-}
+const num = (s: string | null): number | null => (s == null ? null : Number(s));
 
 export const sessions: Check<SessionRow, SessionsData, SessionOpts> = {
   id: 'sessions',
   gate: 'connect',
+  home: 'session',
   title: 'Sessions',
-  class: 'incident',
+  class: 'live',
+  /** Under the 5-second poll: a read that cannot answer in time says so, rather than stalling the page and the sampler. */
+  timeoutMs: 4_000,
+  /** `pg_locks.waitstart` and `pg_stat_activity.query_id` both arrived in 14. */
+  requires: [{ kind: 'version', min: 140000 }],
   sql: SQL,
   map: (rows) => {
-    // Every row carries the same pre-LIMIT count (an unpartitioned window
-    // function) — any row's value would do; `rows[0]` with a `?? 0` fallback
-    // reads cleanly and matches connections.ts's own `r?.field ?? 0` style
-    // for "possibly no rows at all".
-    const totalMatching = rows[0]?.total_matching ?? 0;
+    const real = rows.filter((r) => r.pid !== null);
     return {
-      sessions: rows.map((r) => ({
-        pid: r.pid,
-        state: r.state,
+      sessions: real.map((r) => ({
+        pid: r.pid!,
+        backendStart: r.backend_start,
         user: r.usename,
         app: r.app,
         clientAddr: r.client_addr,
-        backendStart: r.backend_start,
-        inStateSecs: r.in_state_secs == null ? null : Number(r.in_state_secs),
-        queryAgeSecs: r.query_age_secs == null ? null : Number(r.query_age_secs),
-        xactAgeSecs: r.xact_age_secs == null ? null : Number(r.xact_age_secs),
+        state: r.state,
+        cls: classOf(r.state, r.wait_event_type),
+        own: r.own === true,
+        queryId: r.query_id,
         query: r.query,
+        inStateSecs: num(r.in_state_secs),
+        queryAgeSecs: num(r.query_age_secs),
+        xactAgeSecs: num(r.xact_age_secs),
+        blockedBy: r.blocked_by ?? [],
+        relations: r.relations,
+        wanted: r.wanted,
+        waitSecs: num(r.wait_secs),
       })),
-      truncated: totalMatching > rows.length,
+      truncated: (rows[0]?.total_matching ?? 0) > real.length,
+      hidden: rows[0]?.hidden ?? 0,
     };
   },
 };
 
+/** The lock chain's two marks, moved here with the rows they judge. Wording from locks.ts. */
+export const CHAIN_THRESHOLDS: Threshold[] = [
+  { level: 'warn', value: 1, unit: 'count',
+    because: 'any session waiting on a lock is a query not completing; it is worth '
+           + 'seeing even when brief' },
+  { level: 'critical', value: 60, unit: 'seconds',
+    because: 'a minute of blocking outlives most application timeouts, so the waiters '
+           + 'are already being retried and the pile-up is compounding',
+    remedy: 'Terminate the root blocker, not a waiter.' },
+];
+
+/** Idle in transaction: the two marks `sessionStates` carries, for the tree's finding. */
+export const IDLE_THRESHOLDS: Threshold[] = [
+  { level: 'warn', value: 60, unit: 'seconds',
+    because: 'a transaction idle for a minute is holding row locks and pinning the '
+           + 'xmin horizon for no reason; almost always an application bug' },
+  { level: 'critical', value: 300, unit: 'seconds',
+    because: 'five minutes of idle-in-transaction blocks autovacuum from reclaiming '
+           + 'anything newer, so bloat starts accumulating on top of the locking' },
+];
+
 export interface PrepareOpts { sort: 'triage' | 'active'; filter: string }
 
-/** Triage priority: idle-in-transaction first — the #1 preventable incident. */
+/** Triage priority: idle-in-transaction first. */
 function rank(r: Session): number {
   if (isIdleInTransaction(r.state)) return 0;
   if (r.state === 'active') return 1;
@@ -186,29 +273,16 @@ function rank(r: Session): number {
 }
 
 /**
- * Pure: sort + filter for the sessions table. No Postgres, no rendering —
- * the pgops equivalent of locks.ts's `buildChains`.
+ * Pure: sort and filter for the sessions table.
  *
- * Fix-round 1: `filter` here operates ONLY on `rows` — the page that already
- * survived the SQL's `LIMIT`. If more sessions exist than the cap
- * (`SessionsData.truncated`), a substring search over this array can miss a
- * session that is genuinely running but landed outside the returned page —
- * no amount of client-side filtering can find a row the server never sent.
- * That's why `SessionOpts.pid` exists as a second, server-side path for
- * exactly the case A10 is about: a caller holding nothing but a pid should
- * use it instead of (or in addition to) this text filter whenever
- * `truncated` is, or might be, true. A consumer surfacing `filter` to an
- * operator should surface `truncated` alongside it.
+ * `filter` sees only `rows`, the page that survived the SQL's LIMIT. When
+ * `SessionsData.truncated` is true it can miss a live session; use
+ * `SessionOpts.pid` to look one up, and show `truncated` beside the filter.
  */
 export function prepareSessions(rows: Session[], o: PrepareOpts): Session[] {
   const needle = o.filter.trim().toLowerCase();
   const filtered = needle
-    // A10: pid is included — an operator arriving from a log line, an
-    // alert, or another view almost always holds a pid and nothing else.
-    // (Minor, accepted: a numeric needle can also match inside `query`
-    // text, e.g. '4242' surfacing an unrelated session whose SQL contains
-    // that literal — the same substring ambiguity every other field here
-    // already has, not new to pid.)
+    // pid is searchable. A numeric needle can also match inside `query`.
     ? rows.filter((r) => [String(r.pid), r.user, r.app, r.state, r.query]
         .some((f) => f?.toLowerCase().includes(needle)))
     : rows;
@@ -216,12 +290,8 @@ export function prepareSessions(rows: Session[], o: PrepareOpts): Session[] {
   return [...filtered].sort((a, b) => {
     const byRank = rank(a) - rank(b);
     if (byRank !== 0) return byRank;
-    // A9: an `active` session's queryAgeSecs is how long its current query
-    // has run — meaningful. An `idle` (or idle-in-transaction) session's
-    // queryAgeSecs is time since its LAST query ENDED, which carries no
-    // information about how long the session has actually been sitting.
-    // inStateSecs (time since state_change) is the key that means something
-    // for every non-active group.
+    // An idle session's queryAgeSecs is time since its last query ended,
+    // so non-active sessions sort on inStateSecs.
     const key = (r: Session) => (r.state === 'active' ? r.queryAgeSecs : r.inStateSecs) ?? 0;
     return key(b) - key(a);
   });
@@ -229,10 +299,8 @@ export function prepareSessions(rows: Session[], o: PrepareOpts): Session[] {
 
 export interface StateRow {
   /**
-   * B12: which branch of the statement produced this row. `state` is the
-   * census, one row per session state; `oldest` is the single
-   * idle-in-transaction session that set the verdict, carrying its identity.
-   * Same discriminator pattern as activity.ts's `kind`.
+   * `state` is the census, one row per session state. `oldest` is the one
+   * idle-in-transaction session that set the verdict, with its identity.
    */
   kind: 'state' | 'oldest';
   state: string | null;
@@ -248,13 +316,8 @@ export interface StatesData {
   byState: { state: string; sessions: number; longestInStateSecs: number }[];
   oldestIdleInTxnSecs: number | null;
   /**
-   * B12: the session that set `oldestIdleInTxnSecs`, so the panel can link
-   * it and the triage page can tell whether this verdict is about a session
-   * the lock graph already names.
-   *
-   * The remedy on this check's thresholds used to end "Sessions shows its
-   * application_name", which sent an operator to go and find something the
-   * check had already identified and discarded.
+   * The session that set `oldestIdleInTxnSecs`, so the panel can link it and
+   * the triage page can tell whether the lock graph already names it.
    */
   oldestIdleInTxnPid: number | null;
   /** Null when this role cannot read the session's `application_name`. */
@@ -262,30 +325,17 @@ export interface StatesData {
 }
 
 /**
- * No LIMIT/truncation concern here (unlike `sessions` above, A7): GROUP BY
- * state collapses pg_stat_activity down to a handful of rows — the distinct
- * Postgres session states — regardless of how many connections are open.
+ * No LIMIT: GROUP BY state yields a handful of rows.
  *
- * B12: two branches over ONE `MATERIALIZED` CTE, so the census and the named
- * session are the same snapshot of pg_stat_activity rather than two reads a
- * few milliseconds apart. `kind` discriminates them, the same way
- * activity.ts's does.
+ * Both branches read one `MATERIALIZED` CTE, so the census and the named
+ * session are the same snapshot. `LIMIT 1` sits inside the `oldest` CTE; on
+ * the UNION it would clip the census.
  *
- * `LIMIT 1` sits inside the `oldest` CTE, not on the UNION: on the UNION it
- * would clip the whole result to one row and the census would arrive as a
- * single state. The integration test asserts the census survives for exactly
- * that reason.
+ * `ORDER BY sessions DESC` only, not `ORDER BY kind`, which
+ * boundaries.test.ts rejects as sorting a `::text` alias. The `oldest` row
+ * has `sessions = 0`, so it lands last.
  *
- * `ORDER BY sessions DESC` only — NOT `ORDER BY kind`, which boundaries.test
- * rightly rejects as sorting a `::text` alias, and which this statement does
- * not need: `map` separates the branches by `kind`, and the `oldest` row
- * carries `sessions = 0` so it lands after the census either way. The census
- * rows keep the busiest-state-first order the panel's bars are drawn in.
- *
- * Unlike `sessions` above, this does NOT exclude `pg_backend_pid()`: it's a
- * census, not a list an operator reads row-by-row, and this check's own
- * (necessarily 'active') backend is one real client-backend session among
- * the total — worth counting, not worth the extra WHERE clause to hide.
+ * Unlike `sessions`, this counts the checking backend itself.
  */
 const STATES_SQL = `
 WITH act AS MATERIALIZED (
@@ -318,8 +368,9 @@ ORDER BY sessions DESC`;
 export const sessionStates: Check<StateRow, StatesData> = {
   id: 'sessionStates',
   gate: 'connect',
+  home: 'session',
   title: 'Session states',
-  class: 'incident',
+  class: 'live',
   sql: STATES_SQL,
   map: (rows) => {
     const byState = rows
@@ -329,16 +380,11 @@ export const sessionStates: Check<StateRow, StatesData> = {
         sessions: r.sessions,
         longestInStateSecs: r.longest_secs == null ? 0 : Number(r.longest_secs),
       }));
-    // A11: isIdleInTransaction again — the only definition in this package.
     const oldestIdleInTxnSecs = byState.reduce<number | null>((longest, st) => {
       if (!isIdleInTransaction(st.state)) return longest;
       return longest == null || st.longestInStateSecs > longest ? st.longestInStateSecs : longest;
     }, null);
-    // B12. Identity only: the AGE still comes from the census above, so the
-    // threshold reads exactly the number it always did. A server where the
-    // two branches disagreed — they are one snapshot of one MATERIALIZED
-    // CTE, so they should not — would show the census maximum, which is the
-    // number the verdict is made of.
+    // Identity only: the age comes from the census above.
     const oldest = rows.find((r) => r.kind === 'oldest');
     return {
       byState,
@@ -351,10 +397,7 @@ export const sessionStates: Check<StateRow, StatesData> = {
     { level: 'warn', value: 60, unit: 'seconds',
       because: 'a transaction idle for a minute is holding row locks and pinning the '
              + 'xmin horizon for no reason; almost always an application bug',
-      // B12: no longer "Sessions shows its application_name". The verdict's
-      // note names the pid and the application, and the panel links the pid
-      // to its row, so the sentence that sent an operator looking for an
-      // identity this check already had is now the identity itself.
+      // "The pid above": the verdict's note names the pid and application.
       remedy: 'Fix the path in that application that does work between BEGIN and '
             + 'COMMIT; the pid above links to its session.' },
     { level: 'critical', value: 300, unit: 'seconds',
@@ -364,33 +407,15 @@ export const sessionStates: Check<StateRow, StatesData> = {
             + 'Set idle_in_transaction_session_timeout on that role so Postgres does '
             + 'this without you.' },
   ],
-  /**
-   * Neither lookup uses a non-null assertion — same reasoning as
-   * connections.ts's own comment on this: a level's threshold is data this
-   * check may not have been given, not a guarantee the type system can see.
-   *
-   * I5: the warn comparison was `>` while the critical one immediately above
-   * it was `>=` — the same function disagreeing with itself about what a
-   * threshold means, and neither pinned by any test. Both are `>=` now: a
-   * threshold is the value AT WHICH the condition becomes a problem, which
-   * is how this check's own `because` strings read ("a transaction idle for
-   * a minute is holding row locks", not "idle for more than a minute").
-   * sessions.test.ts's boundary sweep is what holds it there.
-   */
+  /** sessions.test.ts holds the `>=` boundary. */
   verdict: (d, t): Verdict => {
     const s = d.oldestIdleInTxnSecs;
     if (s == null) return { level: 'ok' };
-    // B12: says only what it knows. A restricted role reads
-    // `application_name` as null for a session it does not own, and the pid
-    // alone is still the useful half — it is what the panel links.
+    // A restricted role reads `application_name` as null for a session it
+    // does not own; the pid is still named.
     const who = d.oldestIdleInTxnPid == null
       ? ''
       : ` · pid ${d.oldestIdleInTxnPid}${d.oldestIdleInTxnApp == null ? '' : ` ${d.oldestIdleInTxnApp}`}`;
-    const note = `idle in transaction for ${Math.round(s)}s${who}`;
-    const crit = t.find((x) => x.level === 'critical');
-    if (crit && s >= crit.value) return { level: 'critical', note };
-    const warn = t.find((x) => x.level === 'warn');
-    if (warn && s >= warn.value) return { level: 'warn', note };
-    return { level: 'ok' };
+    return escalate(s, t, `idle in transaction for ${Math.round(s)}s${who}`);
   },
 };

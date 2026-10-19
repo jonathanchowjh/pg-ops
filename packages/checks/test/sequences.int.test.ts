@@ -7,15 +7,11 @@ import { withPostgres, seed } from './harness.js';
 const { Pool } = pg;
 
 /**
- * The same database, as a different role. The harness hands out a pool rather
- * than a URI, and the pool keeps the string it was built with — which is the
- * only place the per-test database name exists.
+ * A URI for the same database as a different role, derived from the
+ * connection string the harness pool was built with.
  *
- * ROLES ARE CLUSTER-WIDE. `withPostgres` gives every test its own DATABASE,
- * but every database in a run shares one container and therefore one set of
- * roles — so two tests creating the same role name in one run collide with
- * `role "lowpriv" already exists`, and the second one fails for a reason that
- * has nothing to do with what it is testing. Each test here uses its own name.
+ * Roles are cluster-wide and every test database shares one container, so
+ * each test here uses its own role name.
  */
 function asRole(pool: pg.Pool, role: string, password: string): string {
   const base = (pool as unknown as { options: { connectionString?: string } })
@@ -28,11 +24,6 @@ function asRole(pool: pg.Pool, role: string, password: string): string {
 }
 
 describe('sequences against a real server', () => {
-  /**
-   * §6: identity-column sequences arrived in pgHero 4.0.1, and the catalog
-   * join is the most intricate query in P2 — a fixture with an identity
-   * column is the only thing that proves it finds them.
-   */
   it('resolves serial, identity and OWNED BY to their table, column and type', async () => {
     await withPostgres(async (ctx, pool) => {
       await seed(pool, 'CREATE TABLE seq_serial   (id serial PRIMARY KEY)');
@@ -67,8 +58,8 @@ describe('sequences against a real server', () => {
 
       const r = await runCheck(ctx, sequences, {});
 
-      // Revision 1 returned {ok:false, message:'invalid name syntax'} here,
-      // for EVERY schema in the database, not just this one.
+      // An unquoted name fails the whole check with 'invalid name syntax',
+      // for every schema in the database.
       expect(r.ok).toBe(true);
       if (!r.ok) return;
       expect(r.data.sequences.some((s) => s.name.includes('Weird Schema'))).toBe(true);
@@ -76,10 +67,9 @@ describe('sequences against a real server', () => {
   });
 
   /**
-   * §5's rule, made falsifiable. The dangerous sequence must survive the cap,
-   * which means the ORDER BY ranks by HEADROOM rather than by absolute value.
-   * Revision 1 ordered by last_value and returned only the harmless bigint
-   * row — five billion sorts above two billion — then reported ok.
+   * The ORDER BY must rank by headroom, not absolute value. Ordering by
+   * last_value returns only the harmless bigint row (five billion sorts
+   * above two billion) and reports ok.
    */
   it('keeps the sequence nearest its ceiling when the list is capped', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -103,12 +93,9 @@ describe('sequences against a real server', () => {
   });
 
   /**
-   * A never-called sequence has a NULL `last_value` — verified on 17.11 for
-   * three freshly created, fully readable sequences. So NULL does NOT mean
-   * unreadable, and a check that inferred it from the null would report every
-   * new database as unreadable. `readable` comes from the privilege
-   * predicate; the value falls back to `start_value`, as pgHero's own
-   * COALESCE does.
+   * A never-called sequence has a NULL `last_value`, so NULL does not mean
+   * unreadable. `readable` comes from the privilege predicate; the value
+   * falls back to `start_value`.
    */
   it('treats a never-called sequence as readable and near-empty, not unreadable', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -127,11 +114,9 @@ describe('sequences against a real server', () => {
   });
 
   /**
-   * `has_sequence_privilege(..., 'SELECT,USAGE')` means "any of", not "both".
-   * Postgres exposes last_value to either privilege, so the SELECT-only
-   * predicate under-reports: a USAGE-only role sees the value while the
-   * predicate says false, and a 93%-full sequence would be blanked and
-   * dropped from the verdict.
+   * `has_sequence_privilege(..., 'SELECT,USAGE')` means "any of". Postgres
+   * exposes last_value to either privilege, so a SELECT-only predicate would
+   * blank a sequence a USAGE-only role can read.
    */
   it('counts USAGE as readable, because Postgres does', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -155,18 +140,8 @@ describe('sequences against a real server', () => {
   });
 
   /**
-   * A sequence wired only through a DEFAULT expression, with no OWNED BY, has
-   * NO pg_class entry in pg_depend at all — verified on 17.11, it carries only
-   * an 'n' dependency on its namespace. A pg_depend-driven query omits it
-   * entirely, which is the silent incompleteness this project exists to avoid.
-   * Driving from pg_class instead lists every sequence; the column is what is
-   * optional, and the ceiling falls back to the sequence's own maximum.
-   */
-  /**
-   * #54, exercised as a role that genuinely cannot read the sequence — the
-   * only way to reach the unreadable path at all. Run as the owner, every
-   * sequence is readable, which is why the privilege predicate and the
-   * unreadable counter both survived mutation until this test existed.
+   * Run as a role that cannot read the sequence, the only way to reach the
+   * unreadable path: as the owner, every sequence is readable.
    */
   it('blanks a sequence the current role cannot read, and counts it database-wide', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -174,9 +149,8 @@ describe('sequences against a real server', () => {
       await seed(pool, 'CREATE TABLE shown  (id serial PRIMARY KEY)');
       await seed(pool, "CREATE ROLE seq_reader LOGIN PASSWORD 'seq_reader'");
       await seed(pool, 'GRANT USAGE ON SCHEMA public TO seq_reader');
-      // USAGE only on one of them: Postgres exposes last_value to SELECT *or*
-      // USAGE, so this sequence must read as READABLE despite having no
-      // SELECT — the trap a 'SELECT'-only predicate falls into.
+      // USAGE only, on one of them: it must read as readable despite having
+      // no SELECT.
       await seed(pool, 'GRANT USAGE ON SEQUENCE shown_id_seq TO seq_reader');
 
       const low = new Pool({
@@ -207,6 +181,12 @@ describe('sequences against a real server', () => {
     });
   });
 
+  /**
+   * A sequence wired only through a DEFAULT expression, with no OWNED BY,
+   * has no pg_class entry in pg_depend, so a pg_depend-driven query omits it.
+   * Driving from pg_class lists every sequence; the ceiling falls back to
+   * the sequence's own maximum.
+   */
   it('lists a sequence that no column owns, falling back to its own maximum', async () => {
     await withPostgres(async (ctx, pool) => {
       await seed(pool, 'CREATE SEQUENCE loose_seq');

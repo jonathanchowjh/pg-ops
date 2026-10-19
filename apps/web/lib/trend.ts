@@ -11,13 +11,12 @@ export const MIN_TREND_DAYS = 7;
 export interface Peak { day: number; value: number }
 
 /**
- * The highest reading of each 24-hour period, counted BACK from `to`.
+ * The highest reading of each 24-hour period, counted back from `to`.
  *
  * Not calendar days. A window rarely starts or ends at midnight UTC, so
- * calendar days gave it a fragment at each end, and a fragment's "peak" is
- * whatever hour it happened to hold: a window ending at 01:00 closed on one
- * hour of overnight trough, and a rising week read as falling. Counted back
- * from the end, every period is whole.
+ * calendar days would give it a fragment at each end, and a fragment's
+ * "peak" is whatever hour it happened to hold. Counted back from the end,
+ * every period is whole.
  */
 export function dailyPeaks(
   points: readonly { at: number; value: number | null }[],
@@ -42,7 +41,7 @@ export interface TrendLine { perDay: number; intercept: number }
  * A least-squares straight line through the daily peaks, each placed at the
  * middle of its period. Null under MIN_TREND_DAYS.
  *
- * PEAKS, not every reading: connections follow the working day and
+ * Peaks, not every reading: connections follow the working day and
  * transaction ID age falls each time vacuum freezes, so a fit through raw
  * points measures the trough as much as the approach to the limit.
  */

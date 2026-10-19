@@ -4,11 +4,8 @@ import { isMissingRequestStore, runCheckFor, runToolFor } from '@/lib/check';
 
 describe('isMissingRequestStore', () => {
   /**
-   * This predicate decides whether a `connection()` failure is swallowed or
-   * turned into `ok:false`. Swallowing the wrong thing is the dangerous
-   * direction: it would let a genuine dynamic-rendering failure through as a
-   * successful render, which is the exact defect `connection()` exists to
-   * prevent. So the assertion that matters most is the negative one.
+   * A match means the `connection()` failure is swallowed, so a false
+   * positive would pass a real dynamic-rendering failure as a successful render.
    */
   it('does not treat an ordinary error as a missing request store', () => {
     expect(isMissingRequestStore(new Error('connection refused'))).toBe(false);
@@ -30,27 +27,17 @@ describe('isMissingRequestStore', () => {
   });
 });
 
-describe('runCheckFor when the console itself is misconfigured', () => {
-  // Every input `readDatabases` looks at, in precedence order. Cleared rather
-  // than assumed absent: a developer running this suite with a DATABASE_URL
-  // exported in their shell would otherwise get a real connection attempt.
-  const CONFIG_VARS = ['PGOPS_CONFIG_FILE', 'PGOPS_DATABASES', 'DATABASE_URL'];
+// Every input `readDatabases` looks at, in precedence order. Cleared rather
+// than assumed absent, in case the developer's shell exports a DATABASE_URL.
+const CONFIG_VARS = ['PGOPS_CONFIG_FILE', 'PGOPS_DATABASES', 'DATABASE_URL'];
 
+describe('runCheckFor when the console itself is misconfigured', () => {
   afterEach(() => vi.unstubAllEnvs());
 
   /**
-   * F4 (final review): Task 1's entire justification was that a configuration
-   * error must name the input the operator actually set. Through this seam it
-   * reached nobody in the shape that matters — `ConfigError` fell into the
-   * catch-all below and came back as `reason: 'unreachable'`, which labels a
-   * fault in the CONSOLE as the database being down. That is the same
-   * misattribution class the `M8` branch eleven lines above it was written to
-   * prevent, and during an incident it sends the on-call to the database
-   * rather than to the deployment they just changed.
-   *
-   * The reason must not be 'unreachable' — nothing was ever contacted — and
-   * the message must carry `ConfigError`'s own text, which is the only place
-   * the operator's input is named.
+   * A `ConfigError` must not come back as 'unreachable': nothing was
+   * contacted, and that label sends the on-call to the database rather than
+   * the deployment. The message must carry `ConfigError`'s own text.
    */
   it('reports a configuration fault as a console error, not the database being unreachable', async () => {
     for (const v of CONFIG_VARS) vi.stubEnv(v, undefined);
@@ -65,10 +52,8 @@ describe('runCheckFor when the console itself is misconfigured', () => {
   });
 
   /**
-   * The negative half: an ordinary connection failure must STILL be
-   * 'unreachable'. A branch that caught too much would relabel every database
-   * outage as a misconfiguration, which is the same defect pointing the other
-   * way. Port 1 on loopback refuses immediately; nothing is listening there.
+   * The negative half: a branch that caught too much would relabel every
+   * outage as a misconfiguration. Port 1 on loopback refuses immediately.
    */
   it('still reports a real connection failure as unreachable', async () => {
     for (const v of CONFIG_VARS) vi.stubEnv(v, undefined);
@@ -84,11 +69,10 @@ describe('runCheckFor when the console itself is misconfigured', () => {
 
 /**
  * The same two properties through the tool seam. Page tests mock
- * `runToolFor`, so without this nothing exercises the lines between the page
- * and `runTool` — the gap P4's `relationSpace` fell into.
+ * `runToolFor`, so nothing else exercises the lines between the page and
+ * `runTool`.
  */
 describe('runToolFor', () => {
-  const CONFIG_VARS = ['PGOPS_CONFIG_FILE', 'PGOPS_DATABASES', 'DATABASE_URL'];
   afterEach(() => vi.unstubAllEnvs());
 
   it('reports a configuration fault as a console error, not the database being unreachable', async () => {

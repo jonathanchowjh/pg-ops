@@ -1,20 +1,15 @@
 /**
  * One wide row per database per minute.
  *
- * WIDE, not one row per metric: the page reads every metric for a window at
- * once, and a narrow table would be 27 times the rows for the same read.
+ * Wide, not one row per metric: the page reads every metric for a window at
+ * once.
  *
- * EVERY metric column is nullable and none has a default. Null is "pgops
- * could not look" (a role that cannot read replication state, a statement
- * that timed out); zero is "pgops looked and there were none". A default of
- * zero would turn the first into the second.
+ * Every metric column is nullable and none has a default. Null is "pgops
+ * could not look"; zero is "pgops looked and there were none".
  *
- * Counters are stored RAW, exactly as Postgres reported them, and differenced
- * at read. `stats_reset` rides along so a read can tell a reset from a quiet
- * minute. `wal_bytes` is numeric because pg_stat_wal reports it that way.
- *
- * The primary key is the only index. Every read is "these databases, this
- * time range", and retention deletes by the same two columns.
+ * Counters are stored raw and differenced at read. `stats_reset` lets a read
+ * tell a reset from a quiet minute. `wal_bytes` is numeric because
+ * pg_stat_wal reports it that way.
  */
 export const SQL = `
 CREATE TABLE IF NOT EXISTS pgops.health_stats (

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  CAPTURE_INTERVAL_MS, HEALTH_INTERVAL_MS, HEALTH_SLOW_PASS_MS, startScheduler, stopScheduler,
+  CAPTURE_INTERVAL_MS, HEALTH_INTERVAL_MS, HEALTH_SLOW_PASS_MS, PLACE_INTERVAL_MS, SAMPLE_INTERVAL_MS, startScheduler, stopScheduler,
 } from '@/lib/scheduler';
 
 afterEach(() => { stopScheduler(); vi.useRealTimers(); });
@@ -25,8 +25,8 @@ describe('startScheduler', () => {
     await startScheduler({ store, names: () => ['prod', 'analytics'], capture, migrate });
     expect(migrate).toHaveBeenCalledTimes(1);
 
-    // Captures immediately, in configuration order. A deployment restarting
-    // faster than the capture interval otherwise records nothing at all.
+    // Captures immediately: a deployment restarting faster than the capture
+    // interval would otherwise record nothing.
     await vi.advanceTimersByTimeAsync(0);
     expect(capture.mock.calls.map((c) => c[0])).toEqual(['prod', 'analytics']);
 
@@ -47,10 +47,8 @@ describe('startScheduler', () => {
       migrate: vi.fn().mockResolvedValue(1),
     });
 
-    // The boot capture is still in flight (its promise is held open below),
-    // so both interval ticks must be SKIPPED, not queued behind it — a queued
-    // tick runs a capture nobody needs against a database pgops is meant to be
-    // leaving alone.
+    // The boot capture is still in flight (its promise is held open), so both
+    // interval ticks must be skipped.
     await vi.advanceTimersByTimeAsync(CAPTURE_INTERVAL_MS);
     await vi.advanceTimersByTimeAsync(CAPTURE_INTERVAL_MS);
     expect(capture).toHaveBeenCalledTimes(1);
@@ -64,20 +62,35 @@ describe('startScheduler', () => {
       store: {} as never, names: () => ['prod'], capture,
       migrate: vi.fn().mockResolvedValue(1),
     });
-    // One at boot, then one per interval — and no rejection escapes any of
-    // them. An unhandled rejection on a timer terminates the process.
+    // One at boot, then one per interval, and no rejection escapes any of them.
     await expect(vi.advanceTimersByTimeAsync(CAPTURE_INTERVAL_MS)).resolves.not.toThrow();
     await vi.advanceTimersByTimeAsync(CAPTURE_INTERVAL_MS);
     expect(capture).toHaveBeenCalledTimes(3);
   });
 
+  /** `localhost` refused on both stacks is an AggregateError with an empty message: the log said nothing. */
+  it('logs why a capture failed when the error has no message of its own', async () => {
+    vi.useFakeTimers();
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const refused = new AggregateError([new Error('connect ECONNREFUSED ::1:5432'), new Error('connect ECONNREFUSED 127.0.0.1:5432')], '');
+    try {
+      await startScheduler({
+        store: {} as never, names: () => ['prod'], capture: vi.fn().mockRejectedValue(refused),
+        migrate: vi.fn().mockRejectedValue(refused),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const said = error.mock.calls.map((c) => c.slice(1).join(' ')).join('\n');
+      expect(said).not.toMatch(/AggregateError/);
+      expect(said).toContain('connect ECONNREFUSED ::1:5432; connect ECONNREFUSED 127.0.0.1:5432');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it('does not start twice, even when the two calls OVERLAP', async () => {
-    // The guard used to be `if (timer !== null) return true`, read BEFORE the
-    // await on migrate and written AFTER it — so two overlapping calls both
-    // passed it, both migrated, and both setInterval'd. The first handle was
-    // overwritten and lost, leaving an interval stopScheduler could never
-    // clear, calling capture against the monitored databases forever. Awaiting
-    // the two calls sequentially, as the original test did, cannot see this.
+    // A guard read before the await on migrate and written after it lets two
+    // overlapping calls both pass, both migrate and both setInterval, leaking
+    // an interval stopScheduler can never clear. Sequential awaits cannot see this.
     let release!: () => void;
     const migrate = vi.fn().mockImplementation(
       () => new Promise<number>((r) => { release = () => r(1); }),
@@ -85,10 +98,8 @@ describe('startScheduler', () => {
     const deps = { store: {} as never, names: () => ['prod'], capture: vi.fn(), migrate };
     const a = startScheduler(deps);
     const b = startScheduler(deps);
-    // Release only ONE pending migrate. If both calls got past the guard,
-    // `b`'s migrate is still pending and this await hangs — so assert on the
-    // count first, which fails immediately and says what went wrong, rather
-    // than letting the test die by timeout.
+    // Release only one pending migrate. If both calls got past the guard,
+    // `await b` would hang, so the count is asserted first.
     release();
     await a;
     expect(migrate).toHaveBeenCalledTimes(1);
@@ -96,21 +107,16 @@ describe('startScheduler', () => {
   });
 
   it('does not take the console down when the store cannot be migrated', async () => {
-    // Every other path in this feature swallows, and says so in a docblock:
-    // a console that dies because a store blinked is worse than one that
-    // reports history as unavailable. register() is awaited by Next during
-    // server preparation, so a rejection here is the whole app failing to
-    // boot because its OPTIONAL history store was slow to come up.
+    // register() is awaited by Next during server preparation, so a rejection
+    // here would stop the whole app booting over its optional history store.
     const migrate = vi.fn().mockRejectedValue(new Error('the store is still starting'));
     const capture = vi.fn();
     const started = await startScheduler({
       store: {} as never, names: () => ['prod'], capture, migrate,
     });
     expect(started).toBe(false);
-    // Not vacuous: startScheduler now captures once immediately on success,
-    // so "capture was never called" genuinely distinguishes the failed-migrate
-    // path from the successful one. Nothing may run against an unmigrated
-    // store — at boot or on the interval.
+    // Nothing may run against an unmigrated store, at boot or on the interval.
+    // (A successful start captures once immediately, so this can fail.)
     vi.useFakeTimers();
     await vi.advanceTimersByTimeAsync(CAPTURE_INTERVAL_MS * 2);
     expect(capture).not.toHaveBeenCalled();
@@ -236,11 +242,7 @@ describe('the health tick', () => {
     await expect(vi.advanceTimersByTimeAsync(HEALTH_INTERVAL_MS * 2)).resolves.not.toThrow();
   });
 
-  /**
-   * Final review. A row with a part missing is still `ok: true`, and nothing
-   * read `missing`: a statement that failed every minute left its charts
-   * blank for ever and the log silent.
-   */
+  /** A row with a part missing is still `ok: true`, so `missing` must be logged or the gap is silent. */
   it('names the parts it could not read, once, and says when they come back', async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -260,5 +262,87 @@ describe('the health tick', () => {
       warn.mockRestore();
       info.mockRestore();
     }
+  });
+});
+
+describe('the sample tick', () => {
+  it('samples every fifteen seconds with no store at all', async () => {
+    vi.useFakeTimers();
+    const sample = vi.fn(async (_name: string) => {});
+    const started = await startScheduler({ store: null, names: () => ['a', 'b'], capture: vi.fn(), migrate: vi.fn(), sample });
+    expect(started).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sample.mock.calls.map((c) => c[0])).toEqual(['a', 'b']);
+    await vi.advanceTimersByTimeAsync(SAMPLE_INTERVAL_MS);
+    expect(sample).toHaveBeenCalledTimes(4);
+  });
+
+  it('still starts nothing with no store and no sampler', async () => {
+    expect(await startScheduler({ store: null, names: () => [], capture: vi.fn(), migrate: vi.fn() })).toBe(false);
+  });
+
+  it('skips a sample pass while the one before it is still running', async () => {
+    vi.useFakeTimers();
+    let release = () => {};
+    const sample = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    await startScheduler({ store: null, names: () => ['a'], capture: vi.fn(), migrate: vi.fn(), sample });
+    await vi.advanceTimersByTimeAsync(SAMPLE_INTERVAL_MS * 3);
+    expect(sample).toHaveBeenCalledTimes(1);
+    // Released and settled, or the module's `sampling` flag starves every later test.
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('samples the other databases while one is slow to answer', async () => {
+    let answer = (): void => {};
+    const sample = vi.fn((name: string) => (name === 'slow' ? new Promise<void>((r) => { answer = r; }) : Promise.resolve()));
+    await startScheduler({ store: null, names: () => ['slow', 'a', 'b'], capture: vi.fn(), migrate: vi.fn(), sample });
+    await Promise.resolve();
+    expect(sample.mock.calls.map((c) => c[0])).toEqual(['slow', 'a', 'b']);
+    answer();
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  it('samples when the store could not be migrated', async () => {
+    vi.useFakeTimers();
+    const sample = vi.fn(async (_name: string) => {});
+    const migrate = vi.fn(async () => { throw new Error('store down'); });
+    expect(await startScheduler({ store: {} as never, names: () => ['a'], capture: vi.fn(), migrate, sample })).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sample).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the placement tick', () => {
+  const store = {} as never;
+  const base = () => ({ store, names: () => ['a'], capture: vi.fn().mockResolvedValue({ ok: true }), migrate: vi.fn().mockResolvedValue(1) });
+
+  it('plans at boot and then once a minute, with a store', async () => {
+    vi.useFakeTimers();
+    const place = vi.fn(async (_name: string) => {});
+    await startScheduler({ ...base(), place });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(place).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(PLACE_INTERVAL_MS);
+    expect(place).toHaveBeenCalledTimes(2);
+  });
+
+  it('plans nothing without a store: the shapes are the store\'s', async () => {
+    vi.useFakeTimers();
+    const place = vi.fn(async (_name: string) => {});
+    await startScheduler({ store: null, names: () => ['a'], capture: vi.fn(), migrate: vi.fn(), sample: vi.fn(async () => {}), place });
+    await vi.advanceTimersByTimeAsync(PLACE_INTERVAL_MS * 2);
+    expect(place).not.toHaveBeenCalled();
+  });
+
+  it('skips a pass while the one before it is still running', async () => {
+    vi.useFakeTimers();
+    let release = () => {};
+    const place = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    await startScheduler({ ...base(), place });
+    await vi.advanceTimersByTimeAsync(PLACE_INTERVAL_MS * 3);
+    expect(place).toHaveBeenCalledTimes(1);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
   });
 });

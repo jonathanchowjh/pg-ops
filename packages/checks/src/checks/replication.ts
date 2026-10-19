@@ -3,18 +3,12 @@ import type { Check } from '../types.js';
 export interface ReplicationRow {
   in_recovery: boolean;
   /**
-   * `EXTRACT(EPOCH FROM ...)` returns `numeric` (OID 1700), which node-pg
-   * hands back as a STRING to preserve arbitrary precision — unlike the int4
-   * columns in connections.ts. The query below casts it to
-   * `double precision` (float8, OID 701), which node-pg does parse to a JS
-   * number. Typed as what actually arrives, per this package's convention.
+   * Cast to `double precision`, which node-pg parses to a JS number;
+   * `EXTRACT(EPOCH ...)` alone is `numeric` and would arrive as a string.
    */
   lag_seconds: number | null;
   standbys: number;
-  /**
-   * B4: whether a walreceiver process exists, or NULL on a primary, which
-   * has none to report on. See `ReplicationData.receiving`.
-   */
+  /** Whether a walreceiver process exists; NULL on a primary. */
   receiving: boolean | null;
 }
 
@@ -22,16 +16,9 @@ export interface ReplicationData {
   /** `null` is "we could not look", never "no". */
   inRecovery: boolean | null;
   /**
-   * Seconds behind the primary, or `null`.
-   *
-   * `null` covers two cases that are both "not a meaningful question": this
-   * server is a primary, or it is a standby that has not yet replayed
-   * anything (`pg_last_xact_replay_timestamp()` is NULL until the first
-   * replayed transaction). It is NEVER used for "caught up" — that is 0.
-   *
-   * pgHero answers 0 for a primary. On a dashboard that reads as "perfectly
-   * caught up", which is a claim about replication health made about a server
-   * that is not replicating.
+   * Seconds behind the primary. `null` on a primary, and on a standby that
+   * has not yet replayed anything. Never `null` for "caught up": that is 0.
+   * pgHero answers 0 for a primary; this does not.
    */
   lagSeconds: number | null;
   /**
@@ -40,39 +27,25 @@ export interface ReplicationData {
    * Not verified against Postgres source for the exact row-visibility rule a
    * role lacking `pg_read_all_stats` gets on this view. A low count may
    * therefore reflect restricted visibility rather than a genuine absence of
-   * standbys — do not read 0 as proof of "not replicating" without also
-   * checking the connecting role's privileges.
+   * standbys.
    */
   standbys: number | null;
   /**
-   * B4: is a walreceiver actually running? `null` on a primary, which has
-   * none, and `null` when the row could not be read at all.
+   * Whether a walreceiver is running. `null` on a primary, and when the row
+   * could not be read.
    *
-   * `lagSeconds` is 0 when this standby has replayed everything it
-   * RECEIVED, which is the right caught-up test for a healthy standby and
-   * is also precisely what a dead walreceiver looks like: nothing arriving,
-   * nothing left to replay. A standby that lost the primary hours ago
-   * therefore reads 0 seconds behind.
-   *
-   * No threshold and no verdict here — `standbys` carries the judgement,
-   * from the primary side. This is the one word that stops a broken standby
-   * rendering as a perfect one on the gate that asks whether the server can
-   * keep up.
+   * `lagSeconds` is 0 when this standby has replayed everything it received,
+   * which is also what a dead walreceiver looks like. This field tells the
+   * two apart. It has no threshold or verdict.
    */
   receiving: boolean | null;
 }
 
 /**
- * `pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()` is pgHero's own
- * caught-up test and it is the right one: comparing replay position to the
- * PRIMARY's current LSN would require a connection to the primary, which this
- * check does not have. Both functions are safe on a primary — they return
- * NULL rather than raising, unlike `pg_current_wal_lsn()`, which raises
- * "recovery is in progress" on a standby (see slots.ts's A6 note for the
- * mirror image of this hazard).
- *
- * The whole CASE is guarded by `pg_is_in_recovery()` regardless, so the
- * standby-only functions are never the deciding branch on a primary.
+ * Caught up means `pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()`:
+ * comparing against the primary's current LSN would need a connection to
+ * the primary. Both functions return NULL on a primary and do not raise,
+ * unlike `pg_current_wal_lsn()` on a standby.
  */
 const SQL = `
 SELECT pg_is_in_recovery() AS in_recovery,
@@ -90,21 +63,18 @@ SELECT pg_is_in_recovery() AS in_recovery,
 export const replicationLag: Check<ReplicationRow, ReplicationData> = {
   id: 'replicationLag',
   gate: 'keep-up',
+  home: 'server',
   title: 'Replication',
-  class: 'incident',
+  class: 'live',
   sql: SQL,
   map: (rows) => {
     const r = rows[0];
-    // `??` throughout, never `||`: `false` for in_recovery and `0` for both
-    // lag_seconds and standbys are all FINDINGS, and `||` would launder every
-    // one of them into "we could not look".
+    // `??`, never `||`: `false` and `0` are findings and must not become
+    // `null`.
     return {
       inRecovery: r?.in_recovery ?? null,
       lagSeconds: r?.lag_seconds ?? null,
       standbys: r?.standbys ?? null,
-      // `??` for the same reason as the three above: `false` here is the
-      // FINDING this field was added for — a standby with no walreceiver —
-      // and `||` would launder it into "we could not look".
       receiving: r?.receiving ?? null,
     };
   },

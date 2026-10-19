@@ -48,12 +48,9 @@ describe('readHealthHistory', () => {
   });
 
   /**
-   * Review Focus 4. The counter is HIGHER after the reset than before it, on
-   * purpose. In the first version of this test it fell, so the "went
-   * backwards" rule alone passed it and the `stats_reset` comparison could
-   * be deleted with the test still green (final review; confirmed by
-   * deleting it). A reset onto a busier node, or a failover behind one URL,
-   * is exactly a counter that jumps UP across a reset.
+   * The counter is higher after the reset on purpose: if it fell, the "went
+   * backwards" rule alone would pass and the `stats_reset` comparison would
+   * be untested. A failover behind one URL is a counter that jumps up.
    */
   it('makes a statistics reset one empty interval, even when the counter jumps up', async () => {
     await withPostgres(async (_ctx, pool) => {
@@ -159,10 +156,9 @@ describe('readHealthHistory', () => {
   });
 
   /**
-   * Final review. An unreachable database writes no rows, so after a few
-   * hours down its window is empty and the page said "Collecting. The first
-   * chart appears in a minute." above ninety days of history. The newest row
-   * EVER, not in the window, is what tells the two apart.
+   * An unreachable database writes no rows, so its window empties. The newest
+   * row ever, not in the window, is what tells that from a database still
+   * collecting its first chart.
    */
   it('reports the newest row ever stored, which may be far outside the window', async () => {
     await withPostgres(async (_ctx, pool) => {

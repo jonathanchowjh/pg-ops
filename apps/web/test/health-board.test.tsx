@@ -53,9 +53,9 @@ describe('HealthBoard', () => {
     view = await render(<HealthBoard name="prod" from={FROM} to={TO} groups={GROUPS} />);
     layOut(view.container);
     const plots = view.container.querySelectorAll('[data-plot]');
-    // x=450 is 350/600 across: bucket floor(0.583 × 6) = 3.
-    await point(plots[0]!, 'pointermove', 450);
-    expect(readouts(view.container)).toEqual(['7', 'no reading']);
+    // x=420 is 320/600 across: 3.2 hours in, nearest the fourth bucket at 03:00.
+    await point(plots[0]!, 'pointermove', 420);
+    expect(readouts(view.container)).toEqual(['10-01 03:00 · 7', '10-01 03:00 · no reading']);
     expect(view.container.querySelectorAll('[data-plot] > span')).toHaveLength(2);
   });
 
@@ -63,7 +63,7 @@ describe('HealthBoard', () => {
     view = await render(<HealthBoard name="prod" from={FROM} to={TO} groups={GROUPS} />);
     layOut(view.container);
     await point(view.container.querySelectorAll('[data-plot]')[1]!, 'pointerdown', 110);
-    expect(readouts(view.container)).toEqual(['0', '2']);
+    expect(readouts(view.container)).toEqual(['10-01 00:00 · 0', '10-01 00:00 · 2']);
   });
 
   it('ignores a move over anything that is not a plot', async () => {
@@ -78,9 +78,9 @@ describe('HealthBoard', () => {
     layOut(view.container);
     const plot = view.container.querySelector('[data-plot]')!;
     await point(plot, 'pointermove', 5_000);
-    expect(readouts(view.container)).toEqual(['1', '3']);   // the last bucket
+    expect(readouts(view.container)).toEqual(['10-01 05:00 · 1', '10-01 05:00 · 3']);   // the last bucket
     await point(plot, 'pointermove', -50);
-    expect(readouts(view.container)).toEqual(['0', '2']);   // the first
+    expect(readouts(view.container)).toEqual(['10-01 00:00 · 0', '10-01 00:00 · 2']);   // the first
   });
 
   it('names the moment, and offers the live pages as "now", not as that moment', async () => {
@@ -91,8 +91,7 @@ describe('HealthBoard', () => {
     expect(view.text()).toContain('10-01 03:00 UTC');
     const hrefs = Object.fromEntries(
       [...view.container.querySelectorAll('a')].map((a) => [a.textContent, a.getAttribute('href')]));
-    expect(hrefs['Sessions now']).toBe('/db/prod/sessions');
-    expect(hrefs['Locks now']).toBe('/db/prod/locks');
+    expect(hrefs['Sessions now']).toBe('/db/prod');
     expect(hrefs['Queries now']).toBe('/db/prod/queries');
   });
 

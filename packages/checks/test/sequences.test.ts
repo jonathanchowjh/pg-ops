@@ -22,7 +22,7 @@ describe('toSequences', () => {
     });
   });
 
-  /** Verified arithmetic: 2,000,000,000 / 2,147,483,647 = 93.13%. */
+  /** 2,000,000,000 / 2,147,483,647 = 93.13%. */
   it('measures an integer column at two billion as 93 percent used', () => {
     const { sequences: s } = toSequences([row({ last_value: '2000000000' })]);
     expect(s[0]!.pctUsed!.toFixed(2)).toBe('93.13');
@@ -36,27 +36,19 @@ describe('toSequences', () => {
   });
 
   /**
-   * The ceiling is asserted DIRECTLY, not through a percentage. An earlier
-   * draft asserted `pctUsed < 0.001` for the bigint case, which passes
-   * identically whether the ceiling is the bigint maximum or the integer one
-   * — and telling those apart is the entire purpose of #53.
+   * The ceiling is asserted directly: `pctUsed < 0.001` would pass whether
+   * the ceiling is the bigint maximum or the integer one.
    */
   it('takes a bigint column to the bigint ceiling, not the integer one', () => {
     const { sequences: s } = toSequences([
       row({ column_type: 'bigint', max_value: '9223372036854775807', last_value: '5000000000' }),
     ]);
     expect(s[0]!.maxValue).toBeGreaterThan(2147483647);
-    // Documented imprecision: 9223372036854775807 is not representable as a
-    // JS number and arrives as 9223372036854776000. Harmless for the
-    // percentage (~1e-16 relative), which is why the type is rendered rather
-    // than this value — asserted here so the surprise is recorded, not met.
+    // 9223372036854775807 is not representable as a JS number and arrives as
+    // 9223372036854776000. Harmless for the percentage (~1e-16 relative).
     expect(s[0]!.maxValue).toBe(9223372036854776000);
   });
 
-  /**
-   * The #53 divergence, as a single assertion: same sequence, same value, two
-   * different column types, two different answers.
-   */
   it('reports the same value as dangerous on an integer column and harmless on a bigint one', () => {
     const asInt = toSequences([row({ last_value: '2000000000' })]).sequences[0]!;
     const asBig = toSequences([
@@ -89,10 +81,9 @@ describe('toSequences', () => {
   });
 
   /**
-   * #54 is a database-wide fact and comes from a window aggregate, so it
-   * survives the cap. Unreadable rows have no percentage and sort last, which
-   * makes them the first rows a LIMIT discards — counting the returned page
-   * would report 0 unreadable on a database where every one of them was cut.
+   * Unreadable rows have no percentage and sort last, so they are the first
+   * rows a LIMIT discards. Counting the returned page would report 0
+   * unreadable when every one of them was cut.
    */
   it('reports the database-wide unreadable count, not the count on this page', () => {
     expect(toSequences([row({ unreadable: 7, total: 40 })]).unreadable).toBe(7);
@@ -118,11 +109,7 @@ describe('the sequences verdict', () => {
     sequences: [], total: 0, truncated: false, unreadable: 0, worstPctUsed,
   });
 
-  /**
-   * The boundary, to eight decimal places, because a loose fixture cannot
-   * tell 90 from 50. 1,932,735,283 / 2,147,483,647 is 90.00000003%; one less
-   * is 89.99999999%.
-   */
+  /** 1,932,735,283 / 2,147,483,647 is 90.00000003%; one less is 89.99999999%. */
   it('warns one value above the threshold', () => {
     expect(sequences.verdict!(data(1932735283 / 2147483647 * 100), t()).level).toBe('warn');
   });
@@ -140,25 +127,24 @@ describe('the sequences verdict', () => {
   });
 
   /**
-   * There is no readable sequence to judge. `Verdict` has no third state, so
-   * this returns `ok` — which is the ABSENCE of a finding, not a claim that
-   * the sequences are healthy. `data.unreadable` renders beside it and is what
-   * actually tells the operator they are looking at a blind spot.
+   * `Verdict` has no third state, so this returns `ok`: the absence of a
+   * finding, not a claim of health. `data.unreadable` is what tells the
+   * operator about the blind spot.
    */
   it('is ok when there was no readable sequence to judge', () => {
     expect(sequences.verdict!(data(null), t())).toEqual({ level: 'ok' });
   });
 
-  /** Convention 3: no non-null assertion on `find`. */
+  /** The threshold lookup must not use a non-null assertion on `find`. */
   it('does not escalate when it was given no warn threshold', () => {
     expect(sequences.verdict!(data(99), [])).toEqual({ level: 'ok' });
   });
 });
 
 describe('the sequences contract', () => {
-  it('is a keep-up hygiene check', () => {
+  it('is a keep-up captured check', () => {
     expect(sequences.gate).toBe('keep-up');
-    expect(sequences.class).toBe('hygiene');
+    expect(sequences.class).toBe('captured');
     expect(sequences.timeoutMs).toBe(10_000);
   });
 
@@ -172,9 +158,7 @@ describe('the sequences contract', () => {
 
   /**
    * `regnamespace` parses identifier syntax, so one schema named
-   * "Weird Schema" anywhere in the database made the whole check fail
-   * permanently. sequences.int.test.ts proves the behaviour; this is the
-   * tripwire that fires the moment someone types it back.
+   * "Weird Schema" anywhere in the database fails the whole check.
    */
   it('never casts to regnamespace or regclass', () => {
     const text = (sequences.sql as (o: object) => { text: string })({}).text;

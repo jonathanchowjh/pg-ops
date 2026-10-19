@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { analyzeTables } from '../src/actions/analyze.js';
 import { defaultAuditPath } from '../src/actions/audit.js';
-import { withPostgres } from './harness.js';
+import { awaitPublished, withPostgres } from './harness.js';
 
 describe('analyzeTables', () => {
   it('analyzes the tables it found and reports each one', async () => {
@@ -24,12 +24,7 @@ describe('analyzeTables', () => {
     });
   }, 120_000);
 
-  /**
-   * The identifier never passes through an escaping function because it never
-   * comes from a caller — the catalog emits it already quoted. A schema and a
-   * table named to break a naive interpolation prove the mechanism rather
-   * than the intent.
-   */
+  /** The identifier is never escaped here: the catalog emits it already quoted. */
   it('handles identifiers that would break string interpolation', async () => {
     await withPostgres(async (ctx, pool) => {
       await pool.query('CREATE SCHEMA IF NOT EXISTS "we;ird"');
@@ -45,10 +40,7 @@ describe('analyzeTables', () => {
     });
   }, 120_000);
 
-  /**
-   * §5.1's spirit applied to a write: a request handler must not issue one
-   * statement per relation in an unbounded catalog.
-   */
+  /** A request handler must not issue one statement per relation in an unbounded catalog. */
   it('stops at the cap the caller set', async () => {
     await withPostgres(async (ctx, pool) => {
       for (let i = 0; i < 5; i += 1) {
@@ -60,13 +52,26 @@ describe('analyzeTables', () => {
     });
   }, 120_000);
 
+  it('analyzes one table when it is named, and nothing when the name is no table', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE TABLE one_of_two (a int)');
+      await pool.query('CREATE TABLE two_of_two (a int)');
+      const results = await analyzeTables(ctx, { subcommand: 'test', reason: 'one table' }, { relation: 'public.one_of_two' });
+      expect(results).toEqual([{ relation: 'public.one_of_two', ok: true }]);
+      // Statistics are published a moment after the statement, on 14 most of all.
+      await awaitPublished(pool, 'the analyze of one_of_two',
+        "SELECT last_analyze IS NOT NULL AS ready FROM pg_stat_user_tables WHERE relname = 'one_of_two'");
+      const { rows } = await pool.query<{ relname: string }>(
+        'SELECT relname FROM pg_stat_user_tables WHERE last_analyze IS NOT NULL ORDER BY relname');
+      expect(rows.map((r) => r.relname)).toEqual(['one_of_two']);
+      expect(await analyzeTables(ctx, { subcommand: 'test', reason: 'no table' }, { relation: 'public.nope' })).toEqual([]);
+    });
+  }, 120_000);
+
   /**
-   * Another session's temp tables are NOT in scope, and pgHero's version has
-   * this hole: `analyze_tables` rejects only information_schema and
-   * pg_catalog, which lets every pg_temp_N schema through. visibleSchemas()
-   * exists in this repo because that was found once already, verified on
-   * 17.11 — an unrelated session's CREATE TEMP TABLE reads back as
-   * pg_temp_29.tmp_probe from elsewhere.
+   * Another session's temp tables are not in scope. Rejecting only
+   * information_schema and pg_catalog lets every pg_temp_N schema through: an
+   * unrelated session's temp table reads back as pg_temp_29.tmp_probe.
    */
   it('never reaches into a temp schema', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -93,14 +98,9 @@ describe('analyzeTables', () => {
   }, 120_000);
 
   /**
-   * One table failing does not abandon the rest, and the failure is reported
-   * on its own row rather than thrown. Staged with an ACCESS EXCLUSIVE lock,
-   * which is the realistic cause: ANALYZE needs a share-update-exclusive lock
-   * and cannot get one.
-   *
-   * `lockTimeoutMs` is lowered to keep the suite quick. The PRODUCTION
-   * default stays at pgHero's 5s — a test is not a reason to make an operator
-   * wait less for a lock.
+   * Staged with an ACCESS EXCLUSIVE lock, the realistic cause: ANALYZE needs
+   * a share-update-exclusive lock and cannot get one. `lockTimeoutMs` is
+   * lowered only to keep the suite quick; the production default stays 5s.
    */
   it('records a failure on its own row and keeps going', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -121,9 +121,8 @@ describe('analyzeTables', () => {
         expect(fine).toBeDefined();
         expect(blocked!.ok).toBe(false);
         expect(blocked!.error).toBeTruthy();
-        // The point of the test: the neighbour still succeeded. Until the
-        // failed transaction is unwound, every later statement on that
-        // connection fails with "current transaction is aborted".
+        // Until the failed transaction is unwound, every later statement on
+        // that connection fails with "current transaction is aborted".
         expect(fine!.ok).toBe(true);
       } finally {
         await holder.query('ROLLBACK');
@@ -154,19 +153,14 @@ describe('analyzeTables audits', () => {
       expect(rec).toMatchObject({
         action: 'analyze', subcommand: 'web/cleanup', reason: 'before a release',
       });
-      // The relations, not just a count: an audit record of a bulk write that
-      // does not say what it wrote to cannot answer the question it exists for.
+      // The relations, not just a count: the record must say what was written to.
       expect((rec.target as { relations: string[] }).relations)
         .toContain('public.audited_tbl');
       expect(String(rec.result)).toMatch(/^ok: /);
     });
   }, 120_000);
 
-  /**
-   * A partial batch is neither `ok` nor an error, and recording it as either
-   * would be wrong: `ok` hides that something did not get analyzed, and
-   * `error` implies nothing did.
-   */
+  /** `ok` would hide that something was not analyzed; `error` would imply nothing was. */
   it('records a partial batch as partial', async () => {
     await withPostgres(async (ctx, pool) => {
       await pool.query('CREATE TABLE IF NOT EXISTS partial_blocked (a int)');
@@ -187,11 +181,7 @@ describe('analyzeTables audits', () => {
     });
   }, 120_000);
 
-  /**
-   * An operator who clicks Analyze and then opens Queries should not find
-   * the click there. Every statement Analyze sends, the ANALYZE included,
-   * carries the marker the ranking excludes.
-   */
+  /** Every statement Analyze sends, the ANALYZE included, carries the marker the ranking excludes. */
   it('leaves nothing unmarked in the statement ranking', async () => {
     await withPostgres(async (ctx, pool) => {
       await pool.query('CREATE TABLE marked_me (a int)');

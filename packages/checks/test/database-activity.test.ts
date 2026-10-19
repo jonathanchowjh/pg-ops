@@ -23,18 +23,15 @@ describe('counterRates', () => {
   });
 
   it('is null when the server says the counters were reset, even though none went backwards', () => {
-    // The case the backwards-counter check alone misses: a freshly reset,
-    // low-traffic database whose new counters have already climbed past the
-    // tiny totals they replaced. Nothing looks backwards; only `stats_reset`
-    // says these are a different series.
+    // A freshly reset database whose new counters already climbed past the
+    // totals they replaced: only `stats_reset` says it is a different series.
     const before = sample({ xactCommit: 5, statsResetAt: '2026-01-01T00:00:00Z' });
     const after = sample({ xactCommit: 100, statsResetAt: '2026-01-01T00:05:00Z' });
     expect(counterRates(before, after, 5)).toBeNull();
   });
 
   it('still differences two samples from the same unbroken series', () => {
-    // The other half: an UNCHANGED stats_reset must not be mistaken for a
-    // reset, or rates would never render at all.
+    // An unchanged stats_reset must not be mistaken for a reset.
     const before = sample({ xactCommit: 1000, statsResetAt: '2026-01-01T00:00:00Z' });
     const after = sample({ xactCommit: 2500, statsResetAt: '2026-01-01T00:00:00Z' });
     expect(counterRates(before, after, 5)?.commitsPerSec).toBe(300);

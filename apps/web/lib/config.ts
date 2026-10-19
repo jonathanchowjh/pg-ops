@@ -1,31 +1,13 @@
 /**
- * Configuration is read from the environment AT REQUEST TIME, never at module
- * scope. Every caller passes `process.env` in explicitly, which is what makes
- * this file pure and exhaustively testable — and, more importantly, what stops
- * a module-scope read from being evaluated during `next build` and baked into
- * the image. See the plan's Global Constraints on `connection()`.
+ * Every environment variable the web app reads is read in this file, except
+ * the basic-auth pair, which lib/auth.ts checks against the request it guards.
+ *
+ * Configuration is read from the environment at request time, never at module
+ * scope: every caller passes `process.env` in explicitly. A module-scope read
+ * would be evaluated during `next build` and frozen into the image.
  */
 
 import { readFileSync } from 'node:fs';
-
-/**
- * What pgops calls itself in `pg_stat_activity.application_name`.
- *
- * Lives in config.ts, which imports nothing local, because both sides of the
- * name need it and they already form a cycle: pools.ts imports `storePool`
- * from store.ts, so store.ts importing back from pools.ts made
- * `pools -> store -> pools`. Under ESM that is not a warning — a `const` in a
- * cycle is in its temporal dead zone while the other module initialises, so
- * whichever side loaded second would read APP_NAME as undefined and name its
- * connections "undefined-store", at runtime, only in whichever import order
- * the bundler happened to pick.
- *
- * One definition, deliberately: the pool that SETS this string and the view
- * that HIDES it must agree, and two copies of a literal is exactly how that
- * stops being true.
- */
-export const APP_NAME = 'pgops';
-
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -44,10 +26,10 @@ export interface DatabaseConfig {
 const NAME = /^[A-Za-z0-9_-]+$/;
 
 export function readDatabases(env: Record<string, string | undefined>): DatabaseConfig[] {
-  // Precedence: a mounted file is the most deliberate of the three acts, and
-  // it is also the only one that keeps connection strings out of the process
-  // environment (visible to `docker inspect` and to anything that can read
-  // /proc/<pid>/environ). See the plan's Ruling 1 for this task.
+  // Precedence: a mounted file is the most deliberate of the three, and the
+  // only one that keeps connection strings out of the process environment
+  // (visible to `docker inspect` and to anything that can read
+  // /proc/<pid>/environ).
   const file = env.PGOPS_CONFIG_FILE;
   if (file) return parseMany(readConfigFile(file), `PGOPS_CONFIG_FILE (${file})`);
 
@@ -65,15 +47,12 @@ export function readDatabases(env: Record<string, string | undefined>): Database
 }
 
 /**
- * Read synchronously, on every request, deliberately — see the plan's Ruling 2.
- * `readDatabases` is called from `contextFor` on the render path of every page;
- * making it async would push `await` through `databaseNames()` and every Server
- * Component that lists databases, to save a page-cached read of a local file.
+ * Read synchronously, on every request, deliberately. `readDatabases` is
+ * called from `contextFor` on the render path of every page; making it async
+ * would push `await` through `databaseNames()` and every Server Component
+ * that lists databases.
  *
- * The error names the PATH, not just the variable. An operator debugging a
- * Kubernetes deployment needs to know pgops looked at
- * /etc/pgops/databases.json and found nothing — "PGOPS_CONFIG_FILE could not
- * be read" sends them to check the variable, which is set correctly.
+ * The error names the path, not just the variable.
  */
 function readConfigFile(path: string): string {
   try {
@@ -86,15 +65,15 @@ function readConfigFile(path: string): string {
 }
 
 // `source` names whichever of PGOPS_CONFIG_FILE or PGOPS_DATABASES the raw
-// JSON came from, so every message below points an operator at the input
-// they actually set instead of always naming the environment variable.
+// JSON came from, so every message below points at the input the operator
+// set.
 function parseMany(raw: string, source: string): DatabaseConfig[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    // A raw SyntaxError here reads as a bug in pgops rather than a typo in the
-    // operator's own deployment configuration, which is what it actually is.
+    // A raw SyntaxError would read as a bug in pgops rather than a typo in
+    // the operator's configuration.
     throw new ConfigError(`${source} is not valid JSON: ${(err as Error).message}`);
   }
   if (!Array.isArray(parsed) || parsed.length === 0) {
@@ -119,4 +98,34 @@ function parseMany(raw: string, source: string): DatabaseConfig[] {
     seen.add(name);
     return { name, url };
   });
+}
+
+/**
+ * The store is opt-in, and deliberately has no fallback to a monitored
+ * database: a fallback would have pgops issue CREATE SCHEMA against a
+ * database the operator expected to be read only.
+ */
+export function storeUrl(env: Record<string, string | undefined>): string | null {
+  const url = env.PGOPS_STORE_URL;
+  // Unset and empty both mean "no store". A `Pool` built on an empty
+  // connection string fails at connect time, far from its cause.
+  if (url === undefined || url === '') return null;
+  return url;
+}
+
+/**
+ * The tier-1 gate. Actions are off unless this is "true"; with it unset the
+ * action routes answer 404. Compared against the one documented value rather
+ * than tested for truthiness, which would read the string "false" as on.
+ */
+export function actionsAllowed(env: Record<string, string | undefined>): boolean {
+  return (env.PGOPS_ALLOW_ACTIONS ?? '').trim().toLowerCase() === 'true';
+}
+
+/**
+ * The host name recorded in audit records, when the operator has set one.
+ * Unset, the caller falls back to the request's own Host header.
+ */
+export function publicHost(env: Record<string, string | undefined>): string | undefined {
+  return env.PGOPS_PUBLIC_HOST;
 }

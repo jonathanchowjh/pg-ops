@@ -1,31 +1,26 @@
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 
 /**
- * THE ONE WAY a relation name is rendered when it can be clicked.
+ * The one way a relation name is rendered when it can be clicked.
  *
- * Spec §6: "all these UI things should be standard throughout". Eight pages
- * render a relation name today and each styles it by hand, so the same table
- * looks like three different kinds of thing depending on which page found it.
- * One component makes the convention mechanical rather than remembered.
+ * Encoded here and decoded by Next on the way in, exactly once each way: a
+ * relation name is an arbitrary identifier and may hold a slash or a percent.
+ * The receiving page is app/db/[name]/tables/[relation]/page.tsx.
  *
- * `encodeURIComponent` HERE, and decoded by Next on the way in — exactly
- * once, in each direction. A relation name is an arbitrary identifier: a
- * slash in one routes somewhere else entirely, and a percent in one becomes
- * a mangled name if anything decodes twice. The receiving page's docblock
- * (app/db/[name]/tables/[relation]/page.tsx) carries the other half of this
- * contract.
- *
- * Deliberately NOT parameterised by kind yet. An index page does not exist
- * in this slice, and a link that reliably 404s is worse than a name that is
- * not yet a link.
+ * With `children`, the link wraps them instead of printing the name: a
+ * tree row's whole label cell is its one link. Tables only: there is no
+ * index page to link to.
  */
-export function EntityLink({ database, name }: { database: string; name: string }) {
+export function EntityLink(
+  { database, name, className, children }: { database: string; name: string; className?: string; children?: ReactNode },
+) {
   return (
     <Link
       href={`/db/${database}/tables/${encodeURIComponent(name)}`}
-      className="font-mono underline decoration-border underline-offset-2 hover:decoration-foreground"
+      className={className ?? 'font-mono underline decoration-border underline-offset-2 hover:decoration-foreground'}
     >
-      {name}
+      {children ?? name}
     </Link>
   );
 }

@@ -18,11 +18,7 @@ describe('toIndexBloat', () => {
     expect(toIndexBloat([])).toEqual({ indexes: [], total: 0, truncated: false });
   });
 
-  /**
-   * Both figures arrive as text, because bigint through node-postgres would
-   * otherwise round through a float64. `Number` at the map layer is the same
-   * seam every other size in this package uses.
-   */
+  /** Both figures arrive as text, because bigint through node-postgres would round through a float64. */
   it('converts both byte figures from the text the query returns', () => {
     const { indexes } = toIndexBloat([row()]);
     expect(indexes[0]!.bloatBytes).toBe(16384);
@@ -35,9 +31,8 @@ describe('toIndexBloat', () => {
   });
 
   /**
-   * The qualification the query deliberately does not do, so the transcribed
-   * estimator stays diffable against pgHero's. Both names take the SAME
-   * schema — the index and its table always share one.
+   * The query does not qualify names, so the estimator stays diffable against
+   * pgHero's. An index and its table always share one schema.
    */
   it('qualifies both the index and its table from the single schema column', () => {
     const { indexes } = toIndexBloat([row({ schema: 'other' })]);
@@ -66,23 +61,14 @@ describe('toIndexBloat', () => {
 });
 
 describe('the indexBloat contract', () => {
-  /**
-   * §2 and types.ts: `on-demand` exists SO THAT this check is a class member
-   * rather than an exception written in prose. If this assertion ever has to
-   * change, that design has been abandoned and the class has no other member
-   * to justify it.
-   */
-  it('is the on-demand check, at the keep-up gate', () => {
-    expect(indexBloat.class).toBe('on-demand');
+  /** Captured, but never by the capture: a button runs it. */
+  it('is a captured check, at the keep-up gate', () => {
+    expect(indexBloat.class).toBe('captured');
     expect(indexBloat.gate).toBe('keep-up');
   });
 
-  /**
-   * 30s, not hygiene's 10s. Five CTEs over pg_stats and pg_class is a check
-   * an operator navigates to and waits for; pgHero reaches the same
-   * conclusion by shipping it disabled on its own dashboard.
-   */
-  it('budgets 30 seconds, three times what a hygiene check gets', () => {
+  /** 30s, not a captured read's 10s: an operator asks for this check and waits for it. */
+  it('budgets 30 seconds, three times what a captured read gets', () => {
     expect(indexBloat.timeoutMs).toBe(30_000);
   });
 
@@ -98,10 +84,8 @@ describe('the indexBloat contract', () => {
   });
 
   /**
-   * The floor is declared once, as the threshold value, and the query reads
-   * it from there — so the Guidance an operator reads and the number the
-   * query applied cannot drift apart. `unusedIndexes` documents the same rule
-   * after an earlier draft told operators its floor was ten BYTES.
+   * The floor is declared once, as the threshold value, so the guidance an
+   * operator reads and the number the query applies cannot drift apart.
    */
   it('applies the threshold value as the query default, not a second literal', () => {
     const warn = indexBloat.thresholds!.find((t) => t.level === 'warn')!;
@@ -115,11 +99,7 @@ describe('the indexBloat contract', () => {
     expect(built.values).toEqual([0, 5]);
   });
 
-  /**
-   * `0` must survive as a floor. `??` and not `||`: a caller asking for every
-   * index regardless of waste passes 0, and `||` would silently restore the
-   * 100 MB default and return nothing.
-   */
+  /** `??` and not `||`: `||` would turn a floor of 0 back into the 100 MB default. */
   it('honours a zero floor rather than falling back to the default', () => {
     const built = (indexBloat.sql as (o: object) => { values: unknown[] })({ minBytes: 0 });
     expect(built.values[0]).toBe(0);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { runCheck } from '../src/run.js';
 import { connections } from '../src/checks/connections.js';
+import pg from 'pg';
 import { withPostgres } from './harness.js';
 
 describe('connections', () => {
@@ -19,8 +20,30 @@ describe('connections', () => {
 
       expect(r.data.max).toBe(max);
       expect(r.data.reserved).toBeGreaterThanOrEqual(su);
-      // The defect: headroom used to be max - used, ignoring the reserved pool.
       expect(r.data.headroom).toBe(max - r.data.reserved - r.data.used);
+    });
+  }, 120_000);
+
+  it('counts the clients a role without pg_read_all_stats cannot read', async () => {
+    await withPostgres(async (ctx, pool) => {
+      const url = new URL(pool.options.connectionString!);
+      const role = `r_${Math.random().toString(36).slice(2, 8)}`;
+      await pool.query(`CREATE ROLE ${role} LOGIN PASSWORD 'x'`);
+      url.username = role; url.password = 'x';
+      const restricted = new pg.Pool({ connectionString: url.toString(), max: 1 });
+      try {
+        // The restricted read first, so its own connection is open when the superuser counts.
+        const blind = await runCheck({ ...ctx, target: restricted }, connections);
+        const seeing = await runCheck(ctx, connections);
+        if (!blind.ok || !seeing.ok) throw new Error('read failed');
+        // It counts the superuser's connection, which it cannot read, as well as its own.
+        expect(blind.data.used).toBeGreaterThan(1);
+        // Within a backend that came or went between the two reads.
+        expect(Math.abs(blind.data.used - seeing.data.used)).toBeLessThanOrEqual(1);
+      } finally {
+        await restricted.end();
+        await pool.query(`DROP ROLE ${role}`);
+      }
     });
   }, 120_000);
 
@@ -40,9 +63,8 @@ describe('connections', () => {
         { max: 100, used: 100 - pct, reserved: 0, headroom: pct }, t,
       ).level;
 
-      // `headroom` counts DOWN — smaller is worse — so "one unit either
-      // side" (spec §9) means one percent MORE headroom is the safe side
-      // here, the mirror of the rising-quantity checks' `>=`.
+      // `headroom` counts down — smaller is worse — so one percent more
+      // headroom is the safe side, the mirror of the rising checks' `>=`.
       expect(at(warnAt + 1)).toBe('ok');
       expect(at(warnAt)).toBe('ok');        // exactly at the line is not over it
       expect(at(warnAt - 1)).toBe('warn');
@@ -52,10 +74,8 @@ describe('connections', () => {
     });
   }, 120_000);
 
-  // Pure — no container needed. Locks the over-committed case: reserved
-  // exceeding what actually remains (headroom goes negative). Nothing else
-  // pins this down, and it is the one shape a "never show a negative number"
-  // display fix is likely to touch first.
+  // Pure — no container needed. Pins the over-committed case, where reserved
+  // exceeds what remains and headroom goes negative.
   it('still escalates to critical when reserved exceeds what remains (over-committed)', () => {
     const t = connections.thresholds!;
     // max 100, used 95 -> only 5 slots physically remain, but 10 are

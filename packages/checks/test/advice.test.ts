@@ -22,8 +22,7 @@ describe('splitConjuncts', () => {
       .toEqual(["a = 'x AND y'::text", '(b = 1) OR (c = 2)']);
   });
   // The literal must sit at depth 0 for quote tracking to matter: inside a
-  // conjunct's own parentheses, depth alone protects it — the first draft of
-  // this test was that case, and deleting quote tracking passed it.
+  // conjunct's own parentheses, depth alone protects it.
   it('does not split a literal at depth 0', () => {
     expect(splitConjuncts("(a = 'x AND y'::text)")).toEqual(["a = 'x AND y'::text"]);
   });

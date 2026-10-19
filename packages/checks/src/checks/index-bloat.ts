@@ -1,9 +1,9 @@
 import type { Check } from '../types.js';
-import { DEFAULT_LIMIT } from './indexes.js';
+import { DEFAULT_LIMIT, capped } from './shared.js';
 
 export interface IndexBloatOpts {
   limit?: number;
-  /** The floor on WASTED bytes. Defaults to pgHero's 100 MB. */
+  /** The floor on wasted bytes. Defaults to 100 MB. */
   minBytes?: number;
 }
 
@@ -34,16 +34,10 @@ export interface IndexBloatData {
 }
 
 /**
- * The schema qualification happens HERE, not in the query.
- *
- * Every other check in this package concatenates `schema || '.' || name` in
- * SQL, and this one deliberately does not: the estimator below is a
- * transcription, and the fewer edits it carries the easier it is to diff
- * against the original it claims parity with. Joining three columns into two
- * is presentation, and presentation belongs in `map`.
+ * Schema qualification happens here, not in the query, to keep the
+ * transcribed estimator close to its source.
  */
 export function toIndexBloat(rows: IndexBloatRow[]): IndexBloatData {
-  const total = rows[0]?.total ?? 0;
   return {
     indexes: rows.map((r) => ({
       name: `${r.schema}.${r.index_name}`,
@@ -53,63 +47,30 @@ export function toIndexBloat(rows: IndexBloatRow[]): IndexBloatData {
       definition: r.definition,
       primary: r.is_primary,
     })),
-    total,
-    truncated: total > rows.length,
+    ...capped(rows),
   };
 }
 
 /**
- * pgHero's `index_bloat_bytes` default, `100.megabytes`
- * (lib/pghero/database.rb:68). Declared once, as the threshold's value, and
- * read from there as the query's default floor — the same single-number rule
- * `unusedIndexes` documents.
+ * pgHero's `index_bloat_bytes` default. Both the threshold's value and the
+ * query's default floor.
  */
 const INDEX_BLOAT_FLOOR_BYTES = 100 * 1024 * 1024;
 
 /**
- * TRANSCRIBED from pgHero 4.0.1 `lib/pghero/methods/indexes.rb#index_bloat`,
- * not written. Read that file beside this one before touching a line of it.
+ * Transcribed from pgHero 4.0.1 `lib/pghero/methods/indexes.rb#index_bloat`.
+ * It is the widely circulated btree bloat estimator: it reconstructs what an
+ * index ought to occupy (`otta`) from `pg_stats` and calls the excess
+ * wasted. Do not edit the arithmetic; the figure must agree with pgHero's.
  *
- * The estimator is the widely circulated btree bloat query (pgHero credits
- * @jberkus and @mbanck). It reconstructs what an index OUGHT to occupy —
- * `otta` — from `pg_stats` column widths, null fractions and MAXALIGN
- * padding, then calls the excess over that "wasted". It is an ESTIMATE, and
- * the arithmetic is subtle enough that improving it in passing is the likely
- * outcome of editing it. A bloat figure that disagrees with pgHero's is not
- * parity.
- *
- * Exactly three changes from the original, all mechanical:
- *   1. `count(*) OVER ()::int AS total` for §5's truncation rule.
- *   2. `::text` on the two bigint/numeric outputs, so node-postgres does not
- *      round them through a float64.
- *   3. `$1` for the floor and `$2` for the cap, where pgHero binds `:min_size`
- *      and has no cap at all.
- * Column ALIASES changed too — `table_name`/`index_name`/`is_primary` rather
- * than `table`/`index`/`primary` — because those three are awkward property
- * names in TypeScript. No expression was touched.
- *
- * Checked, not asserted: a token-level diff of this string against the
- * original (comments stripped, whitespace normalised) reports 696 tokens
- * there against 711 here at 0.979 similarity, and every difference is one of
- * the edits listed above — the two dropped aliases, the two `::text` casts,
- * `is_primary` plus the window count, `$1` for `:min_size`, and the `LIMIT`
- * pgHero does not have. No expression differs. That check is not a test in
- * this suite, because it needs the network.
- *
- * `realbloat`, `table_bytes` and `index_scans` are computed in `raw_bloat` and
- * then never selected. That is true of the original as well; they are left in
- * place rather than pruned, because the point of a transcription is that it
- * diffs cleanly against its source.
+ * Changes from the original, none to an expression: the window `total`,
+ * `::text` on the two byte outputs, `$1`/`$2` for the floor and the added
+ * LIMIT, and the `table_name`/`index_name`/`is_primary` aliases. The unused
+ * `realbloat`, `table_bytes` and `index_scans` columns are the original's.
  *
  * An index whose table has never been ANALYZEd has no `pg_stats` rows and
- * drops out of the join in `index_item_sizes` entirely. That is an absence,
- * not a zero, and it is the right answer: bloat cannot be estimated from
- * statistics that do not exist, and reporting such an index at 0 wasted bytes
- * would be a measurement nobody took.
- *
- * `bloat_bytes` is never NULL, so `map` has no null branch: `otta` is wrapped
- * in `coalesce(..., 0)`, and every other input to the two CASE arms
- * (`relpages`, `bs`) is non-null by construction. Verified on 17.11.
+ * drops out: its bloat cannot be estimated, so it is absent, not zero.
+ * `bloat_bytes` is never NULL.
  */
 const INDEX_BLOAT_SQL = `
 WITH btree_index_atts AS (
@@ -205,23 +166,16 @@ ORDER BY wastedbytes DESC, index_name
 LIMIT $2`;
 
 /**
- * `class: 'on-demand'`, which is the whole reason that class exists — see
- * types.ts, where it is documented as the thing that makes `index_bloat` a
- * class member rather than an exception carved out in prose.
- *
- * The placement follows pgHero, which ships this DISABLED on its own
- * dashboard: `app/controllers/pg_hero/home_controller.rb:114` reads
- * `@index_bloat = [] # @database.index_bloat`, with a separate `index_bloat`
- * action at :125 behind its own route. Five CTEs over `pg_stats` and
- * `pg_class` is not something to run on a page an operator opens by reflex,
- * hence the 30s budget rather than hygiene's 10s: this runs when someone asks
- * for it and is willing to wait.
+ * Captured, and never captured: five CTEs over `pg_stats` and `pg_class` are
+ * too heavy for a page opened by reflex, so this runs only from a button,
+ * with a 30s budget instead of a captured read's 10s.
  */
 export const indexBloat: Check<IndexBloatRow, IndexBloatData, IndexBloatOpts> = {
   id: 'indexBloat',
   title: 'Index bloat',
   gate: 'keep-up',
-  class: 'on-demand',
+  home: 'index',
+  class: 'captured',
   timeoutMs: 30_000,
   sql: (o) => ({
     text: INDEX_BLOAT_SQL,
@@ -238,6 +192,5 @@ export const indexBloat: Check<IndexBloatRow, IndexBloatData, IndexBloatOpts> = 
             + 'reclaims the space; on a table that is still churning it will bloat '
             + 'again, which is a vacuum question rather than an index one.' },
   ],
-  // No verdict: §2.2, and this one never escalates on its own — it runs only
-  // when an operator navigates to it.
+  // No verdict: it runs only when an operator navigates to it.
 };

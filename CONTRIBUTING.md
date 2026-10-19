@@ -24,7 +24,7 @@ npm run --workspace @pgops/web dev        # http://localhost:3000
 ```
 
 In a second terminal, `npm run db:seed` holds a real lock chain open so the
-Locks and Triage pages have something to show. Ctrl-C releases it.
+database's tree has a chain to show. Ctrl-C releases it.
 `npm run db:psql` opens `psql` inside the container, and `npm run db:down`
 removes it.
 
@@ -52,20 +52,13 @@ commit it passed on, and [.githooks/pre-push](.githooks/pre-push) — which is
 instant — refuses to push any commit without that record. Commit again after
 gating and the record no longer covers you, so you re-gate.
 
-It reads as a detour until you try the obvious thing. `git push` opens the
-connection to the remote *before* running pre-push, because the hook is fed
-each ref's remote SHA on stdin and git can only learn that by asking. A hook
-that works for fifteen minutes does so while an idle `git-receive-pack`
-session is held open; the remote drops it, and git dies writing the pack to a
-closed pipe — exit 141, SIGPIPE, no output at all. That is what this repo did
-until 2026-09-25, and `--no-verify` was the only way to push, which made the
-gate worse than no gate. Every file's comments explain why each step is
-there.
+The gate is a separate step because `git push` opens the connection to the
+remote *before* running pre-push. A hook that works for fifteen minutes holds
+that connection idle until the remote drops it, and the push dies with exit
+141 and no output.
 
-Unlearn the reflex that period trained. `--no-verify` was the only way to push
-while the hook was broken; the hook is fixed, and these two hooks are the whole
-of this repository's CI. Skipping them no longer routes around a broken hook,
-it pushes something nothing verified.
+These two hooks are the whole of this repository's CI. `--no-verify` pushes
+something nothing verified.
 
 Two things the hooks do not do, which a server-side CI used to:
 
@@ -102,22 +95,24 @@ packages/checks/          Everything that knows Postgres. No React, no Next, no 
   src/gates.ts            The four gates: the console's organising model, as data
   src/run.ts              runCheck / runSeries / runTool: run one thing, never throw
   src/registry.ts         CHECKS, ACTIONS, SERIES, TOOLS, and the pgHero parity map
-  src/checks/             One file per area: locks, sessions, indexes, wraparound…
-  src/actions/            kill, analyze, stats resets: the only writes, all audited
+  src/checks/             One file per area: locks, sessions, catalog, wraparound…
+  src/checks/shared.ts    What the checks share: list cap, schema filter, threshold comparison
+  src/actions/            kill, analyze, stats resets: the only writes, all through audited()
   src/series/             "How has this moved": reads over the store
   src/store/              The pgops schema: migrations, read, write, advisory lock
   src/tools/              explain and index advice: questions the operator asks
   src/capture.ts          The five-minute capture tick
+  src/health.ts           The one-minute health sample
   src/redact.ts           Secret redaction, applied to every rendered query
   test/                   *.test.ts is pure; *.int.test.ts needs Postgres
 
 apps/web/                 The Next.js console. Renders what packages/checks returns.
-  app/                    One folder per route; page.tsx renders, layout.tsx holds the sub-nav
+  app/                    One folder per route; page.tsx renders, layout.tsx holds the sidebar
   app/api/db/[name]/      The action routes and the explain route
-  components/             CheckPanel, Refresh, Sql, ConfirmAction, KillButton, nav…
-  lib/check.ts            runCheckFor: the one seam every page runs a check through
-  lib/config.ts           Reads DATABASE_URL / PGOPS_DATABASES / PGOPS_CONFIG_FILE per request
-  lib/pools.ts            One pool per database URL, the app's only module-level state
+  components/             Clock, TreeView, Scatter, Panel, Sql, ConfirmAction, KillButton…
+  lib/check.ts            runCheckFor, readStore: the one seam every page reads through
+  lib/config.ts           Every environment variable the console reads, read per request
+  lib/pools.ts            One pool per database URL, and the count of statements sent through it
   lib/action-route.ts     The preamble every action route shares: flag, CSRF, reason, confirmation
   proxy.ts                Basic auth, and the 404 gate over the action routes
   test/                   Component tests, route tests, and guards.test.ts
@@ -174,15 +169,14 @@ of two ways the project tried.
 |---|---|
 | `packages/checks` depends on `pg` and nothing else, and imports nothing from the app | `boundaries.test.ts` |
 | Every check declares a gate, and its gate agrees with the registry | `registry.test.ts` |
-| Every pgHero capability resolves to exactly one state; a complete phase owes nothing | `registry.test.ts` |
+| Every pgHero capability resolves to exactly one state, and none is owed | `registry.test.ts` |
 | The README's parity counts match what the registry computes | `registry.test.ts`, which parses `README.md` |
 | Every page is dynamic; nothing opts back into static rendering | `guards.test.ts`, and the image smoke test end to end |
-| Only incident pages and the overview render `<Refresh>`; hygiene routes never poll | `guards.test.ts` |
+| Only pages of live reads and the overview render `<Refresh>`; a captured read never runs on a poll | `guards.test.ts` |
 | No page or component constructs a `Pool` or renders a query outside `<Sql>` | `guards.test.ts` |
 | DDL appears only under `store/migrations/` | `guards.test.ts` |
 | A statistics reset is named in exactly one file, and never on the capture path | `guards.test.ts` |
 | Operator SQL is prepared as a named statement in exactly one file | `guards.test.ts` |
-| Sub-navigation is rendered by a layout, never by a page | `guards.test.ts` |
 | Every threshold is tested one unit either side of its line | Each check's `*.int.test.ts` |
 
 ## Design record
@@ -212,7 +206,9 @@ authority.
 ### The four gates
 
 Every check belongs to one of four gates. A request has to clear them in
-order, and the triage page renders them in that order.
+order. The gates are being retired for the tree: each check now also declares a
+`home`, the node its finding belongs to, and the database page no longer renders
+by gate.
 
 ```
 1 connect   can it get in?          connections, sessions, sources
@@ -263,7 +259,8 @@ The page renders it as `UNKNOWN`, never as green.
 With `PGOPS_STORE_URL` set, pgops creates a `pgops` schema in that database
 on boot, under an advisory lock so several replicas starting together migrate
 once. Every 5 minutes it captures every statement shape and every relation
-size, then runs the hygiene checks and caches their findings. Four
+size, then reads the catalog (tables, indexes, sequences) and stores its
+rows, with what each table and index did in the hour. Four
 properties, each held by a test:
 
 - **It never resets shared counters.** pgHero calls
@@ -340,10 +337,10 @@ Each is documented at the code that implements it.
 
 ## Conventions
 
-- **Comments say why.** Nearly every non-obvious line in this repo has a
-  comment naming the defect it prevents or the review finding it answers.
-  Keep that up. A comment that restates the code is noise; a comment that
-  says what went wrong without it is the project's memory.
+- **Comments say why, briefly.** A comment states the constraint the code
+  answers to: a Postgres behaviour, a hazard, an invariant. It does not
+  restate the code, tell the history of a change, or cite a plan or review
+  that is not in the repository. History belongs in the commit message.
 - **Light OOP.** Checks, series, tools and actions are plain objects and
   functions, not classes. A class earns its place only when several functions
   keep passing the same values around. No inheritance beyond subclassing
@@ -358,8 +355,8 @@ Each is documented at the code that implements it.
   and a guard holds the second.
 - **`null` means "we could not look".** Never substitute `0`, `ok` or a
   sentinel string for a reading that was not taken.
-- **A page never polls a catalog scan.** Incident checks are cheap and poll at
-  five seconds; hygiene checks run when the page is opened.
+- **A page never polls a catalog scan.** Live reads are cheap and poll at
+  five seconds; a captured read is stored by the capture and read back.
 - **Commit messages** follow `type(scope): summary`, for example
   `feat(checks): …`, `fix(web): …`, `docs: …`. The summary says what changed
   in the product, not which file was edited. A commit carries its author's
@@ -378,7 +375,7 @@ Each is documented at the code that implements it.
    the four disagree.
 2. Add the release to [CHANGELOG.md](CHANGELOG.md): what shipped, what was
    declined and why, what diverges from pgHero, and the parity counts read
-   from `parityBacklog()`.
+   from the registry.
 3. Update the README's parity table and headline if the counts moved. The
    test suite fails until they agree. Remove anything the release fixed from
    the README's known issues.
@@ -429,11 +426,12 @@ puts the decision on a web page with the reasoning written beside it.
 | **Check** | One question about a database, as one SQL query plus the code that turns rows into an answer. `connections`, `locks`, `wraparound` are checks. |
 | **Verdict** | A check's opinion: `ok`, `warn` or `critical`, with a short note. Some checks only report and have no verdict. |
 | **Threshold** | The number a verdict is judged against, with two sentences: `because` (why this number) and `remedy` (what to do). |
-| **Gate** | Which of the four stages of a request's life a check measures: `connect`, `wait`, `work` or `keep-up`. Decides which band of the triage page it renders in. |
-| **Class** | How a check runs. `incident` runs live and its page polls every five seconds. `hygiene` runs when its page is opened. `on-demand` runs only when the operator clicks through. |
+| **Gate** | Which of the four stages of a request's life a check measures: `connect`, `wait`, `work` or `keep-up`. Being retired; see **Home**. |
+| **Home** | The node a check's finding belongs to: `database`, `table`, `query`, `session`, `index`, `sequence` or `server`. |
+| **Class** | How a check runs. `live` may run on a page's five-second poll. `captured` is a catalog scan: the capture stores its rows, a table's own page asks about that table, and a button runs the bloat estimate. |
 | **Series** | A reading over time, read from the store. Query load per interval, a table's size per day. |
 | **Tool** | A question the operator asks with their own input. Explain is a tool. |
-| **Action** | A write: terminate a session, reset statistics, analyze tables. Off by default, gated, confirmed, audited. |
+| **Action** | A write: terminate a session, reset statistics, analyze a table. Off by default, gated, confirmed, audited. |
 | **Store** | A `pgops` schema in a database you nominate with `PGOPS_STORE_URL`. History lives there. Without it there is no history and no DDL anywhere. |
 | **Capture** | The tick that writes query statistics and relation sizes to the store, every five minutes. |
 | **Registry** | `registry.ts`: the list of every check, action, series and tool, and the map from each pgHero capability to what pgops does about it. |
@@ -449,30 +447,22 @@ puts the decision on a web page with the reasoning written beside it.
 2. Open http://localhost:3000 and click through every page. Note which ones
    show a freshness readout that ticks and which do not; that is the poll
    boundary, and it is the single most important design rule in the console.
-3. In a second terminal, run `npm run db:seed`. Watch the Triage and Locks
-   pages change, and find the root blocker: the `batch-worker` session.
+3. In a second terminal, run `npm run db:seed`. Watch the database's tree
+   change, and find the root blocker: the answer line names it.
 4. While the chain is still held, open a third terminal, run
    `npm run db:psql`, and paste in the `sql` from
-   `packages/checks/src/checks/locks.ts` and `blocked.ts`. Every panel you
-   just saw is one check's query. Match each panel to its query before moving
-   on.
-5. Terminate the root blocker from the Sessions page, typing any reason. The
+   `packages/checks/src/checks/sessions.ts`. The whole tree you just saw is
+   that one query, sampled. Match its columns to the rows before moving on.
+5. Terminate the root blocker from the answer line, typing any reason. The
    seeder prints that its connection closed and exits, and the dev server's
    terminal prints one JSON audit line naming the target and your reason.
 6. Stop the Postgres container with `npm run db:down` while the console is
    still open, and watch what every page does. This is the "we could not
    look" rule: nothing should read as healthy.
 
-On 2.3.0, step 5 has a trap. With actions on, the Sessions page answers 500
-as soon as any query has run past 60 seconds, and the seeded waiters cross
-that line about a minute after `db:seed` starts. If you hit it, you have
-found the bug in the README's known issues. Restart the seeder and terminate
-within the first minute, or work from a checkout that has the 2.3.1 fix.
-
 ### Day 2: read one check end to end
 
-Read these files in this order, including the comments. They are long because
-the comments are the design record.
+Read these files in this order, including the comments.
 
 1. [packages/checks/src/types.ts](packages/checks/src/types.ts) — the shapes.
 2. [packages/checks/src/gates.ts](packages/checks/src/gates.ts) — the model.
@@ -486,8 +476,8 @@ the comments are the design record.
 5. [packages/checks/src/run.ts](packages/checks/src/run.ts) — how a check is
    run and why it never throws.
 6. [apps/web/lib/check.ts](apps/web/lib/check.ts) — the web wrapper.
-7. [apps/web/app/db/[name]/locks/page.tsx](apps/web/app/db/%5Bname%5D/locks/page.tsx)
-   — a small page that renders one check.
+7. [apps/web/app/db/[name]/cleanup/page.tsx](apps/web/app/db/%5Bname%5D/cleanup/page.tsx)
+   — a page that renders three checks.
 8. [apps/web/components/check-panel.tsx](apps/web/components/check-panel.tsx)
    — where the failed case and the verdict badge render.
 
@@ -503,7 +493,7 @@ Now make each of these edits, run the relevant suite, read the failure
 message, and revert:
 
 - Add `<Refresh intervalMs={5_000} />` to
-  `apps/web/app/db/[name]/queries/tables/page.tsx`. `npm run test:web` fails
+  `apps/web/app/db/[name]/tables/page.tsx`. `npm run test:web` fails
   in "the poll boundary". Read the test's comment for why.
 - Change the `Shipped` row in the README's parity table to 59. `npm test`
   fails in "the README parity claims".
@@ -521,7 +511,7 @@ not a flake.
 
 ### Day 4: add a check, end to end
 
-This is a worked example, not a feature request. It adds a hygiene check that
+This is a worked example, not a feature request. It adds a live check that
 reports how many temporary files the current database has spilled to disk,
 which is a reading a DBA looks at when `work_mem` is suspected to be too low.
 It does not ship; it exists to walk the path. If you want to keep it, that is
@@ -559,9 +549,9 @@ WHERE datname = current_database()`;
 export const tempFiles: Check<TempFilesRow, TempFilesData> = {
   id: 'tempFiles',
   gate: 'work',
+  home: 'server',
   title: 'Temporary files',
-  class: 'hygiene',
-  timeoutMs: 10_000,
+  class: 'live',
   sql: SQL,
   map: (rows) => ({
     files: Number(rows[0]?.temp_files ?? 0),
@@ -579,7 +569,13 @@ boundary.
 `tempFiles` to the `CHECKS` object. Add `export type * from
 './checks/temp-files.js';` to `packages/checks/src/index.ts` so the console
 can name `TempFilesData`. Run `npm test`; the registry tests confirm the
-check exists and has a gate the triage page renders.
+check exists, has a gate and has a home.
+
+`npm run test:web` now fails in "the overview covers every live check": a
+live check is one the fleet page runs. In `worstVerdict`, in
+`apps/web/app/page.tsx`, add `runCheckFor(name, CHECKS.tempFiles)` at the end
+of the `Promise.all`, and `tempFiles` at the end of both lists of names
+around it.
 
 **3. Test it.** Create `packages/checks/test/temp-files.int.test.ts`:
 
@@ -605,18 +601,14 @@ describe('tempFiles', () => {
 `withPostgres` gives you a fresh database in the shared container. Run
 `npm run test:int -- temp-files` to run only this file.
 
-**4. Render it.** The check's gate is `work`, so it belongs under the Queries
-tab, and its class is `hygiene`, so it goes on a page that does not poll. The
-Tables page already is one. In `apps/web/app/db/[name]/queries/tables/page.tsx`,
-add `formatBytes` to the import from `@/lib/format`, add the check to the
-page's existing `Promise.all` so it runs alongside the others rather than
-after them, and render a panel inside the grid:
+**4. Render it.** The check is live, so it may go on a page that polls. Its
+home is `server`, whose reads the Cleanup page draws until Server has a page
+of its own; `apps/web/test/coverage.test.ts` fails until some page of its
+home names it. In `apps/web/app/db/[name]/cleanup/page.tsx`, add it to the
+page's `Promise.all` and render a `CheckPanel` with the others:
 
 ```tsx
-const [hitRate, unused, stats, caching, temp] = await Promise.all([
-  // …the four existing calls…
-  runCheckFor(name, CHECKS.tempFiles),
-]);
+  runCheckFor(name, CHECKS.tempFiles),  // last in the Promise.all; name it `temp`
 // …
 <CheckPanel title="Temporary files" result={temp}>
   {(d) => <p className="text-sm">{formatCount(d.files)} files, {formatBytes(d.bytes)}</p>}
@@ -626,15 +618,14 @@ const [hitRate, unused, stats, caching, temp] = await Promise.all([
 The page's own test mocks `runCheckFor` and hands back an empty object for
 any check it has no fixture for, so it keeps passing. That is worth noticing:
 a new panel is not tested until you add a fixture and an assertion for it in
-`apps/web/test/tables-page.test.tsx`.
+`apps/web/test/cleanup-page.test.tsx`.
 
-Do **not** add a `<Refresh>`; the guard will tell you if you do. Run
-`npm run test:web` and `npm run --workspace @pgops/web typecheck`.
+Run `npm run test:web` and `npm run --workspace @pgops/web typecheck`.
 
-**5. Look at it.** `npm run --workspace @pgops/web dev`, open the Tables page,
+**5. Look at it.** `npm run --workspace @pgops/web dev`, open the Cleanup page,
 and stop the container to see the panel go `UNAVAILABLE`. That is the whole
 path: SQL, map, registry, test, page. Every step above was run against this
-repository at 2.3.0 and passes; if one does not for you, the code has moved
+repository at 2.5.0 and passes; if one does not for you, the code has moved
 and this guide needs a fix, which is itself a good first pull request.
 
 ### Day 5: pick up real work
@@ -651,14 +642,14 @@ console with actions on, because the existing suite only ever ran with them
 off. Read that diff in this order: the changelog entry, the new test, then
 the fix. That order is the one to copy.
 
-Comments in the code cite design documents by date and section, for example
+Some test comments cite design documents by date and section, for example
 `spec 2026-09-03 §2` or `parity §2.1`. Those documents are kept outside the
 repository. Treat the comment itself as the record of the decision.
 
 Whichever you pick:
 
 1. Find the existing test closest to what you are about to write and read it
-   whole. `sessions-fold.test.tsx` and `check-panel.test.tsx` are good
+   whole. `tree-page.test.tsx` and `check-panel.test.tsx` are good
    starting points for page and component tests.
 2. Write the test first and watch it fail for the reason you expect. Then
    make it pass. Every fix in the changelog was built this way.

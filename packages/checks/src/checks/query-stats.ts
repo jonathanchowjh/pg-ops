@@ -2,23 +2,11 @@ import type { Check } from '../types.js';
 import { OWN_SQL_MARKER } from '../run.js';
 
 /**
- * A4: the shipped TUI's `TOP_SQL` was `ORDER BY total_exec_time DESC LIMIT
- * 100`, always — regardless of which of `total | mean | calls | cache`
- * `top/stats.ts` then re-sorted those 100 rows by, client-side. With
- * `pg_stat_statements.max` defaulting to 5000, "sort by mean" meant "the
- * worst mean among the 100 highest-total" — the twice-daily four-minute
- * report sits at rank ~3000 by total time and was unreachable under every
- * sort the UI offered, `cache` included. `ORDER` is a closed record keyed
- * by `QuerySort`, one entry per key the defect named, so the LIMIT and the
- * sort are always the same key: a caller-supplied string never reaches
- * `ORDER BY` (see the file-bottom note on why that's still safe SQL despite
- * not being a bind parameter).
+ * The sort is applied in SQL, with the LIMIT, so "top by mean" ranks every
+ * shape and not only the top 100 by total time.
  *
- * `cache` sorts ASCENDING, not DESCENDING like the other three: for
- * total/mean/calls, "worst" is the biggest number; for cache hit rate,
- * "worst" is the SMALLEST — the query evicting the buffer cache hardest. A
- * shape with no I/O at all (hit + read = 0) sorts last regardless of
- * direction: it has no cache behavior to rank, good or bad.
+ * `cache` sorts ascending: the worst cache hit rate is the smallest. A
+ * shape with no I/O (hit + read = 0) sorts last.
  */
 export type QuerySort = 'total' | 'mean' | 'calls' | 'cache';
 
@@ -26,69 +14,49 @@ export interface QueryStatsOpts {
   sort: QuerySort;
   limit?: number;
   /**
-   * Show pgops's own marked statements alongside everyone else's. Default
-   * false: this package's own catalog reads otherwise rank among the top
-   * statement shapes on the very page meant to show what the DATABASE is
-   * doing (task 8's finding). See the SQL comment on `own_shapes` for how
-   * the fold is applied without dropping the row from `totalShapes`.
+   * Show pgops's own marked statements. Default false: this package's own
+   * catalog reads would otherwise rank among the top shapes.
    */
   showOurs?: boolean;
+  /** Only this shape. The sum and the counts are still every shape's. */
+  queryid?: string;
 }
 
 export interface QueryStatRow {
-  /**
-   * bigint (a 64-bit hash) — kept as a string throughout; never arithmetic,
-   * only identity. NULL when Postgres itself redacts this row (see the
-   * `WHERE toplevel` comment below on `redacted` / fix-round-1's finding).
-   */
+  /** bigint hash, kept as a string. NULL when Postgres redacts the row. */
   queryid: string | null;
-  /** NULL/`'<insufficient privilege>'` when redacted — see the same comment. */
+  /** `'<insufficient privilege>'` when redacted. */
   query: string | null;
-  /** bigint counter — see the map-level comment on why `Number(...)` is safe for it below. */
+  /** bigint counter, as text. */
   calls: string;
-  /**
-   * double precision, natively in milliseconds since pg_stat_statements
-   * 1.3 (bundled with every server this package supports). node-pg's
-   * default parser hands float8 back as a JS `number` already — unlike the
-   * bigint columns on this row, a `double precision` value IS an IEEE-754
-   * double, so no cast-to-text-then-parse round trip is needed or done
-   * (Convention 1's "type it as what genuinely arrives").
-   */
+  /** double precision milliseconds, which node-pg returns as a JS number. */
   total_ms: number;
   mean_ms: number;
   stddev_ms: number;
-  /** bigint counter, same as `calls`. */
+  /** bigint counter, as text. */
   rows: string;
-  /** bigint counters, same as `calls`. */
+  /** bigint counters, as text. */
   shared_blks_hit: string;
   shared_blks_read: string;
-  /**
-   * int4 — `count(*)::int`, bounded by `pg_stat_statements.max`. Rides
-   * along on every row for the same reason as `sessions.ts`'s and
-   * `long-running.ts`'s own `total_matching`; see the SQL comment above
-   * `SQL` for the full reasoning.
-   */
+  /** The count before LIMIT, on every row. */
   total_shapes: number;
   /**
-   * How many of `total_shapes` carry pgops's own OWN_SQL_MARKER suffix — see
-   * the SQL comment above `own_shapes` in the query. Counted regardless of
-   * `showOurs`, so the fold's "N of pgops's own shapes hidden" sentence can
-   * say how many even while they are folded out of `rows`.
+   * How many of `total_shapes` end with OWN_SQL_MARKER. Counted regardless
+   * of `showOurs`.
    */
   own_shapes: number;
-  /** timestamptz cast to text — when these counters were last cleared, or null if never/unreadable. */
+  /** When these counters were last cleared, or null if never or unreadable. */
   stats_reset: string | null;
   /**
-   * `o.sort` bound back as `$2` and echoed on every row (see the SQL
-   * comment on why `map`, pure over `rows` alone, needs this). Kept `string`
-   * here, narrowed to `QuerySort` in `map` via `isQuerySort` — a type guard,
-   * not an `as` assertion (Convention 5).
+   * `o.sort` echoed back on every row, because `map` cannot see `Opts`.
+   * Narrowed to `QuerySort` by `isQuerySort`.
    */
   requested_sort: string;
+  all_ms: number;
 }
 
 export interface QueryStatRowData {
-  /** null when `redacted` — see below. */
+  /** null when `redacted`. */
   queryid: string | null;
   /** null, or the literal `'<insufficient privilege>'`, when `redacted`. */
   query: string | null;
@@ -97,19 +65,12 @@ export interface QueryStatRowData {
   meanMs: number;
   stddevMs: number;
   rows: number;
-  /** null when this shape has never touched the buffer cache (hit + read = 0) — not 0%, not 100%: unknown. */
+  /** null when this shape has never touched the buffer cache: unknown, not 0%. */
   cacheHitPct: number | null;
   /**
-   * Fix round 1: Postgres itself — not this check — decides whether the
-   * calling role may see another role's `queryid`/`query` text. It answers
-   * that by nulling/masking those two columns, never by omitting the row:
-   * every cost figure (`calls`, `totalMs`, `meanMs`, ...) stays fully
-   * populated regardless. `redacted` surfaces that distinction instead of
-   * hiding it: a row this operator cannot IDENTIFY but can still see the
-   * COST of is actionable ("your worst query is one you lack privileges to
-   * view — granting pg_read_all_stats would reveal it"), which a silently
-   * dropped row is not. See the SQL comment on `WHERE toplevel` for why no
-   * privilege filter is applied before this point.
+   * Postgres masked `queryid`/`query` because this role may not see another
+   * role's statement text. The cost figures are still populated, so the row
+   * is kept and flagged, not dropped.
    */
   redacted: boolean;
 }
@@ -117,42 +78,28 @@ export interface QueryStatRowData {
 export interface QueryStatsData {
   rows: QueryStatRowData[];
   /**
-   * Every top-level shape visible to this role, before `LIMIT` clipped it —
-   * "visible" per Postgres's OWN policy (redacted rows count; see
-   * `redacted` above), not a stricter one this check imposes. `rows.length`
-   * is a slice of it — Convention 6: a truncated list an operator knows is
-   * truncated is useful; one they believe is complete is worse than nothing.
+   * Every top-level shape visible to this role before the LIMIT, redacted
+   * rows included. `rows` is a slice of it.
    */
   totalShapes: number;
-  /**
-   * How many of `totalShapes` are pgops's own marked statements — counted
-   * whether or not `showOurs` folded them into `rows`. See `QueryStatsOpts`.
-   */
+  /** How many of `totalShapes` are pgops's own, whether or not shown. */
   ownShapes: number;
   sort: QuerySort;
-  /** When `pg_stat_statements_reset()` last ran, or null if never (in this server's uptime) or unreadable. */
+  /** When `pg_stat_statements_reset()` last ran, or null if never or unreadable. */
   statsResetAt: string | null;
+  /** Every top-level shape's execution time, own statements included: the denominator of a share. */
+  allMs: number;
 }
 
 /**
- * ORDER BY expression per sort key, every one qualified `v.` — see the
- * top-of-file A4 comment for why the LIMIT and the sort must always agree,
- * and the file-bottom note for why keying off a closed union, rather than a
- * caller-supplied string, keeps this interpolation safe.
+ * ORDER BY expression per sort key. Interpolated into SQL text, which is
+ * safe only because the keys are the closed `QuerySort` union: do not widen
+ * it to `string`.
  *
- * The `v.` qualification is load-bearing, not decoration, for `calls` and
- * `cache`: Postgres resolves an unqualified `ORDER BY` name against the
- * SELECT list's OUTPUT column names first, ahead of the FROM-list's input
- * columns, when both exist under the same name. The SELECT below re-outputs
- * `calls` and `shared_blks_hit`/`shared_blks_read` under their OWN names
- * after casting them `::text` (Convention 1 — see QueryStatRow), so a bare
- * `ORDER BY calls DESC` would sort the TEXT output column lexicographically
- * — '5' sorts ahead of '11' as text — not the numeric input column. Caught
- * by query-stats.int.test.ts's "sorts by calls and by cache hit rate too"
- * test, which fails exactly this way without the qualifier. `total`/`mean`
- * don't collide (their output aliases are `total_ms`/`mean_ms`, not
- * `total_exec_time`/`mean_exec_time`) but are qualified anyway so the same
- * mistake can't reappear if either output alias is ever renamed to match.
+ * The `v.` qualifier is required for `calls` and `cache`: an unqualified
+ * ORDER BY name resolves to the SELECT list's output column first, and those
+ * are `::text`, so they would sort lexicographically
+ * (query-stats.int.test.ts holds this).
  */
 const ORDER: Record<QuerySort, string> = {
   total: 'v.total_exec_time DESC',
@@ -163,148 +110,43 @@ const ORDER: Record<QuerySort, string> = {
           ASC NULLS LAST`,
 };
 
-/**
- * Narrows the `$2`-echoed `requested_sort` column (genuinely `string` on
- * the wire — Postgres text, not a TypeScript union) back to `QuerySort`
- * without a type assertion (Convention 5): a user-defined type predicate,
- * checked against the same four literals `ORDER` is keyed by.
- */
 function isQuerySort(x: string): x is QuerySort {
   return x === 'total' || x === 'mean' || x === 'calls' || x === 'cache';
 }
 
 /**
- * A5: `pg_stat_statements.toplevel` (PG14+, added alongside
- * `pg_stat_statements_info` in extension version 1.9 — bundled with every
- * server release this package supports, PG14 through 18, so the floor
- * `requires` below is the only gate needed) separates a PL/pgSQL function
- * call from the statements executed inside it. Without this filter, once an
- * operator sets `pg_stat_statements.track = all`, a function and its own
- * internals are counted as separate rows, `total_exec_time` sums to more
- * than 100% of wall clock, and the function competes against its own guts
- * for the top slot. `WHERE toplevel` keeps exactly the statements an
- * application actually issued.
+ * `WHERE toplevel` (PG14+) keeps the statements an application issued. With
+ * `pg_stat_statements.track = all`, a function and the statements inside it
+ * are otherwise separate rows and total time sums past wall clock.
  *
- * Fix round 1: an earlier revision also filtered `WHERE userid = current
- * user's oid OR pg_has_role(..., 'pg_read_all_stats', ...)`, on the theory
- * that a role without pg_read_all_stats can't see another role's rows at
- * all. Verified empirically against a live PostgreSQL 17.11: a role with
- * neither ownership nor pg_read_all_stats querying pg_stat_statements
- * directly still gets back every row that role's own toplevel/track scope
- * matches — including other users' — with `query` replaced by the literal
- * `<insufficient privilege>`, `queryid` NULLed, and every COST column
- * (calls, total/mean/stddev_exec_time, shared_blks_*) fully populated.
- * Postgres redacts the identifying columns; it does not drop the row. That
- * removed clause was strictly more restrictive than Postgres's own policy,
- * and it failed exactly where this check matters most: a monitoring role
- * distinct from the application roles, where `userid` matches almost
- * nothing and the check would have silently returned a near-empty result —
- * no error, indistinguishable from "no slow queries" — the same
- * silent-failure shape the missing-extension path exists to prevent, and
- * untestable by any integration test that connects as a superuser (every
- * one in this suite did; `userid = current_user` was always true, so the
- * `OR` branch never ran). Deleted; Postgres already enforces its own
- * policy correctly, and re-implementing it here was worse than deferring to
- * it. `QueryStatRowData.redacted` (see above) surfaces what Postgres
- * redacted instead of the check hiding it a second time by omission.
+ * No privilege filter: for a role without pg_read_all_stats, Postgres still
+ * returns other roles' rows, with `query` masked, `queryid` NULL and every
+ * cost column populated. `redacted` surfaces those rows.
  *
- * I2 (final review): `dbid = (SELECT oid FROM pg_database WHERE datname =
- * current_database())`. `pg_stat_statements` is a CLUSTER-WIDE view — a
- * connection to one database reads back statements issued against every
- * other one — and `QueryStatRow` carries no `dbid` or `datname`. Unscoped,
- * this check ranked `app_staging`'s batch jobs against `app_prod`'s on a
- * shared instance, unlabelled, with nothing on any row an operator could use
- * to tell them apart.
+ * Scoped by `dbid` to the current database: pg_stat_statements is
+ * cluster-wide and this check's rows carry no database identity.
  *
- * Scoped to the current database rather than fixed by adding a `datname`
- * column, because all three authorities on this point are per-database:
- * pgHero's own #14 `query_stats` joins `pg_database ON pg_database.oid =
- * pg_stat_statements.dbid` and filters the same way (registry.ts claims that
- * mapping); the spec's route is `/db/[name]/queries` (§6.2); and the spec's
- * `pgops.queries` / `pgops.query_stats` tables are keyed by `database_id`
- * (§4.2). The capture job that populates those tables knows which database
- * it connected to, so it can stamp the id itself — this check does not need
- * to return one.
+ * `MATERIALIZED` guarantees one scan of pg_stat_statements, whose function
+ * builds every row, query text included, whatever is projected. The counts
+ * are scalar subqueries over that one scan, and the row count is bounded by
+ * `pg_stat_statements.max` (default 5000).
  *
- * This is deliberately the OPPOSITE of what vitest.config.ts argues for
- * `sessions`, `locks`, `blocked` and `longRunning`, and the difference is
- * not an inconsistency. Those read `pg_stat_activity` / `pg_locks`, whose
- * rows carry a `pid` and could carry a `datname`, so nothing is hidden from
- * an operator by leaving them cluster-wide — and the resources they measure
- * (max_connections, the lock manager) genuinely ARE cluster-wide. Here the
- * rows carry no database identity at all, and the quantity being ranked is
- * per-database work.
+ * Every statement this package runs ends with `OWN_SQL_MARKER` (run.ts).
+ * It is matched as a suffix because PostgreSQL 18 drops a leading comment
+ * from the text pg_stat_statements stores; a prefix match finds nothing
+ * there. Own rows are filtered from `rows` unless `showOurs`, but
+ * `own_shapes` and `total_shapes` count the unfiltered CTE.
  *
- * `toplevel_stats` is referenced twice below (the outer SELECT and the
- * `total_shapes` subquery). Postgres 12+ already materializes a
- * multiply-referenced CTE by default rather than inlining it, but
- * `MATERIALIZED` is spelled out explicitly so that guarantee doesn't depend
- * on planner heuristics that could differ across the PG14–18 matrix: the
- * whole point is exactly ONE scan of pg_stat_statements — see the note
- * below on why that scan's cost is judged acceptable here despite the
- * table's query-text payload.
- *
- * `total_shapes` (see QueryStatRow) rides along on every row so `map` — pure
- * over `rows` alone, with no access to `Opts`, same constraint as
- * sessions.ts's and long-running.ts's own `total_matching` — can report what
- * the LIMIT did not return, without needing the `limit` value itself.
- *
- * Cost note (Convention 6's caution): `count(*) OVER ()`, the technique
- * sessions.ts and long-running.ts use, forces Postgres to materialize every
- * matching row before LIMIT trims the payload — cheap against
- * pg_stat_activity, an in-memory view scoped to live connections. Here the
- * source is `pg_stat_statements`, whose SRF constructs a full row —
- * including the query text — for every call regardless of which columns a
- * query actually projects (it can't prune columns the way a real table
- * scan can), and the ORDER BY/LIMIT above must see every row's sort key to
- * pick the right survivors either way. So the "touch every matching row"
- * cost is inherent to this check's job, not created by the counting
- * technique. Two things keep it bounded rather than open-ended, unlike
- * pg_stat_activity's live-connection count during exactly the incident A7
- * worried about: `pg_stat_statements.max` is a fixed operator-configured
- * ceiling (default 5000, not a number that grows with load), and the
- * `toplevel` WHERE clause only shrinks that ceiling (fix round 1 removed
- * the privilege half — see above — without widening it back past that
- * ceiling: the row count doesn't change, only which columns are masked). A
- * single `count(*)` scalar subquery, reusing the one `MATERIALIZED` scan
- * via the CTE, is the cheapest way to get that count — cheaper than a
- * second `count(*) OVER ()` window column, which would carry the count on
- * every projected row of the (also-materialized) window input rather than
- * computing it once.
- *
- * TASK 8: pgops's own catalog reads are themselves pg_stat_statements rows,
- * and every one of them ranked in the top statement shapes on the very page
- * that exists to show what the DATABASE is doing. `run.ts`'s `toQuery` ends
- * every statement this package runs with `OWN_SQL_MARKER` (`/* pgops *\/`)
- * on its own line — so `query LIKE '%' || OWN_SQL_MARKER`, i.e. ENDS WITH the
- * marker, identifies exactly pgops's own rows. The marker is a suffix and not
- * a prefix because PostgreSQL 18 drops a leading comment from the text
- * pg_stat_statements stores; run.ts's own comment on OWN_SQL_MARKER has the
- * measurement. Matching a prefix here is therefore not a stylistic choice to
- * revert: on 18 it matches nothing at all, and this fold silently stops
- * folding. Filtered out of `rows` by default (`showOurs` shows them again,
- * for an operator who wants to see pgops's own load), but `own_shapes` is
- * still counted against the UNFILTERED `toplevel_stats` CTE regardless of
- * `showOurs` — the fold has to say how many it hid, not just hide them.
- * `total_shapes` is left counting everything for the same reason the doc
- * comment on `QueryStatRow.total_shapes` gives: "N statement shapes" must
- * stay true of the database, not of what this role chose to display.
- *
- * `v.query IS NULL OR` in the WHERE clause: a row Postgres has redacted
- * (see the fix-round-1 comment above on `<insufficient privilege>`) has a
- * null `query`, and `NULL LIKE '...'` is NULL, not false — the row would be
- * silently dropped by the filter rather than kept and left unable to judge.
- * A row this check cannot IDENTIFY as pgops's own must still be shown; only
- * a match it can actually name is folded.
+ * `v.query IS NULL OR`: a redacted row with a null `query` makes the LIKE
+ * NULL, which would drop it. A row that cannot be identified as pgops's own
+ * is shown.
  */
 const SQL = (o: QueryStatsOpts) => ({
   text: `
     WITH toplevel_stats AS MATERIALIZED (
       SELECT * FROM pg_stat_statements
       WHERE toplevel
-        -- I2: pg_stat_statements is cluster-wide; this console is per
-        -- database. See the comment above this template for why the scope
-        -- is a dbid filter and not a datname column.
+        -- pg_stat_statements is cluster-wide; this console is per database.
         AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
     )
     SELECT v.queryid::text, v.query, v.calls::text,
@@ -316,57 +158,41 @@ const SQL = (o: QueryStatsOpts) => ({
            (SELECT count(*) FROM toplevel_stats)::int AS total_shapes,
            (SELECT count(*) FROM toplevel_stats t WHERE t.query LIKE '%' || $3::text)::int AS own_shapes,
            (SELECT stats_reset::text FROM pg_stat_statements_info) AS stats_reset,
+           (SELECT COALESCE(sum(t.total_exec_time), 0) FROM toplevel_stats t) AS all_ms,
            $2::text AS requested_sort
     FROM toplevel_stats v
     WHERE ($4::bool OR v.query IS NULL OR v.query NOT LIKE '%' || $3::text)
+      AND ($5::text IS NULL OR v.queryid::text = $5)
     ORDER BY ${ORDER[o.sort]}
     LIMIT $1`,
-  values: [o.limit ?? 100, o.sort, OWN_SQL_MARKER, o.showOurs ?? false],
+  values: [o.limit ?? 100, o.sort, OWN_SQL_MARKER, o.showOurs ?? false, o.queryid ?? null],
 });
 
 export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
   id: 'queryStats',
   gate: 'work',
+  home: 'query',
   title: 'Query statistics',
-  class: 'incident',
+  class: 'live',
   sql: SQL,
   requires: [
     { kind: 'extension', name: 'pg_stat_statements' },
     { kind: 'version', min: 140000 },
   ],
   map: (rows) => {
-    // Every row carries the same pre-LIMIT total, the same stats_reset, and
-    // the same requested_sort (all computed/bound once — see the SQL
-    // comment above `SQL` for why). `rows[0]` with a `?? 0` / `?? null`
-    // fallback matches sessions.ts's and long-running.ts's own convention
-    // for "possibly no rows at all". With zero rows there is no
-    // `requested_sort` to read back either; `'total'` is an arbitrary
-    // fallback in that case, and it IS operator-visible on `sort` — this
-    // check cannot make it harmless by itself. It stays unobserved only
-    // because the one caller today (apps/web's queries page) suppresses its
-    // "sorted by …" label on an empty list, since nothing was actually
-    // ordered. A future caller that renders `sort` unconditionally would
-    // need the same care.
+    // With zero rows there is no `requested_sort` to read back, so `sort`
+    // falls back to `'total'` whatever was asked. A caller must not render
+    // `sort` for an empty list.
     const requested = rows[0]?.requested_sort ?? 'total';
     return {
       totalShapes: rows[0]?.total_shapes ?? 0,
       ownShapes: rows[0]?.own_shapes ?? 0,
       statsResetAt: rows[0]?.stats_reset ?? null,
+      allMs: rows[0]?.all_ms ?? 0,
       sort: isQuerySort(requested) ? requested : 'total',
       rows: rows.map((r) => {
-        // calls/rows/shared_blks_hit/shared_blks_read are genuine bigint
-        // counters (Convention 1) — `Number(...)` loses precision only past
-        // 2^53 (~9.007e15). A shape would need to accumulate roughly nine
-        // quadrillion calls, or the equivalent in block touches, between
-        // resets to hit that ceiling — many orders of magnitude past
-        // anything a real deployment's uptime (or `pg_stat_statements_reset`
-        // cadence) produces. Judged safe; not proven safe by a runtime guard,
-        // because a guard here would have nothing sane to do instead (this
-        // package has no "degraded number" representation) — the honest
-        // alternative would be keeping these as strings all the way to the
-        // consumer, which every other numeric field in this package's
-        // `*Data` shapes (headroom, txnsUntilShutdown, runningSecs, ...) does
-        // not do either.
+        // bigint counters: `Number(...)` loses precision only past 2^53,
+        // which is judged unreachable. There is no runtime guard.
         const calls = Number(r.calls);
         const rowsCount = Number(r.rows);
         const hit = Number(r.shared_blks_hit);
@@ -380,13 +206,7 @@ export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
           stddevMs: r.stddev_ms,
           rows: rowsCount,
           cacheHitPct: hit + read === 0 ? null : (100 * hit) / (hit + read),
-          // Fix round 1: Postgres nulls `queryid` for a row this role can't
-          // fully see (see the SQL comment on `WHERE toplevel`); it also
-          // replaces `query` with the literal `'<insufficient privilege>'`.
-          // Checking both, rather than only `queryid`, is defensive against
-          // either signal alone changing across a PG minor version — either
-          // one is sufficient evidence Postgres, not this check, redacted
-          // the row.
+          // Postgres nulls `queryid` and masks `query`; either is enough.
           redacted: r.queryid == null || r.query === '<insufficient privilege>',
         };
       }),
@@ -394,56 +214,21 @@ export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
   },
 };
 
-/*
- * Note on `ORDER[o.sort]`: this is the one place in this check a value
- * reaches SQL text outside a bind parameter. It is safe because `ORDER` is
- * a closed `Record<QuerySort, string>` keyed by the `QuerySort` union — no
- * caller-supplied string ever reaches it; `o.sort` can only ever be one of
- * the four literal keys TypeScript already knows about. Do not widen
- * `QuerySort` to `string`, and do not add a fifth key without adding its
- * `ORDER` entry in the same change.
- */
-
 export interface SlowQueryOpts {
   minCalls?: number;
   minMeanMs?: number;
 }
 
-/**
- * pgHero's defaults (lib/pghero.rb:44-45), adopted rather than re-derived —
- * the same provenance rule the hygiene thresholds follow in the P2 spec §2.1.
- */
+/** pgHero's defaults. */
 export const SLOW_QUERY_DEFAULTS = { minCalls: 100, minMeanMs: 20 } as const;
 
 /**
- * pgHero's #17, which is a FILTER over query_stats, not a query of its own
- * (`query_stats.select { |q| q[:calls] >= slow_query_calls && q[:average_time]
- * >= slow_query_ms }`). Implemented the same way: a second
- * pg_stat_statements scan to re-derive rows the caller already has would cost
- * a round trip and give a second, inconsistent snapshot.
+ * A filter over `queryStats` rows the caller already has, not a second
+ * query. Both bounds must hold.
  *
- * Both bounds must hold. Either alone is a bad filter: a query called twice
- * that takes a second is a one-off, and a query called a million times at 1ms
- * is the database doing its job.
- *
- * Inherits `queryStats`'s LIMIT, exactly as pgHero's inherits its
- * `query_stats(**options)` limit — a slow shape outside the top N by the
- * caller's sort is not surfaced, and no single sort fixes that: this filter
- * is a CONJUNCTION over two axes (`calls >= minCalls AND meanMs >=
- * minMeanMs`), and a top-N window ordered by either axis alone is blind to
- * the other — sorting by `mean` fills the window with one-off expensive
- * statements that never reach `minCalls`, sorting by `calls` fills it with
- * high-volume statements too cheap to reach `minMeanMs`. No ordering makes
- * this list definitive; only disclosing the truncation (see the doc comment
- * on the caller side, apps/web's queries page) does.
- *
- * Takes only the one field it reads, not the full `QueryStatsData` — a
- * caller that already extracted `{ rows }` (or a test fixture that never
- * populates `totalShapes`/`sort`/`statsResetAt`, all irrelevant to a filter)
- * satisfies this without fabricating the rest of the shape. A caller that
- * needs to disclose truncation (comparing `rows.length` against
- * `totalShapes`, as the queries page does) reads `totalShapes` itself from
- * its own `QueryStatsData` — `slowQueries` has no reason to pass it through.
+ * It inherits `queryStats`'s LIMIT, so a slow shape outside the top N by
+ * the caller's sort is not surfaced, and no single sort fixes that. The
+ * caller must disclose the truncation.
  */
 export function slowQueries(
   data: Pick<QueryStatsData, 'rows'>,

@@ -6,16 +6,15 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { captureHealth } from '../src/health.js';
 import { migrate } from '../src/store/schema.js';
+import { IMAGE } from './global-setup.js';
 import { withPostgres } from './harness.js';
 
 const { Pool } = pg;
-const IMAGE = `postgres:${process.env.PGOPS_TEST_PG_VERSION ?? '17'}`;
 
 /**
- * A real primary with a real streaming standby. Nothing else in the suite
- * has one: every replication check is asserted on a lone primary, and the
- * health sample's two replication branches (a primary reading its standbys,
- * a standby reading itself) had never run against the thing they measure.
+ * A real primary with a real streaming standby, the only one in the suite.
+ * It exercises the health sample's two replication branches: a primary
+ * reading its standbys, and a standby reading itself.
  */
 let network: StartedNetwork;
 let primary: StartedPostgreSqlContainer;
@@ -92,20 +91,13 @@ async function newestLag(store: pg.Pool, name: string): Promise<number | null> {
 describe('captureHealth, with a real standby', () => {
   /**
    * Postgres nulls `replay_lag` once a caught-up standby has been idle for a
-   * moment. The first version of the sample took max(replay_lag) and so
-   * stored NULL, which the page words as "No standby reported a replay lag.
-   * None is attached…" — for a healthy standby on a quiet primary.
+   * moment; a sample that takes max(replay_lag) stores NULL, which reads as
+   * "no standby". The reading only counts if the standby was idle before and
+   * after the sample, so the test samples until one is bracketed that way.
    *
-   * The reading is only meaningful if the standby was idle both before and
-   * after the sample, so the test keeps sampling until it gets one bracketed
-   * that way.
-   */
-  /**
-   * THE STORE IS A DIFFERENT SERVER, on purpose. With the store on the
-   * primary, every capture writes to the primary a moment before sampling
-   * it, and the standby is never idle when looked at: the first version of
-   * this test did that and timed out without ever seeing the state it was
-   * written for.
+   * The store is a different server on purpose: on the primary, every
+   * capture would write to it just before sampling and the standby would
+   * never be idle.
    */
   it('reads a caught-up idle standby as zero lag, not as no standby', async () => {
     await withPostgres(async (_ctx, store) => {

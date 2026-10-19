@@ -23,32 +23,16 @@ describe('blocked', () => {
   });
 
   /**
-   * The quiet-database test above proves the SQL parses and returns a
-   * shape; it cannot distinguish a working check from one that
-   * unconditionally returns `{ count: 0, longestQueryAgeSecs: null,
-   * suspectPid: null }` — returning zero is exactly how this check fails.
-   * This fixture makes a genuine block: `holder` takes an advisory
-   * transaction lock and keeps it open; `waiter` then blocks trying to
-   * take the same one. Same shape as locks.int.test.ts's own `holder`
-   * fixture, including its cleanup discipline: each client is pushed to
-   * `clients` at the moment it is created, before `connect()`/`BEGIN`/the
-   * lock query — any of which can throw — so a failure partway through
-   * still gets that client torn down instead of leaking an open
-   * transaction that would hang the harness's `DROP DATABASE`.
+   * Returning zero is how this check fails, so the quiet-database test cannot
+   * prove it works. `holder` keeps an advisory transaction lock; `waiter`
+   * blocks on it. Each client is pushed to `clients` before it connects, so a
+   * failure partway through cannot leak an open transaction that would hang
+   * the harness's `DROP DATABASE`.
    *
-   * `blocked`'s SQL aggregates across the WHOLE server, by design — it
-   * reports the single LONGEST-blocked session, not a per-database list
-   * (see BlockedData's own doc comment). The one Postgres container
-   * `global-setup.ts` starts is shared by every integration file in this
-   * `vitest run`, and Vitest runs test files concurrently by default, so a
-   * short-lived blocking fixture in a sibling file (e.g. locks.int.test.ts)
-   * can transiently outrank this one and get reported as `suspectPid`
-   * instead. Polling instead of sampling once survives that: this
-   * fixture's own block keeps growing for as long as `holder`'s
-   * transaction stays open, so it eventually becomes the longest-blocked
-   * session server-wide once any such short-lived contender releases.
-   * Against a check that always reported zero, the loop would exhaust and
-   * `found` would stay `undefined` — the assertion below is what would fail.
+   * `blocked` reports the single longest-blocked session server-wide, and the
+   * container is shared with concurrently running files, so a sibling's
+   * short-lived block can outrank this one. Polling survives that: this block
+   * keeps growing until it is the longest.
    */
   it('finds a genuinely blocked session and names its actual blocker (A8)', async () => {
     await withPostgres(async (ctx, pool) => {
@@ -85,18 +69,10 @@ describe('blocked', () => {
         expect(found!.verdict!.level).not.toBe('ok');
 
         /**
-         * B9. The unit tests pin what `verdict` does with a wait; only a real
-         * server proves the SQL produces one. `waitstart` is briefly NULL for
-         * a wait that has only just begun, but this fixture has been waiting
-         * for at least one poll interval by the time it is found, so a null
-         * here means the correlated subquery is wrong rather than early.
-         *
-         * The inequality is the claim worth making: the wait must not exceed
-         * the age of the query doing the waiting. It is what distinguishes
-         * the new column from the old one — against a SQL change that
-         * accidentally aliased `longest_wait_secs` to the same
-         * `now() - query_start` expression, both readings would be equal and
-         * this would fail, where a bare `toBeGreaterThan(0)` would pass.
+         * `waitstart` is briefly NULL for a wait that has only just begun,
+         * but this fixture has waited at least one poll interval, so a null
+         * here means the subquery is wrong. The strict inequality fails if
+         * `longest_wait_secs` is ever aliased to the query-age expression.
          */
         expect(found!.data.longestWaitSecs).not.toBeNull();
         expect(found!.data.longestWaitSecs!).toBeGreaterThan(0);

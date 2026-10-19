@@ -2,11 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { identity } from '../src/checks/identity.js';
 
 /**
- * `map` renames, derives the display version, and enforces one rule — and
- * that rule is why this file exists: every field is nullable, and `null`
- * means "we could not look". The dangerous mistake here is not a crash — it
- * is `false` and `null` collapsing into each other, in either direction, on a
- * status line an operator reads before pressing a kill button.
+ * Every field is nullable, and `null` means "we could not look". The mistake
+ * to catch is `false` and `null` collapsing into each other, in either
+ * direction.
  */
 describe('identity', () => {
   const row = {
@@ -27,31 +25,19 @@ describe('identity', () => {
     });
   });
 
-  /**
-   * `pg_stat_ssl` has no row for this backend — an unsupported build, or a
-   * catalog we could not read. Reporting that as "not encrypted" invents a
-   * finding out of an absence, which is the one thing this console promises
-   * never to do.
-   */
+  /** `pg_stat_ssl` has no row for this backend: an absence, not a "not encrypted" finding. */
   it('keeps an unknown ssl status null rather than calling it insecure', () => {
     expect(identity.map([{ ...row, ssl: null }]).ssl).toBeNull();
   });
 
-  /**
-   * The same confusion in the opposite, quieter direction: written `?? null`
-   * this passes, written `|| null` a genuinely unencrypted connection reads
-   * as "unknown" and nobody investigates it. `false` is a finding, not an
-   * absence.
-   */
+  /** Written `|| null` instead of `?? null`, an unencrypted connection would read as "unknown". */
   it('keeps a known-unencrypted connection false rather than unknown', () => {
     expect(identity.map([{ ...row, ssl: false }]).ssl).toBe(false);
   });
 
   /**
-   * A scalar SELECT always returns one row, so this is unreachable through
-   * the check's own SQL. It is pinned anyway because `map` is a pure
-   * function this package exports: it must degrade to "we could not look"
-   * rather than throwing on a shape the type system already permits.
+   * Unreachable through the check's own SQL, but `map` is exported and must
+   * not throw on a shape its type permits.
    */
   it('reports every field unknown when there is no row at all', () => {
     expect(identity.map([])).toEqual({
@@ -60,12 +46,10 @@ describe('identity', () => {
   });
 
   /**
-   * `server_version_num` is major * 10000 + minor. The display form is
-   * derived rather than taken from `current_setting('server_version')`,
-   * which on the packaged builds most operators run answers
-   * `16.4 (Debian 16.4-1.pgdg120+1)` — a vendor suffix in the status bar.
-   * The pre-10 scheme (9.6 = 90600, where the major is two components) is
-   * not handled and does not need to be: this project floors at 14.
+   * `server_version_num` is major * 10000 + minor. Derived rather than read
+   * from `server_version`, which on packaged builds carries a vendor suffix
+   * (`16.4 (Debian 16.4-1.pgdg120+1)`). The pre-10 scheme is not handled:
+   * this project floors at 14.
    */
   it('formats the version from its numeric form', () => {
     const v = (n: string) => identity.map([{ ...row, server_version_num: n }]).serverVersion;

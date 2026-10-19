@@ -7,18 +7,11 @@ import { defaultAuditPath } from '../src/actions/audit.js';
 import { withPostgres } from './harness.js';
 
 /**
- * I4. Every test below performs a real kill, and `killBackend` always
- * audits. Before `vitest.config.ts` set `PGOPS_AUDIT_LOG` for this project,
- * those records went to `~/.pgops/audit.log` — the developer's own file,
- * which audit.ts's header calls "the mitigation for the malicious operator
- * threat". A record written from here is byte-for-byte what a genuine kill
- * writes: real pid, real backend_start, real `user@host`, `result:
- * "terminated"`. Anyone auditing that file after an incident would be
- * reading fabricated entries alongside real ones.
- *
- * This asserts the RESOLVED path, not merely that the env var is set, and
- * it lives in this file rather than in a config test because it must run
- * under the same environment the kills do.
+ * Every test below performs a real kill, and `killBackend` always audits.
+ * Without `PGOPS_AUDIT_LOG` those records would land in the developer's own
+ * `~/.pgops/audit.log`, indistinguishable from genuine kills. This asserts the
+ * resolved path, and lives here so it runs under the same environment as the
+ * kills.
  */
 describe('the integration suite\'s audit destination (I4)', () => {
   it('never resolves into the real home directory', () => {
@@ -46,13 +39,29 @@ describe('killBackend', () => {
           { subcommand: 'sessions', reason: 'test' });
         expect(out).toBe('terminated');
       } finally {
-        // Fixture hygiene: the victim client is acquired and torn down
-        // entirely within this try/finally, independent of whatever the
-        // assertions above did or didn't do — a thrown assertion must not
-        // leak a connection into the container the rest of the serial
-        // integration run shares (this file's own note on "must not break
-        // your own teardown", and the plan's repeated fixture-leak defect).
+        // A thrown assertion must not leak a connection into the container
+        // the rest of the serial integration run shares.
         await victim.end().catch(() => {});
+      }
+    });
+  }, 120_000);
+
+  it('refuses a session of another database, and it lives', async () => {
+    await withPostgres(async (ctx, pool) => {
+      const url = new URL((pool as unknown as { options: { connectionString: string } }).options.connectionString);
+      url.pathname = '/postgres';
+      const elsewhere = new pg.Client({ connectionString: url.toString(), application_name: 'elsewhere' });
+      elsewhere.on('error', () => {});
+      try {
+        await elsewhere.connect();
+        const { rows } = await elsewhere.query<{ pid: number; bs: string }>(
+          'SELECT pg_backend_pid() AS pid, backend_start::text AS bs FROM pg_stat_activity WHERE pid = pg_backend_pid()',
+        );
+        const out = await killBackend(ctx, { pid: rows[0]!.pid, backendStart: rows[0]!.bs }, { subcommand: 'sessions', reason: 'test' });
+        expect(out).toBe('session-changed');
+        expect((await elsewhere.query<{ one: number }>('SELECT 1 AS one')).rows[0]!.one).toBe(1);
+      } finally {
+        await elsewhere.end().catch(() => {});
       }
     });
   }, 120_000);
@@ -79,26 +88,13 @@ describe('killBackend', () => {
   }, 120_000);
 
   /**
-   * Controller Ruling 38: `blocked`'s `suspectPid` comes from
-   * `pg_blocking_pids()`, which returns whoever holds the lock — autovacuum
-   * workers included — and the check deliberately keeps reporting that (an
-   * operator needs to SEE that autovacuum is the blocker). The guard belongs
-   * here, at the point of the terminate, not at the check.
+   * `pg_blocking_pids()` can name an autovacuum worker as the blocker, and the
+   * check keeps reporting it, so the guard belongs at the terminate. Dropping
+   * `backend_type = 'client backend'` from the guard would terminate this
+   * backend and fail the second assertion.
    *
-   * This proves two things a string-matching test on the SQL text cannot:
-   * (1) killBackend genuinely refuses a non-client backend even when its
-   * `backend_start` identity is a perfect match, and (2) the guard actually
-   * prevented the signal — not just that the RETURN VALUE happened to read
-   * 'session-changed'. A regression that dropped `backend_type = 'client
-   * backend'` from the CASE guard (leaving only the backend_start check)
-   * would terminate this backend and fail the second assertion; a regression
-   * that returned 'session-changed' unconditionally would fail the first two
-   * tests above instead. Together they pin the guard to the one place
-   * Ruling 38 requires it: inside the single guarded statement.
-   *
-   * Every default Postgres cluster runs at least one non-client backend
-   * continuously (autovacuum launcher, checkpointer, background writer,
-   * walwriter) — this does not depend on a specific one being present.
+   * Every default cluster runs at least one non-client backend, so this does
+   * not depend on a specific one being present.
    */
   it('refuses to terminate a non-client backend even when its identity matches (Ruling 38)', async () => {
     await withPostgres(async (ctx) => {
@@ -118,8 +114,7 @@ describe('killBackend', () => {
 
       expect(out).toBe('session-changed');
 
-      // Prove the guard actually blocked the signal, not just that the
-      // label reads right: the backend must still be present, unchanged.
+      // The guard blocked the signal: the backend is still present, unchanged.
       const after = await ctx.target.query<{ backend_start: string }>(
         'SELECT backend_start::text AS backend_start FROM pg_stat_activity WHERE pid = $1',
         [target.pid],
@@ -130,12 +125,9 @@ describe('killBackend', () => {
 });
 
 /**
- * #12, and the property that separates it from the permanently-declined #13.
- *
- * A victim is a DEDICATED pg.Client, never a pooled connection — terminating
- * a client the pool still believes it owns leaves the pool handing out a dead
- * socket to whatever asks next. Same reason every killBackend test above does
- * it this way.
+ * A victim is a dedicated pg.Client, never a pooled connection: terminating a
+ * client the pool still believes it owns leaves the pool handing out a dead
+ * socket.
  */
 describe('killLongRunning', () => {
   const victim = async (pool: unknown, name: string) => {
@@ -160,8 +152,8 @@ describe('killLongRunning', () => {
           { subcommand: 'test', reason: 'both of them' });
 
         expect(results.map((r) => r.outcome)).toEqual(['terminated', 'terminated']);
-        // Per-target pids, in the order asked: a summary cannot say which
-        // session was which, and an operator needs exactly that.
+        // Per-target pids, in the order asked, so the operator can tell which
+        // session was which.
         expect(results.map((r) => r.pid)).toEqual([a.target.pid, b.target.pid]);
       } finally {
         await a.client.end().catch(() => {});
@@ -170,12 +162,7 @@ describe('killLongRunning', () => {
     });
   }, 120_000);
 
-  /**
-   * Every target keeps its OWN guard. A stale identity is refused on its own
-   * row while its neighbours proceed — which a sweep cannot express at all,
-   * and which is the whole reason this capability is legitimate where
-   * kill_all is not.
-   */
+  /** Every target keeps its own guard: a stale identity is refused on its own row while its neighbours proceed. */
   it('refuses a target whose identity no longer matches, without touching the others', async () => {
     await withPostgres(async (ctx, pool) => {
       const live = await victim(pool, 'bulk-live');
@@ -201,14 +188,10 @@ describe('killLongRunning', () => {
   }, 120_000);
 
   /**
-   * killBackend RETHROWS on a database error — its finally audits first, then
-   * the catch re-raises. A bulk kill that let that escape would abandon every
-   * remaining target and leave the operator unable to say which sessions had
-   * been touched.
-   *
-   * The seam is an overridden method on the instance, per the house style: a
-   * ctx whose target.query rejects. No constructor injection, no mock
-   * framework.
+   * killBackend rethrows on a database error. A bulk kill that let that escape
+   * would abandon every remaining target and leave the operator unable to say
+   * which sessions had been touched. The seam is a ctx whose target.query
+   * rejects.
    */
   it('records a failure on its own row and keeps going', async () => {
     await withPostgres(async (ctx) => {
@@ -228,7 +211,7 @@ describe('killLongRunning', () => {
       expect(results.map((r) => r.pid)).toEqual([1, 2]);
       for (const r of results) {
         expect(r.error).toMatch(/permission denied/);
-        // `gone` because nothing was OBSERVED to die; `error` is what stops
+        // `gone` because nothing was observed to die; `error` is what stops
         // that reading as "it had already finished".
         expect(r.outcome).toBe('gone');
       }
