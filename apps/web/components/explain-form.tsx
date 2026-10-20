@@ -2,7 +2,6 @@
 
 import { useState, useTransition } from 'react';
 import type { CheckResult, Explanation, IndexAdvice, PlanNode } from '@pgops/checks';
-import { CheckPanel } from './check-panel';
 import { formatCount } from '@/lib/format';
 
 type Answer =
@@ -30,12 +29,26 @@ async function explainStatement(name: string, sql: string): Promise<Answer> {
   }
 }
 
-/** A plan and its index advice, or why there is none. The statement is never echoed here. */
+/**
+ * A plan and its index advice, or why there is none. The statement is never
+ * echoed here. The tool's failure envelope is a check's, so a denied or
+ * broken read is rendered as plainly as a plan.
+ */
 function Shown({ answer }: { answer: Answer }) {
   if (answer.kind === 'error') return <p role="alert" className="text-sm text-destructive">{answer.message}</p>;
+  const r = answer.result;
   return (
-    <CheckPanel title="Plan" result={answer.result}>
-      {(d) => (
+    <section className="py-1">
+      <header className="mb-3 border-b pb-2"><h2 className="font-semibold">Plan</h2></header>
+      {!r.ok ? (
+        <div className="text-sm">
+          <p className="font-medium">Unavailable — {r.reason}</p>
+          <p className="text-muted-foreground">{r.message}</p>
+          {r.remedy ? <pre className="mt-2 overflow-x-auto rounded bg-muted p-2">{r.remedy}</pre> : null}
+        </div>
+      ) : (() => {
+        const d = r.data;
+        return (
         <div className="space-y-4">
           {/* A generic plan estimates for no particular value, so its row counts can differ from one real value's. */}
           {d.parameters > 0 ? (
@@ -52,8 +65,9 @@ function Shown({ answer }: { answer: Answer }) {
             <IndexAdviceList advice={d.advice} />
           </div>
         </div>
-      )}
-    </CheckPanel>
+        );
+      })()}
+    </section>
   );
 }
 

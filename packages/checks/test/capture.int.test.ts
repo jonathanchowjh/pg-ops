@@ -1,7 +1,6 @@
 import pg from 'pg';
 import { describe, expect, inject, it } from 'vitest';
 import { captureOnce } from '../src/capture.js';
-import { readDatabaseSpace, readQueryText } from '../src/store/read.js';
 import { migrate } from '../src/store/schema.js';
 import { withPostgres } from './harness.js';
 
@@ -393,89 +392,6 @@ describe('captureOnce — what it refuses to lie about', () => {
   });
 });
 
-
-describe('readQueryText', () => {
-  /**
-   * `pgops.queries.queryid` is bigint and the caller passes the string out of
-   * the URL, because a 64-bit hash does not survive a JS number. This proves
-   * that comparison against a real server.
-   */
-  it('finds a shape by the queryid string a URL carries', async () => {
-    await withPostgres(async (ctx, pool) => {
-      await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
-      await migrate(pool);
-      const t = `text_probe_${Date.now()}`;
-      await pool.query(`CREATE TABLE ${t} (id int)`);
-      await pool.query(`SELECT id FROM ${t}`);
-      await captureOnce({ ...ctx, store: pool }, 'prod');
-
-      const { rows } = await pool.query<{ queryid: string; query: string }>(
-        `SELECT q.queryid::text AS queryid, q.query
-           FROM pgops.queries q WHERE q.query LIKE $1`,
-        [`%${t}%`],
-      );
-      expect(rows.length).toBeGreaterThan(0);
-      const row = rows[0]!;
-
-      expect(await readQueryText(pool, 'prod', row.queryid)).toBe(row.query);
-    });
-  });
-
-  /** Not an error: a linked statement may have aged out of the retention window. */
-  it('answers null for a shape this database has never captured', async () => {
-    await withPostgres(async (ctx, pool) => {
-      await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
-      await migrate(pool);
-      await captureOnce({ ...ctx, store: pool }, 'prod');
-      expect(await readQueryText(pool, 'prod', '1234567890123456789')).toBeNull();
-      // Scoped to the database it was asked about.
-      expect(await readQueryText(pool, 'no-such-db', '1')).toBeNull();
-    });
-  });
-});
-
-describe('readDatabaseSpace', () => {
-  /**
-   * One row per capture out of a table that holds one row per relation per
-   * capture, so the sum happens in SQL and not over millions of rows in JS.
-   */
-  it('collapses every relation to one total per capture', async () => {
-    await withPostgres(async (ctx, pool) => {
-      await migrate(pool);
-      await pool.query('CREATE TABLE widgets (id int)');
-      await pool.query('CREATE TABLE gadgets (id int)');
-      await captureOnce({ ...ctx, store: pool }, 'prod');
-
-      const from = new Date(Date.now() - 3_600_000);
-      const to = new Date(Date.now() + 3_600_000);
-      const totals = await readDatabaseSpace(pool, 'prod', from, to);
-      expect(totals).toHaveLength(1);
-
-      // The count is the population the total was summed over; together they
-      // tell a dropped relation from a capture that saw less of the database.
-      const { rows } = await pool.query<{ n: string; total: string }>(
-        `SELECT count(*)::text AS n, sum(size_bytes)::text AS total
-           FROM pgops.space_stats`,
-      );
-      expect(totals[0]!.relations).toBe(Number(rows[0]!.n));
-      expect(totals[0]!.sizeBytes).toBe(Number(rows[0]!.total));
-      expect(totals[0]!.relations).toBeGreaterThan(1);
-    });
-  });
-
-  it('answers nothing for another database or a window with no captures', async () => {
-    await withPostgres(async (ctx, pool) => {
-      await migrate(pool);
-      await pool.query('CREATE TABLE widgets (id int)');
-      await captureOnce({ ...ctx, store: pool }, 'prod');
-
-      const wide = { from: new Date(Date.now() - 3_600_000), to: new Date(Date.now() + 3_600_000) };
-      expect(await readDatabaseSpace(pool, 'other', wide.from, wide.to)).toEqual([]);
-      const past = new Date(Date.now() - 86_400_000);
-      expect(await readDatabaseSpace(pool, 'prod', past, new Date(Date.now() - 82_800_000))).toEqual([]);
-    });
-  });
-});
 
 /** The two properties of the load row only a real store can show; its arithmetic is in capture.test.ts. */
 describe('captureOnce and the load series', () => {

@@ -12,13 +12,13 @@ export interface TickState {
   startedAt: number | null;
 }
 
-export type TickDecision = { act: 'skip' } | { act: 'refresh' };
+type TickDecision = { act: 'skip' } | { act: 'refresh' };
 
 /**
  * How far the reader may scroll before the poll holds. Not zero: a resting
  * trackpad reports one or two pixels of travel that nobody intended.
  */
-export const HOLD_ABOVE_PX = 8;
+const HOLD_ABOVE_PX = 8;
 
 /**
  * Whether a tick should hold because the operator has scrolled away from the

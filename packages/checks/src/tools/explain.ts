@@ -58,7 +58,7 @@ const STRUCTURAL = new Set([
 const PRIVILEGE_HINT = ' Planning checks SELECT on every table a statement names, though it reads no rows: '
   + 'the pgops role needs SELECT on those tables, or pg_read_all_data for all of them.';
 
-export interface PlanOpts {
+interface PlanOpts {
   /** How long a PREPARE may wait for a table's lock. The scheduler passes 100: it must never queue behind a migration. */
   lockTimeoutMs?: number;
   /** How long one plan may take. The scheduler passes 1000: nobody is waiting on its plans. */

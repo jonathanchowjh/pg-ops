@@ -1,35 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { guardClient, messageOf } from '../run.js';
 import type { CheckContext, FailureReason } from '../types.js';
-import { upsertDatabase } from './write.js';
-
-/**
- * A fixed key for the migration lock. Arbitrary, but it must never change:
- * two pgops versions racing to migrate the same store have to contend on the
- * same key or the lock does nothing.
- */
-export const MIGRATION_LOCK_KEY = 4021975;
-
-/**
- * Namespace for per-database capture locks, used with the two-int form
- * `pg_try_advisory_lock(ns, database_id)` so a capture lock can never collide
- * with the single-int migration lock above.
- */
-export const CAPTURE_LOCK_NS = 4021976;
-
-/**
- * Namespace for the per-database sample lock, taken for one transaction:
- * two writers of one database's adjacent buckets each recompute the minute
- * from what the other has committed, never from a snapshot that misses it.
- */
-export const SAMPLE_LOCK_NS = 4021978;
-
-/**
- * Namespace for the per-database health lock. Separate from the capture
- * lock: the five-minute capture can hold its lock for a long time, and a
- * health tick that shared it would skip every minute the capture ran.
- */
-export const HEALTH_LOCK_NS = 4021977;
+import { CAPTURE_LOCK_NS, upsertDatabase } from './write.js';
 
 /**
  * Run `fn` holding a session-level advisory lock, on one dedicated client.
@@ -87,8 +59,8 @@ export async function releaseCaptureLock(
     .catch(() => {});
 }
 
-export type CaptureFailure = { ok: false; reason: FailureReason; message: string };
-export type CaptureSkip = { ok: 'skipped'; reason: 'locked' };
+type CaptureFailure = { ok: false; reason: FailureReason; message: string };
+type CaptureSkip = { ok: 'skipped'; reason: 'locked' };
 
 /**
  * The shell every capture shares: one store client, this database's id, and

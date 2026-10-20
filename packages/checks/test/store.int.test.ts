@@ -4,13 +4,13 @@ import { CURRENT_VERSION, migrate } from '../src/store/schema.js';
 import { SQL as M003 } from '../src/store/migrations/003-check-results.js';
 import { SQL as M007 } from '../src/store/migrations/007-captured.js';
 import { SQL as M008 } from '../src/store/migrations/008-drop-check-results.js';
-import { HEALTH_LOCK_NS, releaseCaptureLock, tryCaptureLock, withAdvisoryLock } from '../src/store/lock.js';
+import { releaseCaptureLock, tryCaptureLock, withAdvisoryLock } from '../src/store/lock.js';
 import {
-  HEALTH_COLUMNS, RETENTION, healthIsFresh, insertHealth, insertQueryLoad, insertQueryStats, insertSpaceStats, prune,
+  HEALTH_COLUMNS, HEALTH_LOCK_NS, RETENTION, healthIsFresh, insertHealth, insertQueryLoad, insertQueryStats, insertSpaceStats, prune,
   upsertDatabase, upsertQueries, type HealthRow,
 } from '../src/store/write.js';
 import {
-  readQueryStats, readRelationSpace, readSpaceGrowth, readWindowStats,
+  readHealth, readRelationSpace, readWindowStats,
 } from '../src/store/read.js';
 import { withPostgres } from './harness.js';
 
@@ -339,44 +339,6 @@ describe('store writes at scale', () => {
   });
 });
 
-describe('readQueryStats bounds', () => {
-  it('returns only the N most recent captures, and only the shapes asked for', async () => {
-    await withPostgres(async (_ctx, pool) => {
-      await migrate(pool);
-      const client = await pool.connect();
-      try {
-        const db = await upsertDatabase(client, 'prod');
-        const a = (await upsertQueries(client, db, [{ queryid: '111', query: 'SELECT a' }])).get('111')!;
-        const b = (await upsertQueries(client, db, [{ queryid: '222', query: 'SELECT b' }])).get('222')!;
-        const base = Date.now();
-        const at = (i: number) => new Date(base - i * 60_000);
-        await insertQueryStats(client, [0, 1, 2, 3].flatMap((i) =>
-          [a, b].map((queryId) => ({
-            databaseId: db, queryId, capturedAt: at(i), calls: 10 * (4 - i),
-            totalExecTime: 1, rows: 1, sharedBlksHit: 1, sharedBlksRead: 0,
-            statsReset: null,
-          }))));
-
-        const all = await readQueryStats(client, 'prod', at(9), new Date(base));
-        expect(all).toHaveLength(2);
-        expect(all[0]!.points).toHaveLength(4);
-
-        // The queries page reads this way: two captures, and only the shapes
-        // it is about to render.
-        const bounded = await readQueryStats(client, 'prod', at(9), new Date(base),
-          { maxSnapshots: 2, queryids: ['111'] });
-        expect(bounded).toHaveLength(1);
-        expect(bounded[0]!.queryid).toBe('111');
-        expect(bounded[0]!.points).toHaveLength(2);
-
-        // An empty shape list means "nothing to ask about", not "no filter".
-        expect(await readQueryStats(client, 'prod', at(9), new Date(base),
-          { queryids: [] })).toEqual([]);
-      } finally { client.release(); }
-    });
-  });
-});
-
 describe('readWindowStats', () => {
   const at = (min: number) => new Date(Date.parse('2026-10-12T08:00:00Z') + min * 60_000);
 
@@ -512,87 +474,6 @@ describe('upsertQueries', () => {
   });
 });
 
-describe('readSpaceGrowth', () => {
-  it('reports growth between the first and last capture in the window, per relation', async () => {
-    await withStore(async (store) => {
-      const dbId = await upsertDatabase(store, 'growthdb');
-      const t0 = new Date('2026-09-01T00:00:00Z');
-      const t1 = new Date('2026-09-04T00:00:00Z');
-      const t2 = new Date('2026-09-07T00:00:00Z');
-      await insertSpaceStats(store, [
-        { databaseId: dbId, relation: 'public.grew',   capturedAt: t0, sizeBytes: 1_000 },
-        { databaseId: dbId, relation: 'public.grew',   capturedAt: t1, sizeBytes: 4_000 },
-        { databaseId: dbId, relation: 'public.grew',   capturedAt: t2, sizeBytes: 9_000 },
-        { databaseId: dbId, relation: 'public.shrank', capturedAt: t0, sizeBytes: 8_000 },
-        { databaseId: dbId, relation: 'public.shrank', capturedAt: t2, sizeBytes: 2_000 },
-        { databaseId: dbId, relation: 'public.once',   capturedAt: t2, sizeBytes: 500 },
-      ]);
-
-      const rows = await readSpaceGrowth(store, 'growthdb', t0, t2);
-      const by = new Map(rows.map((r) => [r.relation, r]));
-
-      expect(by.get('public.grew')).toMatchObject({
-        firstBytes: 1_000, lastBytes: 9_000, points: 3,
-      });
-      expect(by.get('public.shrank')).toMatchObject({
-        firstBytes: 8_000, lastBytes: 2_000, points: 2,
-      });
-      // One capture is not zero growth; `points: 1` is what lets the page say
-      // "not enough history".
-      expect(by.get('public.once')).toMatchObject({
-        firstBytes: 500, lastBytes: 500, points: 1,
-      });
-      // The fastest-growing relation leads.
-      expect(rows[0]!.relation).toBe('public.grew');
-    });
-  });
-
-  it('excludes captures outside the window rather than clamping to it', async () => {
-    await withStore(async (store) => {
-      const dbId = await upsertDatabase(store, 'windowdb');
-      const before = new Date('2026-08-01T00:00:00Z');
-      const from = new Date('2026-09-01T00:00:00Z');
-      const to = new Date('2026-09-07T00:00:00Z');
-      await insertSpaceStats(store, [
-        { databaseId: dbId, relation: 'public.t', capturedAt: before, sizeBytes: 1 },
-        { databaseId: dbId, relation: 'public.t', capturedAt: from,   sizeBytes: 100 },
-        { databaseId: dbId, relation: 'public.t', capturedAt: to,     sizeBytes: 300 },
-      ]);
-
-      const rows = await readSpaceGrowth(store, 'windowdb', from, to);
-
-      // firstBytes 100, not 1: a reader that ignored `from` would start from
-      // the August capture.
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!).toMatchObject({ firstBytes: 100, lastBytes: 300, points: 2 });
-    });
-  });
-
-  it('reads only the database it was asked for', async () => {
-    await withStore(async (store) => {
-      const mine = await upsertDatabase(store, 'mine');
-      const other = await upsertDatabase(store, 'other');
-      const earlier = new Date('2026-08-30T00:00:00Z');
-      const at = new Date('2026-09-01T00:00:00Z');
-      await insertSpaceStats(store, [
-        { databaseId: mine,  relation: 'public.t', capturedAt: at,      sizeBytes: 10 },
-        // The other database shares the relation name and captures it at a
-        // different instant. With same-instant fixtures a bounds aggregate
-        // that forgot to filter by database returns the same min and max;
-        // staggered, it reports first_at = 2026-08-30, where our database
-        // has no capture, and `public.t` disappears from the result.
-        { databaseId: other, relation: 'public.t', capturedAt: earlier, sizeBytes: 999 },
-        { databaseId: other, relation: 'public.t', capturedAt: at,      sizeBytes: 999 },
-      ]);
-
-      const rows = await readSpaceGrowth(store, 'mine', earlier, at);
-
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!).toMatchObject({ lastBytes: 10, points: 1 });
-    });
-  });
-});
-
 describe('readRelationSpace', () => {
   it('reads one relation\u2019s sizes in order, oldest first', async () => {
     await withStore(async (store) => {
@@ -638,7 +519,56 @@ function blankHealth(over: Partial<HealthRow> = {}): HealthRow {
   return { ...row, ...over };
 }
 
+describe('readHealth', () => {
+  const T0 = Date.UTC(2026, 9, 20, 8, 0, 0);
+  /** A stored minute with the few columns the clock reads, the rest null. */
+  const stored = async (client: PoolClient, id: number, i: number, over: Record<string, unknown> = {}) => {
+    const cols = { server_connections: 20, max_connections: 97, deadlocks: '0', xact_commit: '100', replication_lag_bytes: '0', ...over };
+    await client.query(
+      `INSERT INTO pgops.health_stats (database_id, captured_at, ${Object.keys(cols).join(', ')})
+       VALUES ($1, $2, ${Object.keys(cols).map((_, k) => `$${k + 3}`).join(', ')})`,
+      [id, new Date(T0 + i * 60_000), ...Object.values(cols)],
+    );
+  };
+
+  it('reads the window\'s minutes as numbers, with the one minute before it', async () => {
+    await withStore(async (client) => {
+      const id = await upsertDatabase(client, 'prod');
+      const other = await upsertDatabase(client, 'other');
+      for (let i = 0; i < 6; i += 1) await stored(client, id, i, { server_connections: 10 + i });
+      await stored(client, other, 3, { server_connections: 99 });
+      const minutes = await readHealth(client, 'prod', new Date(T0 + 2 * 60_000 + 1), new Date(T0 + 5 * 60_000));
+      expect(minutes.map((m) => [m.at, m.serverConnections])).toEqual([
+        [T0 + 2 * 60_000, 12], [T0 + 3 * 60_000, 13], [T0 + 4 * 60_000, 14],
+      ]);
+      expect(minutes[0]).toMatchObject({ maxConnections: 97, deadlocks: 0, commits: 100, lagBytes: 0, lagSecs: null, xidAge: null, statsReset: null });
+      expect(typeof minutes[0]!.commits).toBe('number');
+    });
+  });
+
+  it('starts at the window when no minute precedes it, and is empty for a database with none', async () => {
+    await withStore(async (client) => {
+      const id = await upsertDatabase(client, 'prod');
+      await stored(client, id, 1);
+      await stored(client, id, 2);
+      expect((await readHealth(client, 'prod', new Date(T0), new Date(T0 + 3 * 60_000))).map((m) => m.at))
+        .toEqual([T0 + 60_000, T0 + 2 * 60_000]);
+      expect(await readHealth(client, 'nope', new Date(T0), new Date(T0 + 3 * 60_000))).toEqual([]);
+    });
+  });
+});
+
 describe('health_stats', () => {
+  it('has the lag in bytes beside the seconds, from migration 010', async () => {
+    await withStore(async (client) => {
+      const { rows } = await client.query<{ data_type: string }>(
+        `SELECT data_type FROM information_schema.columns
+          WHERE table_schema = 'pgops' AND table_name = 'health_stats' AND column_name = 'replication_lag_bytes'`);
+      expect(rows.map((r) => r.data_type)).toEqual(['numeric']);
+      expect(HEALTH_COLUMNS).toContain('replication_lag_bytes');
+    });
+  });
+
   it('stores a row whose every column is null, because null is not zero', async () => {
     await withPostgres(async (_ctx, pool) => {
       await migrate(pool);
@@ -680,12 +610,12 @@ describe('health_stats', () => {
       try {
         const id = await upsertDatabase(client, 'prod');
         await client.query(
-          `INSERT INTO pgops.health_stats (database_id, captured_at, blocked)
+          `INSERT INTO pgops.health_stats (database_id, captured_at, connections)
            VALUES ($1, now() - interval '91 days', 1), ($1, now() - interval '89 days', 2)`, [id]);
-        await insertHealth(client, id, blankHealth({ blocked: 3 }), 90);
-        const { rows } = await client.query<{ blocked: number }>(
-          'SELECT blocked FROM pgops.health_stats WHERE database_id = $1 ORDER BY captured_at', [id]);
-        expect(rows.map((r) => r.blocked)).toEqual([2, 3]);
+        await insertHealth(client, id, blankHealth({ connections: 3 }), 90);
+        const { rows } = await client.query<{ connections: number }>(
+          'SELECT connections FROM pgops.health_stats WHERE database_id = $1 ORDER BY captured_at', [id]);
+        expect(rows.map((r) => r.connections)).toEqual([2, 3]);
       } finally {
         client.release();
       }

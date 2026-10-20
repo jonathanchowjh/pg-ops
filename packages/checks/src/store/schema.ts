@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
-import { MIGRATION_LOCK_KEY, withAdvisoryLock } from './lock.js';
+import { withAdvisoryLock } from './lock.js';
+import { MIGRATION_LOCK_KEY } from './write.js';
 import { SQL as M001 } from './migrations/001-initial.js';
 import { SQL as M002 } from './migrations/002-query-stats-query-id.js';
 import { SQL as M003 } from './migrations/003-check-results.js';
@@ -9,12 +10,14 @@ import { SQL as M006 } from './migrations/006-samples.js';
 import { SQL as M007 } from './migrations/007-captured.js';
 import { SQL as M008 } from './migrations/008-drop-check-results.js';
 import { SQL as M009 } from './migrations/009-shapes.js';
+import { SQL as M010 } from './migrations/010-lag-bytes.js';
+import { SQL as M011 } from './migrations/011-health-lean.js';
 
 /**
  * Forward-only, numbered, idempotent. Every entry must be safe to run
  * against a store already at that version.
  */
-const MIGRATIONS: readonly string[] = [M001, M002, M003, M004, M005, M006, M007, M008, M009];
+const MIGRATIONS: readonly string[] = [M001, M002, M003, M004, M005, M006, M007, M008, M009, M010, M011];
 
 /** The version this build knows how to produce. */
 export const CURRENT_VERSION = MIGRATIONS.length;

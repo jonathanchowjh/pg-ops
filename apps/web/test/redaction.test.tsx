@@ -32,7 +32,7 @@ describe('Sql', () => {
   });
 
   /**
-   * `ui/table`'s TableCell sets `whitespace-nowrap`, which inherits into a
+   * The list cells set `whitespace-nowrap`, which inherits into a
    * statement rendered inside one: it cannot wrap, `line-clamp-2` has no
    * second line, and the text is clipped mid-token with no ellipsis. jsdom
    * computes no layout, so this only holds that the element declares its own

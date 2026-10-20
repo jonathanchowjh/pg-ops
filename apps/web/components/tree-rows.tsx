@@ -11,6 +11,9 @@ import { readingAt, stripPaths, type Tie } from '@/lib/rows';
 import { unseenAt, type SessionNode, type Span, type StatementNode, type Strip, type TableFact, type TableNode } from '@/lib/tree';
 import { cn } from '@/lib/utils';
 
+/** A readout's number: right-aligned in a fixed width, so a column of them lines up. */
+export const NUM = 'mr-1.5 inline-block min-w-10 text-right font-mono';
+
 /** A row is exactly this tall: the ties are drawn from row numbers. */
 export const ROW_PX = 34;
 
@@ -40,7 +43,7 @@ export const CLASS_BG: Record<(typeof CLASSES)[number], string> = {
   cpu: 'bg-class-cpu', io: 'bg-class-io', idle: 'bg-class-idle', other: 'bg-class-other', lock: 'bg-class-lock',
 };
 
-const ROW = 'grid h-[34px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t';
+const ROW = 'grid h-[34px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset';
 const LABEL = 'flex min-w-0 items-center gap-[7px] self-stretch px-2.5 whitespace-nowrap';
 const LEVEL = ['', 'pl-[30px] max-md:pl-4', 'pl-12 max-md:pl-6'] as const;
 /** The label cell as the row's one link. */
@@ -51,6 +54,19 @@ const QUIET = 'text-muted-foreground';
 const TAG = 'flex-none rounded-[3px] px-1.5 text-[11px]/4 text-warning-ink shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--warning-ink)_35%,transparent)] max-md:hidden';
 const CARET = 'w-3.5 flex-none p-0 text-[11px] text-muted-foreground';
 const TRACK = 'h-[34px] border-l py-[3px]';
+
+/** The five classes, as the key of rows with no band above them to be one. Sits in a header row's time cell. */
+export function ClassKey() {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 self-stretch border-l px-2.5">
+      {CLASSES.map((c) => (
+        <span key={c} className="flex items-center gap-1.5">
+          <i aria-hidden className={cn('size-2 rounded-xs', CLASS_BG[c])} />{CLASS_NAMES[c]}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 /** The stretches nobody sampled, hatched over a strip or a panel. */
 export function Unseen({ seen }: { seen: readonly number[] }) {
@@ -66,6 +82,7 @@ export function Unseen({ seen }: { seen: readonly number[] }) {
       {runs.map(([a, b]) => (
         <i
           key={a}
+          data-unseen
           aria-hidden
           className="pointer-events-none absolute inset-y-0 bg-[repeating-linear-gradient(135deg,var(--border)_0_1px,transparent_1px_6px)]"
           style={{ left: `${(a / seen.length) * 100}%`, width: `${((b - a) / seen.length) * 100}%` }}
@@ -92,10 +109,10 @@ export function reading(name: ReactNode, strip: Strip, col: number, unseen = fal
   return (
     <>
       {' '}{name}
-      <br /><b className="mr-1.5 inline-block min-w-10 text-right font-mono">{r.total.toFixed(1)}</b>sessions not idle
+      <br /><b className={NUM}>{r.total.toFixed(1)}</b>sessions not idle
       {CLASSES.map((c, i) => (r.byClass[i]! > 0.05 ? (
         <span key={c}>
-          <br /><b className="mr-1.5 inline-block min-w-10 text-right font-mono">{r.byClass[i]!.toFixed(1)}</b>
+          <br /><b className={NUM}>{r.byClass[i]!.toFixed(1)}</b>
           <i className={cn('mr-1.5 inline-block size-2 rounded-xs align-middle', CLASS_BG[c])} />{CLASS_NAMES[c]}
         </span>
       ) : null))}
@@ -123,7 +140,7 @@ export function TableRow({ table, none, ctx, onFold }: { table: TableNode; none:
     </>
   );
   return (
-    <div role="row" aria-level={1} className={cn(ROW, 'bg-muted/50')}>
+    <div role="row" tabIndex={-1} aria-level={1} className={cn(ROW, 'bg-muted/50')}>
       <div role="rowheader" className={LABEL}>
         <button type="button" className={CARET} aria-expanded={table.open} aria-label={`Fold ${name}`} onClick={onFold}>
           {table.open ? '▾' : '▸'}
@@ -174,7 +191,7 @@ export function StatementRow({ statement, table, level = 1, ctx }: {
     </>
   );
   return (
-    <div role="row" aria-level={level + 1} className={ROW}>
+    <div role="row" tabIndex={-1} aria-level={level + 1} className={ROW}>
       <div role="rowheader" className={cn(LABEL, LEVEL[level])}>
         {hasPage(statement.key)
           ? <Link href={`/db/${ctx.database}/queries/${encodeURIComponent(statement.key)}`} className={GO}>{inner}</Link>
@@ -200,7 +217,7 @@ export function SessionRow({ session, first, level = 2, ctx }: {
   const waiting = now?.cls === 'lock' && now.blockedBy !== null;
   return (
     <div
-      role="row"
+      role="row" tabIndex={-1}
       aria-level={level + 1}
       id={first ? `pid-${session.pid}` : undefined}
       className={cn(ROW, 'scroll-mt-28 target:bg-warning-surface', now === undefined && '[&>[role=rowheader]>*]:opacity-40')}
@@ -272,7 +289,7 @@ export function MoreRow({ level, count, what, statement, ctx, href }: {
 }) {
   const text = `+ ${formatCount(count)} more${what === 'sessions' ? '' : ` ${what}`}`;
   return (
-    <div role="row" aria-level={level + 1} className={ROW}>
+    <div role="row" tabIndex={-1} aria-level={level + 1} className={ROW}>
       <div role="rowheader" className={cn(LABEL, LEVEL[level], QUIET)}>
         {href !== undefined
           ? <Link href={href} className={GO}>{text}</Link>
@@ -287,7 +304,7 @@ export function MoreRow({ level, count, what, statement, ctx, href }: {
 
 export function QuietRow({ count, open, onFold }: { count: number; open: boolean; onFold: () => void }) {
   return (
-    <div role="row" aria-level={1} className={ROW}>
+    <div role="row" tabIndex={-1} aria-level={1} className={ROW}>
       <div role="rowheader" className={cn(LABEL, QUIET)}>
         <button type="button" className={CARET} aria-expanded={open} aria-label="Fold quiet tables" onClick={onFold}>
           {open ? '▾' : '▸'}
@@ -301,7 +318,7 @@ export function QuietRow({ count, open, onFold }: { count: number; open: boolean
 
 export function QuietTableRow({ fact, ctx }: { fact: TableFact; ctx: RowContext }) {
   return (
-    <div role="row" aria-level={2} className={ROW}>
+    <div role="row" tabIndex={-1} aria-level={2} className={ROW}>
       <div role="rowheader" className={cn(LABEL, 'pl-[31px] max-md:pl-4')}>
         <EntityLink database={ctx.database} name={fact.name} className={GO}>
           <span className="truncate font-mono text-[13px] text-body">{fact.name}</span>

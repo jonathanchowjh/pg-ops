@@ -43,7 +43,6 @@ SELECT current_setting('max_connections')::int AS max_connections,
 
 export const connections: Check<ConnectionsRow, ConnectionsData> = {
   id: 'connections',
-  gate: 'connect',
   home: 'server',
   title: 'Connection headroom',
   class: 'live',
@@ -102,9 +101,9 @@ export interface ConnectionDetailRow {
   total_matching: number;
 }
 
-export type SslStatus = 'SSL' | 'No SSL' | 'Socket' | 'Internal Process' | 'Unknown';
+type SslStatus = 'SSL' | 'No SSL' | 'Socket' | 'Internal Process' | 'Unknown';
 
-export interface ConnectionSource {
+interface ConnectionSource {
   database: string | null;
   user: string | null;
   source: string | null;
@@ -168,7 +167,6 @@ LIMIT $1`;
 
 export const connectionDetail: Check<ConnectionDetailRow, ConnectionDetailData, ConnectionDetailOpts> = {
   id: 'connectionDetail',
-  gate: 'connect',
   home: 'server',
   title: 'Connections',
   class: 'live',

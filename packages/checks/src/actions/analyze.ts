@@ -3,7 +3,7 @@ import { guardClient, messageOf, ownSql } from '../run.js';
 import { visibleSchemas } from '../checks/shared.js';
 import { audited } from './audited.js';
 
-export interface AnalyzeResult {
+interface AnalyzeResult {
   /** Schema-qualified and already quoted, exactly as issued. */
   relation: string;
   ok: boolean;
@@ -11,9 +11,9 @@ export interface AnalyzeResult {
 }
 
 /** How many tables one call analyzes when the caller names neither a limit nor a table. */
-export const ANALYZE_DEFAULT_TABLES = 50;
+const ANALYZE_DEFAULT_TABLES = 50;
 
-export interface AnalyzeOpts {
+interface AnalyzeOpts {
   /**
    * Skip tables smaller than this. Compared against the planner's `relpages`
    * estimate of the main heap, so a table never yet analyzed reads as 0 and

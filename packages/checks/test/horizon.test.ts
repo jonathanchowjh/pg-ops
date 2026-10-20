@@ -3,11 +3,11 @@ import { horizon, type HorizonRow } from '../src/checks/horizon.js';
 
 const t = horizon.thresholds!;
 const holder = (over: Partial<import('../src/checks/horizon.js').HorizonHolder> = {}) => ({
-  kind: 'backend' as const, who: '4021', xminAge: 1, ageSecs: 60, detail: 'app · idle in transaction', ...over,
+  kind: 'backend' as const, who: '4021', xminAge: 1, ageSecs: 60, detail: 'app · idle in transaction', backendStart: '2026-10-20 08:00:00+00', waiting: false, ...over,
 });
 
 const hzRow = (over: Partial<HorizonRow> = {}): HorizonRow => ({
-  kind: 'backend', who: '1', xmin_age: 1, age_secs: null, detail: 'x · unknown', total: 1, ...over,
+  kind: 'backend', who: '1', xmin_age: 1, age_secs: null, detail: 'x · unknown', backend_start: '2026-10-20 08:00:00+00', waiting: false, total: 1, ...over,
 });
 
 /**

@@ -179,7 +179,7 @@ const OUTCOMES = {
   },
 } satisfies Record<string, (result: unknown) => string>;
 
-export type ConfirmOutcome = keyof typeof OUTCOMES;
+type ConfirmOutcome = keyof typeof OUTCOMES;
 
 export function ConfirmAction({
   label,

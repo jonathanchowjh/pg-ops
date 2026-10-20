@@ -1,3 +1,4 @@
+import { round2 } from './format';
 import { FOLD_NONE, type SessionNode, type StatementNode, type Strip, type TableFact, type TableNode, type Tree } from './tree';
 
 /**
@@ -6,7 +7,7 @@ import { FOLD_NONE, type SessionNode, type StatementNode, type Strip, type Table
  * SVG paths. The components render these and decide nothing.
  */
 
-export type FlatRow =
+type FlatRow =
   | { kind: 'table'; id: string; table: TableNode; none: boolean }
   | { kind: 'statement'; id: string; level: 0 | 1; statement: StatementNode; table: string | null }
   | { kind: 'session'; id: string; level: 0 | 1 | 2; session: SessionNode; statement: string }
@@ -106,7 +107,6 @@ export function tiesOf(rows: readonly FlatRow[], tree: Pick<Tree, 'from' | 'to'>
   return out;
 }
 
-const r2 = (n: number): number => Math.round(n * 100) / 100;
 
 /**
  * A strip as one SVG path per class, in a box `strip.length` wide and 100
@@ -125,7 +125,7 @@ export function stripPaths(strip: Strip, scale: number, floor = 0.07): string[] 
       const h = Math.min(y, ((v * lift) / scale) * 100);
       if (h <= 0) return;
       y -= h;
-      d[i] += `M${c} ${r2(y)}h1v${r2(h)}h-1z`;
+      d[i] += `M${c} ${round2(y)}h1v${round2(h)}h-1z`;
     });
   });
   return d;

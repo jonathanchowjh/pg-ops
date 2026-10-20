@@ -131,10 +131,12 @@ describe('captureHealth, with a real standby', () => {
     });
     expect(row.replication_lag_secs).not.toBeNull();
     expect(row.replication_lag_secs).toBeGreaterThanOrEqual(0);
+    // Received against replayed: a number on a standby, however caught up.
+    expect(row.replication_lag_bytes).not.toBeNull();
+    expect(Number(row.replication_lag_bytes)).toBeGreaterThanOrEqual(0);
     expect(row.connections).toBeGreaterThan(0);
     expect(Number(row.size_bytes)).toBeGreaterThan(0);
     expect(Number(row.xid_age)).toBeGreaterThan(0);
-    expect(row.blocked).toBe(0);
     expect(row.wal_bytes).not.toBeNull();
   });
 });

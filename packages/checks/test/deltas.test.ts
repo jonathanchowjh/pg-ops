@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { deltas, historicalQueryStats, type CounterPoint } from '../src/series/query-stats.js';
+import { deltas, type CounterPoint } from '../src/series/query-stats.js';
+import { relationSpace } from '../src/series/space.js';
 import { runSeries } from '../src/run.js';
 import type { CheckContext } from '../src/types.js';
 
@@ -70,49 +71,12 @@ describe('runSeries’ arity is part of its type (I4)', () => {
   it('rejects an options-bearing series called without its options, at compile time', () => {
     const neverCalled = async (ctx: CheckContext): Promise<void> => {
       const range = { from: new Date(0), to: new Date() };
-      // @ts-expect-error — historicalQueryStats declares HistoricalQueryStatsOpts.
-      await runSeries(ctx, historicalQueryStats, range);
+      // @ts-expect-error — relationSpace declares its options.
+      await runSeries(ctx, relationSpace, range);
       // ...and supplying them still does.
-      await runSeries(ctx, historicalQueryStats, range, { databaseName: 'prod' });
+      await runSeries(ctx, relationSpace, range, { databaseName: 'prod', relation: 'public.t' });
     };
     expect(typeof neverCalled).toBe('function');
   });
 });
 
-/**
- * Catches `historicalQueryStats.read` dropping its bounds on the way to
- * `readQueryStats`, which makes the queries page read every snapshot for
- * every shape on every render. Asserts on the bound parameters, so it needs
- * no database; `series.int.test.ts` holds the behavioural half.
- */
-describe('historicalQueryStats forwards its read bounds to the store', () => {
-  it('passes maxSnapshots and queryids through to the query', async () => {
-    const values: unknown[][] = [];
-    const store = {
-      query: async (_text: string, v: unknown[]) => { values.push(v); return { rows: [] }; },
-    } as never;
-    const ctx = { target: {}, store, serverVersion: 170000 } as unknown as CheckContext;
-
-    await historicalQueryStats.read(
-      ctx, { from: new Date(0), to: new Date() },
-      { databaseName: 'prod', maxSnapshots: 2, queryids: ['111', '222'] },
-    );
-
-    expect(values).toHaveLength(1);
-    // 'prod', from, to, then the two bounds — in the order read.ts pushes them.
-    expect(values[0]).toEqual(['prod', expect.any(Date), expect.any(Date), 2, ['111', '222']]);
-  });
-
-  it('sends no bounds when the caller asks for none', async () => {
-    const values: unknown[][] = [];
-    const store = {
-      query: async (_text: string, v: unknown[]) => { values.push(v); return { rows: [] }; },
-    } as never;
-    const ctx = { target: {}, store, serverVersion: 170000 } as unknown as CheckContext;
-
-    await historicalQueryStats.read(
-      ctx, { from: new Date(0), to: new Date() }, { databaseName: 'prod' },
-    );
-    expect(values[0]).toHaveLength(3);
-  });
-});

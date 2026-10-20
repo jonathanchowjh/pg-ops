@@ -1,3 +1,8 @@
+import type { IdentityData } from '@pgops/checks';
+
+/** Two decimals: a path or a style with more is noise, and the browser keeps fewer. */
+export const round2 = (n: number): number => Math.round(n * 100) / 100;
+
 /**
  * Hours drop seconds because a 27-hour transaction's second count is noise,
  * and the column it sits in is narrow.
@@ -108,9 +113,19 @@ export function formatUnit(unit: Unit, v: number): string {
 }
 
 /**
- * A chart's time label. UTC and fixed-width, so the server and the browser
- * print the same string and a URL shared between time zones means one thing.
+ * The server's own account of itself on one line: its database, its user,
+ * its version, its SSL state, and "replica" when it is one. Each unknown is
+ * said as unknown: `SSL unknown` is neither `SSL` nor `no SSL`. Null is a
+ * server that did not answer at all, and the line still renders.
  */
-export function formatUtc(ms: number): string {
-  return new Date(ms).toISOString().slice(5, 16).replace('T', ' ');
+export function identityLine(d: IdentityData | null): string {
+  if (d === null) return 'identity unavailable';
+  return [
+    d.database ?? 'unknown database',
+    d.user ?? 'unknown user',
+    d.serverVersion === null ? 'unknown version' : `PG ${d.serverVersion}`,
+    d.ssl === null ? 'SSL unknown' : d.ssl ? 'SSL' : 'no SSL',
+    // Only the affirmative and the unknown render. A primary is the unremarkable case.
+    ...(d.replica === null ? ['replica unknown'] : d.replica ? ['replica'] : []),
+  ].join(' · ');
 }

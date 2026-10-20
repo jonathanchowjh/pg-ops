@@ -16,7 +16,6 @@ const LIB = fileURLToPath(new URL('../lib', import.meta.url));
 // directly in apps/web/ (`proxy.ts`, which runs on every request) without
 // re-walking the roots above or `test/`, which does not ship.
 const WEB_ROOT = fileURLToPath(new URL('..', import.meta.url));
-const OVERVIEW = join(APP, 'page.tsx');
 const SQL_COMPONENT = join(COMPONENTS, 'sql.tsx');
 
 function walk(dir: string): string[] {
@@ -278,25 +277,27 @@ describe('the refresh ticker', () => {
   });
 });
 
-describe('the overview covers every live check', () => {
-  /** Read where it is shown: on Cleanup until Server takes it in Stage 3. The fleet page never showed it. */
-  const NOT_ON_THE_FLEET = ['settings'];
-
+describe('screen-reader tables', () => {
   /**
-   * Catches a live check added to `CHECKS` but not to the overview, which
-   * calls each check explicitly to keep `runCheckFor`'s overloads under the
-   * compiler. The page's list is read from its source: a Next page module
-   * may only export the fields Next knows about.
+   * A table ignores the width and overflow `sr-only` sets, so a hidden table
+   * of a panel's numbers lays out at full width and, measured on Server at
+   * 390 px, scrolls the page sideways. It goes inside a block that carries
+   * the class.
    */
-  it('runs every check the registry classes as live', () => {
-    const source = strip(readFileSync(OVERVIEW, 'utf8'));
-    const called = new Set(
-      [...source.matchAll(/runCheckFor\s*\(\s*name\s*,\s*CHECKS\.(\w+)/g)].map((m) => m[1]!),
-    );
-    const live = Object.entries(CHECKS)
-      .filter(([id, c]) => c.class === 'live' && !NOT_ON_THE_FLEET.includes(id))
-      .map(([id]) => id);
-    expect([...live].sort()).toEqual([...called].sort());
+  it('puts no sr-only class on a table itself', () => {
+    const offenders = sources(COMPONENTS).filter((f) => /<table\b[^>]*\bsr-only\b/.test(strip(readFileSync(f, 'utf8'))));
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe('one home per setting', () => {
+  /** A second copy of an hour is a second place to change it, and the copies drift. */
+  it('defines the clock\'s units only in lib/clock.ts', () => {
+    const home = join(LIB, 'clock.ts');
+    const offenders = [APP, COMPONENTS, LIB].flatMap(sources)
+      .filter((f) => f !== home && /\bconst (HOUR_MS|DAY_MS|MINUTE_MS)\b/.test(strip(readFileSync(f, 'utf8'))))
+      .map((f) => f.slice(WEB_ROOT.length));
+    expect(offenders).toEqual([]);
   });
 });
 
@@ -341,38 +342,27 @@ describe('the poll boundary', () => {
     // A node's page polls: the sessions on it are live. Its catalog comes through lib/catalog.ts.
     join(APP, 'db', '[name]', 'tables', '[relation]', 'page.tsx'),
     join(APP, 'db', '[name]', 'queries', '[queryid]', 'page.tsx'),
-    // Deliberate: /cleanup renders wraparound, replicationLag and slots, all
-    // `class: 'live'`.
-    join(APP, 'db', '[name]', 'cleanup', 'page.tsx'),
+    // Who holds the connections and what holds the horizon are live.
+    join(APP, 'db', '[name]', 'server', 'page.tsx'),
   ];
 
-  /**
-   * The overview polls, but not at the incident cadence: `worstVerdict` runs
-   * sixteen checks per database, for every configured database.
-   */
-  const OVERVIEW = join(APP, 'page.tsx');
+  /** The fleet polls at the sample cadence and reads the store only, so its tick costs the monitored databases nothing. */
+  const FLEET = join(APP, 'page.tsx');
 
-  /**
-   * The fleet health page polls at the capture cadence and reads the store
-   * only, so its tick costs the monitored databases nothing.
-   */
-  const FLEET_HEALTH = join(APP, 'health', 'page.tsx');
-
-  it('renders <Refresh> in exactly the incident pages and the overview', () => {
+  it('renders <Refresh> in exactly the incident pages and the fleet', () => {
     const polling = sources(APP)
       .filter((f) => /<Refresh\b/.test(strip(readFileSync(f, 'utf8'))))
       .sort();
-    expect(polling).toEqual([...INCIDENT_PAGES, OVERVIEW, FLEET_HEALTH].sort());
+    expect(polling).toEqual([...INCIDENT_PAGES, FLEET].sort());
   });
 
   /**
    * A page that polls every five seconds may run no catalog scan. Its
    * catalog comes through lib/catalog.ts, which reads at most once a
-   * minute; catalog.test.ts holds that. Cleanup is the old console's and
-   * reads no catalog.
+   * minute; catalog.test.ts holds that.
    */
   it('runs no captured read from a polled page', () => {
-    for (const file of INCIDENT_PAGES.filter((f) => !f.includes('cleanup'))) {
+    for (const file of INCIDENT_PAGES) {
       const code = strip(readFileSync(file, 'utf8'));
       for (const c of Object.values(CHECKS).filter((x) => x.class === 'captured')) {
         expect(code, file).not.toMatch(new RegExp(`CHECKS\\.${c.id}\\b`));
@@ -381,21 +371,21 @@ describe('the poll boundary', () => {
     expect(strip(readFileSync(join(APP, 'db', '[name]', 'page.tsx'), 'utf8'))).toMatch(/tablesFor\(/);
   });
 
-  /** Set equality above would be satisfied by an overview polling at 5s. */
-  it('polls the overview strictly slower than an incident page', () => {
+  /** Set equality above would be satisfied by a fleet polling at 5s. */
+  it('polls the fleet strictly slower than an incident page', () => {
     const interval = (file: string): number => {
       const m = /<Refresh\s+intervalMs=\{([0-9_]+)\}/.exec(strip(readFileSync(file, 'utf8')));
       if (m === null) throw new Error(`no <Refresh intervalMs={…}> in ${file}`);
       return Number(m[1]!.replace(/_/g, ''));
     };
     for (const page of INCIDENT_PAGES) {
-      expect(interval(OVERVIEW)).toBeGreaterThan(interval(page));
+      expect(interval(FLEET)).toBeGreaterThan(interval(page));
     }
   });
 
-  it('polls fleet health once a minute, and never the monitored databases', () => {
-    const code = strip(readFileSync(FLEET_HEALTH, 'utf8'));
-    expect(code).toMatch(/<Refresh\s+intervalMs=\{60_000\}/);
+  it('polls the fleet at the sample cadence, and never a monitored database', () => {
+    const code = strip(readFileSync(FLEET, 'utf8'));
+    expect(code).toMatch(/<Refresh\s+intervalMs=\{15_000\}/);
     expect(code).not.toMatch(/runCheckFor|contextFor|CHECKS\./);
   });
 });
@@ -449,7 +439,6 @@ describe('capture', () => {
     const code = strip(readFileSync(fileURLToPath(new URL('../instrumentation.ts', import.meta.url)), 'utf8'));
     expect(code).toMatch(/health:\s*async/);
     expect(code).toMatch(/captureHealth\(/);
-    expect(code).toMatch(/ownStatementsTotal\(/);
   });
 
   /** `sample` is optional too, and the sampler must start with no store at all. */

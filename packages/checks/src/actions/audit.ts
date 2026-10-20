@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { redactSecrets } from '../redact.js';
 
 /** One JSON line per write action: who did what to which target, and why. */
-export interface AuditRecord {
+interface AuditRecord {
   timestamp: string;
   user: string;
   action: string;

@@ -158,7 +158,6 @@ LIMIT $1`;
 export const sequences: Check<SequenceRow, SequenceData, RelationOpts> = {
   id: 'sequences',
   title: 'Sequence exhaustion',
-  gate: 'keep-up',
   home: 'sequence',
   class: 'captured',
   timeoutMs: 10_000,

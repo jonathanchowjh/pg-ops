@@ -19,25 +19,23 @@ export interface DatabaseActivityData {
 }
 
 /**
- * The cumulative counters for this database. No verdict: the web layer
- * differences two polls into per-second rates (`counterRates`). Bigints come
- * back as text and are parsed to doubles here.
+ * The cumulative counters for this database, and the `stats_reset` they
+ * count from, which Server's head names. No verdict. Bigints come back as
+ * text and are parsed to doubles here.
  */
 const SQL = `
 SELECT xact_commit::text, xact_rollback::text, deadlocks::text, conflicts::text,
        temp_files::text, temp_bytes::text, blks_read::text, blks_hit::text,
        tup_returned::text, tup_fetched::text, tup_inserted::text, tup_updated::text, tup_deleted::text,
        stats_reset::text,
-       -- Same snapshot as the counters, so the interval a rate is divided by is
-       -- measured on the clock that produced the numbers. See ratesFor.
+       -- Same snapshot as the counters, on the clock that produced them.
        now()::text AS sampled_at
 FROM pg_stat_database
 WHERE datname = current_database()`;
 
 export const databaseActivity: Check<DatabaseActivityRow, DatabaseActivityData> = {
   id: 'databaseActivity',
-  gate: 'work',
-  home: 'database',
+  home: 'server',
   title: 'Throughput',
   class: 'live',
   sql: SQL,
@@ -50,50 +48,8 @@ export const databaseActivity: Check<DatabaseActivityRow, DatabaseActivityData> 
       tupReturned: n(r?.tup_returned), tupFetched: n(r?.tup_fetched), tupInserted: n(r?.tup_inserted),
       tupUpdated: n(r?.tup_updated), tupDeleted: n(r?.tup_deleted),
       statsResetAt: r?.stats_reset ?? null,
-      // '' when there were no rows at all; Date.parse('') is NaN and ratesFor
-      // refuses a non-finite interval, so a missing sample cannot become a rate.
+      // '' when there were no rows at all; Date.parse('') is NaN, never a moment.
       sampledAt: r?.sampled_at ?? '',
     };
   },
 };
-
-export interface Rates {
-  seconds: number;
-  commitsPerSec: number;
-  rollbacksPerSec: number;
-  /** A count, not a rate: one deadlock in five seconds is the fact. */
-  deadlocks: number;
-  tempBytesPerSec: number;
-  cacheHitPct: number | null;
-  tuplesPerSec: number;
-}
-
-const COUNTERS = [
-  'xactCommit', 'xactRollback', 'deadlocks', 'conflicts', 'tempFiles', 'tempBytes', 'blksRead', 'blksHit',
-  'tupReturned', 'tupFetched', 'tupInserted', 'tupUpdated', 'tupDeleted',
-] as const;
-
-/**
- * Two samples into rates. Null, not zero, when the pair cannot be trusted:
- * no time elapsed, or a statistics reset or restart between the two polls.
- */
-export function counterRates(prev: DatabaseActivityData, cur: DatabaseActivityData, seconds: number): Rates | null {
-  if (!(seconds > 0)) return null;
-  // Two reset guards, both needed. A backwards counter misses a reset on a
-  // low-traffic database whose new counters have already passed the old
-  // totals; `stats_reset` catches that, but is null where it is not exposed.
-  if (prev.statsResetAt !== cur.statsResetAt) return null;
-  for (const k of COUNTERS) if (cur[k] < prev[k]) return null;
-  const read = cur.blksRead - prev.blksRead;
-  const hit = cur.blksHit - prev.blksHit;
-  const tuples = (cur.tupInserted - prev.tupInserted) + (cur.tupUpdated - prev.tupUpdated) + (cur.tupDeleted - prev.tupDeleted);
-  return {
-    seconds,
-    commitsPerSec: (cur.xactCommit - prev.xactCommit) / seconds,
-    rollbacksPerSec: (cur.xactRollback - prev.xactRollback) / seconds,
-    deadlocks: cur.deadlocks - prev.deadlocks,
-    tempBytesPerSec: (cur.tempBytes - prev.tempBytes) / seconds,
-    cacheHitPct: read + hit === 0 ? null : (100 * hit) / (read + hit),
-    tuplesPerSec: tuples / seconds,
-  };
-}

@@ -61,7 +61,6 @@ const num = (s: string | null) => (s == null ? null : Number(s));
 
 export const standbys: Check<StandbyRow, StandbysData> = {
   id: 'standbys',
-  gate: 'keep-up',
   home: 'server',
   title: 'Standbys',
   class: 'live',

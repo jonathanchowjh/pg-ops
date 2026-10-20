@@ -22,47 +22,37 @@
  *
  * Mappings that are not what the names suggest:
  *
- *  - #10 `blocked_queries` is backed by `locks`, not `blocked`. pgHero
- *    returns blocked/blocking pairs, which is what the wait graph is built
- *    from. `blocked` is a triage summary with no pgHero equivalent, so it
- *    has no entry.
+ *  - #10 `blocked_queries` is backed by `sessions`: each session carries
+ *    `blockedBy`, which is what the chain is built from.
  *  - #4 `connections` is pgHero's per-connection list, so `connectionDetail`
  *    backs it, along with #7 and #65. The `connections` check returns four
  *    aggregate numbers.
  *  - #5 `total_connections` is the `connections` check's `used`, which
  *    counts client backends only; pgHero counts every backend.
  */
-import type { Placement } from './gates.js';
 import { killBackend, killLongRunning } from './actions/kill.js';
 import { resetQueryStats, resetStats } from './actions/stats.js';
 import { analyzeTables } from './actions/analyze.js';
 import { captureOnce } from './capture.js';
-import { activity } from './checks/activity.js';
-import { blocked } from './checks/blocked.js';
 import { indexes, tables } from './checks/catalog.js';
 import { connectionDetail, connections } from './checks/connections.js';
 import { databaseActivity } from './checks/database-activity.js';
 import { identity } from './checks/identity.js';
 import { horizon } from './checks/horizon.js';
 import { indexBloat } from './checks/index-bloat.js';
-import { locks } from './checks/locks.js';
-import { longRunning } from './checks/long-running.js';
 import { queryStats } from './checks/query-stats.js';
 import { replicationLag } from './checks/replication.js';
 import { sequences } from './checks/sequences.js';
-import { sessionStates, sessions } from './checks/sessions.js';
+import { sessions } from './checks/sessions.js';
 import { settings } from './checks/settings.js';
 import { slots } from './checks/slots.js';
 import { standbys } from './checks/standbys.js';
 import { wraparound } from './checks/wraparound.js';
-import { historicalQueryStats, queryShapeHistory } from './series/query-stats.js';
-import { relationSpace, spaceGrowth } from './series/space.js';
+import { relationSpace } from './series/space.js';
 import { explain } from './tools/explain.js';
 import { suggestedIndexes } from './tools/suggested-indexes.js';
 
 export const CHECKS = {
-  activity,
-  blocked,
   connectionDetail,
   connections,
   databaseActivity,
@@ -70,13 +60,10 @@ export const CHECKS = {
   identity,
   indexBloat,
   indexes,
-  locks,
-  longRunning,
   queryStats,
   replicationLag,
   sequences,
   sessions,
-  sessionStates,
   settings,
   slots,
   standbys,
@@ -84,7 +71,7 @@ export const CHECKS = {
   wraparound,
 } as const;
 
-export type CheckId = keyof typeof CHECKS;
+type CheckId = keyof typeof CHECKS;
 
 /**
  * Actions mutate, so they are kept out of CHECKS. Keyed so `action:` in the
@@ -96,13 +83,13 @@ export const ACTIONS = {
 
 /** The over-time readers; see `Series` in types.ts. */
 export const SERIES = {
-  historicalQueryStats, queryShapeHistory, relationSpace, spaceGrowth,
+  relationSpace,
 } as const;
-export type SeriesId = keyof typeof SERIES;
+type SeriesId = keyof typeof SERIES;
 
 /** Questions the operator asks; see `Tool` in types.ts. */
 export const TOOLS = { explain, suggestedIndexes } as const;
-export type ToolId = keyof typeof TOOLS;
+type ToolId = keyof typeof TOOLS;
 
 /**
  * Scheduled work that is neither a check nor an action. Both entries point
@@ -113,9 +100,9 @@ export const JOBS = {
   captureQueryStats: captureOnce,
   captureSpaceStats: captureOnce,
 } as const;
-export type JobId = keyof typeof JOBS;
+type JobId = keyof typeof JOBS;
 
-export type ActionId = keyof typeof ACTIONS;
+type ActionId = keyof typeof ACTIONS;
 
 /**
  * The variants are meant to be mutually exclusive, but a union of object
@@ -127,21 +114,9 @@ export type ActionId = keyof typeof ACTIONS;
  * action (#60). Its payload is prose naming where the capability lives, and
  * cannot be checked against a registry.
  */
-export type ParityEntry = {
+type ParityEntry = {
   name: string;
   source: string;
-  /**
-   * Where this capability sits on the tree (gates.ts). Required on every
-   * entry, shipped or not.
-   *
-   * For a shipped `check` this must equal that check's own `gate`;
-   * registry.test.ts holds this.
-   *
-   * An action takes the gate of the object it acts on, not of every stall it
-   * can clear: #11 `kill` terminates a session, so it is `connect`; #12
-   * selects its targets by query duration, so it is `work`.
-   */
-  gate: Placement;
 } & (
   | { check: CheckId }
   | { action: ActionId }
@@ -157,44 +132,45 @@ export const PGHERO: Record<number, ParityEntry> = {
   // One round trip and one check (checks/identity.ts), which also backs #48.
   // #3 reads pg_stat_ssl, not pgHero's sslinfo extension.
   1: { name: 'server_version', source: 'methods/basic.rb',
-    gate: 'server', check: 'identity' },
+    check: 'identity' },
   2: { name: 'database_name', source: 'methods/basic.rb',
-    gate: 'server', check: 'identity' },
+    check: 'identity' },
   3: { name: 'ssl_in_use', source: 'methods/basic.rb',
-    gate: 'server', check: 'identity' },
+    check: 'identity' },
 
   // connections — methods/connections.rb
   // #4 is a per-connection list, so `connectionDetail` backs it; #5 is the
   // `connections` aggregate's `used` (client backends only).
   4: { name: 'connections', source: 'methods/connections.rb',
-    gate: 'connect', check: 'connectionDetail' },
+    check: 'connectionDetail' },
   5: { name: 'total_connections', source: 'methods/connections.rb',
-    gate: 'connect', check: 'connections' },
+    check: 'connections' },
+  // The census by state is the band's split by class, on every page with a clock.
   6: { name: 'connection_states', source: 'methods/connections.rb',
-    gate: 'connect', check: 'sessionStates' },
+    platform: 'apps/web/lib/tree.ts: the band and every row strip, sessions not idle split by class' },
   7: { name: 'connection_sources', source: 'methods/connections.rb',
-    gate: 'connect', check: 'connectionDetail' },
+    check: 'connectionDetail' },
 
   // queries — methods/queries.rb
-  // running_queries is `state <> 'idle'` in pgHero; `sessions` returns the
-  // same columns, and `prepareSessions(..., { sort: 'active' })` is this view.
+  // running_queries is `state <> 'idle'` in pgHero: the sessions `sessions`
+  // reads, every one not idle, which are the tree's session rows.
   8: { name: 'running_queries', source: 'methods/queries.rb',
-    gate: 'connect', check: 'sessions' },
+    check: 'sessions' },
+  // A session's time in its state is its row's span on the tree; what holds vacuum back is Server's list.
   9: { name: 'long_running_queries', source: 'methods/queries.rb',
-    gate: 'work', check: 'longRunning' },
-  // `locks`, not `blocked`: see the top-of-file note.
+    platform: 'apps/web/lib/tree.ts: a session row is its time in one state; apps/web/app/db/[name]/server: the transactions open longest' },
+  // A chain is the answer line on the table it is on, with Terminate on its root; `sessions` carries `blockedBy`.
   10: { name: 'blocked_queries', source: 'methods/queries.rb',
-    gate: 'wait', check: 'locks' },
+    platform: 'apps/web/lib/tree.ts: a lock chain is one finding on its table, from the sessions read\'s blockedBy' },
 
   // kill — methods/kill.rb
   11: { name: 'kill', source: 'methods/kill.rb',
-    gate: 'connect', action: 'kill' },
+    action: 'kill' },
   12: { name: 'kill_long_running_queries', source: 'methods/kill.rb',
-    gate: 'work', action: 'killLongRunning' },
+    action: 'killLongRunning' },
   13: {
     name: 'kill_all',
     source: 'methods/kill.rb',
-    gate: 'connect',
     declined: 'An action with no diagnosis; there is no incident in which '
       + '"terminate every session, unreviewed" is the correct first move. '
       + 'Web design spec §7.1; ops-console spec §3.4d. Permanent — ruled by the controller.',
@@ -202,24 +178,24 @@ export const PGHERO: Record<number, ParityEntry> = {
 
   // query_stats — methods/query_stats.rb
   14: { name: 'query_stats', source: 'methods/query_stats.rb',
-    gate: 'work', check: 'queryStats' },
+    check: 'queryStats' },
+  // Over any window of the store: the stored snapshots differenced by `deltas`.
   15: { name: 'historical_query_stats', source: 'methods/query_stats.rb',
-    gate: 'work', series: 'historicalQueryStats' },
+    platform: 'apps/web/app/db/[name]/queries: every statement on the scatter over the window, from readWindowStats' },
   16: { name: 'query_hash_stats', source: 'methods/query_stats.rb',
-    gate: 'work', series: 'queryShapeHistory' },
-  // A filter over #14's rows (calls >= 100 and average_time >= 20ms in
-  // pgHero), derived by `slowQueries(data)` in query-stats.ts.
+    platform: 'apps/web/app/db/[name]/queries/[queryid]: one statement over the window, its stat line and load' },
+  // pgHero's bound (calls >= 100 and average_time >= 20ms), as SLOW_QUERY_DEFAULTS:
+  // the Queries scatter marks the shapes past it.
   17: { name: 'slow_queries', source: 'methods/query_stats.rb',
-    gate: 'work', check: 'queryStats' },
+    check: 'queryStats' },
   // The availability probe is the `requires` block on #14's check: run.ts
   // turns an UNDEFINED_TABLE from it into `reason: 'missing-extension'`
   // carrying a `remedy`.
   18: { name: 'query_stats_available', source: 'methods/query_stats.rb',
-    gate: 'work', check: 'queryStats' },
+    check: 'queryStats' },
   19: {
     name: 'enable_query_stats',
     source: 'methods/query_stats.rb',
-    gate: 'work',
     declined: 'Installing the pg_stat_statements extension is a schema change '
       + 'against a MONITORED database, which this project promises never to '
       + 'make. Parity spec §3.3 confines every schema change to the store '
@@ -232,9 +208,9 @@ export const PGHERO: Record<number, ParityEntry> = {
       + 'belongs. Permanent.',
   },
   20: { name: 'reset_query_stats', source: 'methods/query_stats.rb',
-    gate: 'work', action: 'resetQueryStats' },
+    action: 'resetQueryStats' },
   21: { name: 'capture_query_stats', source: 'methods/query_stats.rb',
-    gate: 'work', job: 'captureQueryStats' },
+    job: 'captureQueryStats' },
 
   // indexes — methods/indexes.rb
   // Each a column of a captured read. Per index, the `indexes` read: its hit
@@ -243,59 +219,58 @@ export const PGHERO: Record<number, ParityEntry> = {
   // `idxScans` against `seqScans`, and the `full scans` flag that is
   // pgHero's missing-index bound.
   22: { name: 'index_hit_rate', source: 'methods/indexes.rb',
-    gate: 'work', check: 'indexes' },
+    check: 'indexes' },
   23: { name: 'index_caching', source: 'methods/indexes.rb',
-    gate: 'work', check: 'indexes' },
+    check: 'indexes' },
   24: { name: 'index_usage', source: 'methods/indexes.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   25: { name: 'missing_indexes', source: 'methods/indexes.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   26: { name: 'unused_indexes', source: 'methods/indexes.rb',
-    gate: 'work', check: 'indexes' },
+    check: 'indexes' },
   27: { name: 'invalid_indexes', source: 'methods/indexes.rb',
-    gate: 'work', check: 'indexes' },
+    check: 'indexes' },
   28: { name: 'duplicate_indexes', source: 'methods/indexes.rb',
-    gate: 'work', check: 'indexes' },
+    check: 'indexes' },
   29: { name: 'index_bloat', source: 'methods/indexes.rb',
-    gate: 'keep-up', check: 'indexBloat' },
+    check: 'indexBloat' },
   30: { name: 'indexes', source: 'methods/indexes.rb',
-    gate: 'work', check: 'indexes' },
+    check: 'indexes' },
   31: { name: 'reset_stats', source: 'methods/indexes.rb',
-    gate: 'work', action: 'resetStats' },
+    action: 'resetStats' },
   // `statsResetAt` on the database's own counters; the captured reads carry
   // the same moment as `statsReset`.
   32: { name: 'last_stats_reset_time', source: 'methods/indexes.rb',
-    gate: 'work', check: 'databaseActivity' },
+    check: 'databaseActivity' },
 
   // tables — methods/tables.rb
   // Columns of the `tables` read: `hitRate`, and `seqScans` with `idxScans`
   // for a table nothing reads.
   33: { name: 'table_hit_rate', source: 'methods/tables.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   34: { name: 'table_caching', source: 'methods/tables.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   35: { name: 'unused_tables', source: 'methods/tables.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   36: { name: 'table_stats', source: 'methods/tables.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
 
   // space — methods/space.rb
   // #37 is on every health row; the Tables head sums its tables. #38 and
   // #39 are the `tables` read's `sizeBytes`, `heapBytes` and `indexBytes`.
   37: { name: 'database_size', source: 'methods/space.rb',
-    gate: 'keep-up',
     platform: 'packages/checks/src/health.ts: pg_database_size on every health row, as size_bytes; '
       + 'the Tables head sums its tables' },
   38: { name: 'relation_sizes', source: 'methods/space.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   39: { name: 'table_sizes', source: 'methods/space.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   40: { name: 'space_growth', source: 'methods/space.rb',
-    gate: 'keep-up', series: 'spaceGrowth' },
+    platform: 'apps/web/app/db/[name]/tables/[relation]: the size panel on the clock, from relationSpace' },
   41: { name: 'relation_space_stats', source: 'methods/space.rb',
-    gate: 'keep-up', series: 'relationSpace' },
+    series: 'relationSpace' },
   42: { name: 'capture_space_stats', source: 'methods/space.rb',
-    gate: 'keep-up', job: 'captureSpaceStats' },
+    job: 'captureSpaceStats' },
 
   // maintenance — methods/maintenance.rb
   // #43 is the `tables` read's rows, dead rows and last vacuum and analyze,
@@ -303,48 +278,48 @@ export const PGHERO: Record<number, ParityEntry> = {
   // `xid age`. #46 is its `vacuuming`: the phase of a running vacuum, with no
   // percentage, which is narrower than pgHero's.
   43: { name: 'maintenance_info', source: 'methods/maintenance.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   44: { name: 'transaction_id_danger', source: 'methods/maintenance.rb',
-    gate: 'keep-up', check: 'wraparound' },
+    check: 'wraparound' },
   45: { name: 'autovacuum_danger', source: 'methods/maintenance.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   46: { name: 'vacuum_progress', source: 'methods/maintenance.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
   47: { name: 'analyze_tables', source: 'methods/maintenance.rb',
-    gate: 'keep-up', action: 'analyzeTables' },
+    action: 'analyzeTables' },
 
   // replication — methods/replication.rb
   // #48 is `pg_is_in_recovery()`, folded into the identity round trip.
   48: { name: 'replica', source: 'methods/replication.rb',
-    gate: 'server', check: 'identity' },
+    check: 'identity' },
   49: { name: 'replication_lag', source: 'methods/replication.rb',
-    gate: 'keep-up', check: 'replicationLag' },
+    check: 'replicationLag' },
   50: { name: 'replication_slots', source: 'methods/replication.rb',
-    gate: 'keep-up', check: 'slots' },
+    check: 'slots' },
   // Folded into #49's round trip as a count of standbys, where pgHero
   // returns a boolean.
   51: { name: 'replicating', source: 'methods/replication.rb',
-    gate: 'keep-up', check: 'replicationLag' },
+    check: 'replicationLag' },
 
   // sequences — methods/sequences.rb
   // #52, #53 and #54 are one query: the danger ranking needs the column
   // ceiling the listing already finds.
   52: { name: 'sequences', source: 'methods/sequences.rb',
-    gate: 'keep-up', check: 'sequences' },
+    check: 'sequences' },
   53: { name: 'sequence_danger', source: 'methods/sequences.rb',
-    gate: 'keep-up', check: 'sequences' },
+    check: 'sequences' },
   54: { name: 'unreadable_sequences', source: 'methods/sequences.rb',
-    gate: 'keep-up', check: 'sequences' },
+    check: 'sequences' },
 
   // constraints — methods/constraints.rb
   // The `tables` read's `unvalidated`, flagged `not validated`: a count per
   // table, where pgHero names each constraint.
   55: { name: 'invalid_constraints', source: 'methods/constraints.rb',
-    gate: 'keep-up', check: 'tables' },
+    check: 'tables' },
 
   // settings — methods/settings.rb
   56: { name: 'settings', source: 'methods/settings.rb',
-    gate: 'server', check: 'settings' },
+    check: 'settings' },
 
   // explain — methods/explain.rb
   // A Tool. Planned through `planStatements`, the one path operator SQL
@@ -352,19 +327,18 @@ export const PGHERO: Record<number, ParityEntry> = {
   // destroyed. No ANALYZE, which would execute the statement. See
   // tools/explain.ts.
   57: { name: 'explain', source: 'methods/explain.rb',
-    gate: 'work', tool: 'explain' },
+    tool: 'explain' },
 
   // suggested_indexes — methods/suggested_indexes.rb
   // #58 and #63 are one tool. It reads the busiest live shapes, not three
   // captured hours as pgHero does. See tools/suggested-indexes.ts.
   58: { name: 'suggested_indexes', source: 'methods/suggested_indexes.rb',
-    gate: 'work', tool: 'suggestedIndexes' },
+    tool: 'suggestedIndexes' },
 
   // system — methods/system.rb
   59: {
     name: 'system_stats',
     source: 'methods/system.rb',
-    gate: 'server',
     declined: 'CPU, IOPS and free space come from CloudWatch, Azure Monitor or GCP '
       + 'monitoring: per-cloud credentials and a cloud SDK, for one panel that is '
       + 'blank for everyone self-hosting. The parent spec cut `events` for exactly '
@@ -376,7 +350,6 @@ export const PGHERO: Record<number, ParityEntry> = {
   60: {
     name: 'multiple_databases',
     source: 'database.rb',
-    gate: 'server',
     platform: 'apps/web: PGOPS_DATABASES / PGOPS_CONFIG_FILE (lib/config.ts), '
       + 'one route per name under app/db/[name], all of them listed on the overview',
   },
@@ -384,7 +357,6 @@ export const PGHERO: Record<number, ParityEntry> = {
   61: {
     name: 'disable_query_stats',
     source: 'methods/query_stats.rb',
-    gate: 'work',
     declined: 'Removing the pg_stat_statements extension is a schema change '
       + 'against a MONITORED database — see #19 — and it is worse than #19 in '
       + 'one way that stands on its own. It irreversibly destroys every query '
@@ -396,7 +368,6 @@ export const PGHERO: Record<number, ParityEntry> = {
   62: {
     name: 'autoindex',
     source: 'methods/suggested_indexes.rb',
-    gate: 'work',
     declined: 'Its body builds an index concurrently on a MONITORED database — a schema '
       + 'change, forbidden for the same four reasons as #19 and #61: the §3.3 promise, '
       + 'the DDL guard, the web spec\'s tier 3, and §8\'s removal of the CLI that tier '
@@ -407,14 +378,14 @@ export const PGHERO: Record<number, ParityEntry> = {
       + 'run through their own migration tooling. Permanent.',
   },
   63: { name: 'suggested_indexes_by_query', source: 'methods/suggested_indexes.rb',
-    gate: 'work', tool: 'suggestedIndexes' },
+    tool: 'suggestedIndexes' },
   // The same tool as #57: the plan is best_index's input. It reads the
   // planner's plan rather than a pg_query parse tree, so it handles joins.
   // See tools/advice.ts.
   64: { name: 'best_index', source: 'methods/suggested_indexes.rb',
-    gate: 'work', tool: 'explain' },
+    tool: 'explain' },
   // Dashboard-only in pgHero. Derived in `map` from the connections round
   // trip, as `bySslStatus`; see `sslStatus` for the four-value scheme.
   65: { name: 'connection_security_breakdown', source: 'app/controllers/pg_hero/home_controller.rb',
-    gate: 'connect', check: 'connectionDetail' },
+    check: 'connectionDetail' },
 };

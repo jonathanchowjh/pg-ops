@@ -15,7 +15,7 @@ import type { CheckContext, FailureReason } from './types.js';
 /** What the capture's store transaction may take, whatever the pool allows. */
 const CAPTURE_STORE_MS = 120_000;
 
-export type CaptureOutcome =
+type CaptureOutcome =
   /**
    * `queryStatsError` is present when the space half succeeded and the query
    * half did not. A cluster pg_upgraded to 14 without `ALTER EXTENSION
@@ -62,7 +62,7 @@ const QUERY_STATS_SQL = ownSql(`SELECT s.queryid::text                AS queryid
 `);
 
 /** The most rows of one captured read the store keeps: the largest tables and indexes, the fullest sequences. */
-export const CAPTURE_ROWS = 5_000;
+const CAPTURE_ROWS = 5_000;
 
 /**
  * The three catalog scans, one after another so pgops is one connection wide

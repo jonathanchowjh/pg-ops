@@ -1,16 +1,16 @@
 'use client';
 
 import { useEffect, useState, type ReactNode } from 'react';
-import { Axis, ClockLines, Track, setHover, useClock } from '@/components/clock';
-import { CLASS_BG, CLASS_FILL } from '@/components/tree-rows';
-import { clockTime, fractionAt, type CLASSES } from '@/lib/clock';
-import { formatUnit, type Unit } from '@/lib/format';
+import { Axis, ClockLines, Track, setHover, useClock, useWidth } from '@/components/clock';
+import { CLASS_BG, CLASS_FILL, NUM, Unseen } from '@/components/tree-rows';
+import { DAY_MS, HOUR_MS, clockTime, fractionAt, labelMarks, type CLASSES } from '@/lib/clock';
+import { formatUnit, round2, type Unit } from '@/lib/format';
 import { byHourOfDay, byteSteps } from '@/lib/plot';
-import { scaleSteps } from '@/lib/tree';
+import { scaleSteps, unseenAt } from '@/lib/tree';
 import { cn } from '@/lib/utils';
 
 /** A series' ink: a class hue where the series is a class, and otherwise a shade of ink, darkest first. */
-export type Tone = (typeof CLASSES)[number] | 0 | 1 | 2;
+type Tone = (typeof CLASSES)[number] | 0 | 1 | 2;
 const FILL: Record<Tone, string> = { ...CLASS_FILL, 0: 'fill-foreground/75', 1: 'fill-foreground/45', 2: 'fill-foreground/22' };
 const KEY: Record<Tone, string> = { ...CLASS_BG, 0: 'bg-foreground/75', 1: 'bg-foreground/45', 2: 'bg-foreground/22' };
 const STROKE: Record<Tone, string> = {
@@ -20,15 +20,11 @@ const STROKE: Record<Tone, string> = {
 
 export interface Series { name: string; tone: Tone; values: readonly (number | null)[] }
 
-const r2 = (n: number): number => Math.round(n * 100) / 100;
-const NUM = 'mr-1.5 inline-block min-w-10 text-right font-mono';
 const DOT = 'mr-1.5 inline-block size-2 rounded-xs align-middle';
 const CARD = 'min-w-0 overflow-hidden rounded-md border bg-card';
 const HEAD = 'flex flex-wrap items-baseline gap-2.5 px-3 pt-2 pb-1';
 const TITLE = 'm-0 text-[13px]/[18px] font-semibold text-foreground';
 const NOTE = 'ml-1.5 font-normal text-muted-foreground';
-/** Two labelled marks nearer than this fraction of the plot would print over each other. */
-const LABEL_GAP = 0.12;
 /** A class's share of a column at or below this is left out of the readout, as the tree's readout leaves it. */
 const READ_FLOOR = 0.05;
 
@@ -38,7 +34,7 @@ const READ_FLOOR = 0.05;
  * than one series, and the same numbers as a table. It reads the page's one
  * cursor: a click pins, a drag selects, the pointer reads out.
  */
-export function Panel({ title, note, unit, kind, series, limit, marks = [], wide = false }: {
+export function Panel({ title, note, unit, kind, series, limit, seen, marks = [], wide = false }: {
   title: string;
   /** What the y axis measures, said once beside the title. */
   note?: string;
@@ -49,12 +45,16 @@ export function Panel({ title, note, unit, kind, series, limit, marks = [], wide
   series: readonly Series[];
   /** A dashed line the series are read against: a trigger, a limit. */
   limit?: { name: string; values: readonly (number | null)[] };
+  /** The tree's `seen`: the stretches nobody sampled are hatched, as the tree hatches them. */
+  seen?: readonly number[];
   /** Events on this panel's clock. */
   marks?: readonly { at: number; label: string }[];
   /** Both columns of the page's grid. */
   wide?: boolean;
 }) {
   const { grid, offset } = useClock();
+  // The card is always drawn; the plot is the card less its gutters, 4.5rem and 0.75rem.
+  const [card, cardWidth] = useWidth<HTMLElement>();
   const n = Math.max(1, series[0]?.values.length ?? 0);
   const at = (s: { values: readonly (number | null)[] }, c: number): number => s.values[c] ?? 0;
   const said = (v: number | null | undefined): string => (v === null || v === undefined ? '—' : formatUnit(unit, v));
@@ -67,9 +67,10 @@ export function Panel({ title, note, unit, kind, series, limit, marks = [], wide
     const highest = series.reduce((a, s) => Math.max(a, at(s, c)), 0);
     max = Math.max(max, kind === 'stack' ? stacked : highest, limit === undefined ? 0 : at(limit, c));
   }
-  const steps = unit === 'bytes' ? byteSteps(max * 1.05) : scaleSteps(max * 1.05);
+  // Bytes step in powers of 1024, so a tick prints round in the unit it is printed in.
+  const steps = unit === 'bytes' || unit === 'bytesPerSec' ? byteSteps(max * 1.05) : scaleSteps(max * 1.05);
   const top = steps.at(-1)!;
-  const y = (v: number): number => r2(100 - (v / top) * 100);
+  const y = (v: number): number => round2(100 - (v / top) * 100);
 
   /** A series as filled steps standing on the ones before it. */
   const filled = (i: number): string => {
@@ -79,7 +80,7 @@ export function Panel({ title, note, unit, kind, series, limit, marks = [], wide
       if (v <= 0) continue;
       let base = 0;
       for (let j = 0; j < i; j += 1) base += at(series[j]!, c);
-      d += `M${c} ${y(base + v)}h1v${r2((v / top) * 100)}h-1z`;
+      d += `M${c} ${y(base + v)}h1v${round2((v / top) * 100)}h-1z`;
     }
     return d;
   };
@@ -112,18 +113,13 @@ export function Panel({ title, note, unit, kind, series, limit, marks = [], wide
     );
   };
 
-  let labelled = -1;
-  const drawn = marks.filter((m) => m.at >= grid.from && m.at <= grid.to).sort((a, b) => a.at - b.at).map((m) => {
-    const x = fractionAt(grid, m.at);
-    const named = x - labelled > LABEL_GAP;
-    if (named) labelled = x;
-    return { ...m, x, named };
-  });
+  const drawn = labelMarks(marks, grid, cardWidth - 84);
   const names = [...series.map((s) => ({ name: s.name, key: KEY[s.tone] })), ...(limit === undefined ? [] : [{ name: limit.name, key: 'bg-foreground' }])];
   const kept = [...series, ...(limit === undefined ? [] : [limit])].some((s) => s.values.some((v) => v !== null));
+  const blind = seen !== undefined && seen.every((_, c) => unseenAt(seen, c));
 
   return (
-    <section className={cn(CARD, wide && 'md:col-span-2')}>
+    <section ref={card} className={cn(CARD, wide && 'md:col-span-2')}>
       <header className={HEAD}>
         <h3 className={TITLE}>{title}{note === undefined ? null : <small className={NOTE}>{note}</small>}</h3>
         {names.length < 2 ? null : (
@@ -132,9 +128,9 @@ export function Panel({ title, note, unit, kind, series, limit, marks = [], wide
           </span>
         )}
       </header>
-      {!kept ? <p className="px-3 pb-3 text-xs text-muted-foreground">nothing kept for this window</p> : (
+      {!kept ? <p className="px-3 pb-3 text-xs text-muted-foreground">{blind ? 'not sampled in this window' : 'nothing kept for this window'}</p> : (
         <>
-          <div className="relative mr-3 ml-14">
+          <div className="relative mr-3 ml-[4.5rem]">
             <Track className="aspect-[2.8/1] max-h-[280px] min-h-40 w-full border-l" tip={tip}>
               {steps.slice(1).map((v) => (
                 <i key={v} aria-hidden className="absolute inset-x-0 border-t border-border" style={{ bottom: `${(v / top) * 100}%` }}>
@@ -149,17 +145,20 @@ export function Panel({ title, note, unit, kind, series, limit, marks = [], wide
                   <path d={traced(limit.values)} fill="none" strokeWidth="1.5" strokeDasharray="5 4" vectorEffect="non-scaling-stroke" className="stroke-foreground" />
                 )}
               </svg>
+              {seen === undefined ? null : (
+                <div aria-hidden className="pointer-events-none absolute inset-y-0 left-0" style={{ width: `${(seen.length / n) * 100}%` }}><Unseen seen={seen} /></div>
+              )}
               {drawn.map((m) => (
                 <i key={`${m.at}/${m.label}`} data-mark aria-hidden className="absolute inset-y-0 border-l border-dashed border-foreground" style={{ left: `${m.x * 100}%` }}>
-                  {/* Near the right edge the label reads leftwards, or the card would cut it. */}
-                  {m.named ? <span className={cn('absolute top-0 rounded-xs bg-card px-0.5 text-xs/4 whitespace-nowrap text-foreground', m.x > 0.85 ? 'right-1' : 'left-1')}>{m.label}</span> : null}
+                  {m.named ? <span className={cn('absolute top-0 rounded-xs bg-card px-0.5 text-xs/4 whitespace-nowrap text-foreground', m.leftward ? 'right-1' : 'left-1')}>{m.label}</span> : null}
                 </i>
               ))}
             </Track>
             <Axis grid={grid} offset={offset} className="border-l" />
             <ClockLines className="inset-x-0" />
           </div>
-          <table className="sr-only">
+          {/* In a block: a table ignores sr-only's 1 px box and would lay out at full width, past the screen's edge. */}
+          <div className="sr-only"><table>
             <caption>{title}</caption>
             <thead><tr><th>Time</th>{names.map((k) => <th key={k.name}>{k.name}</th>)}</tr></thead>
             <tbody>
@@ -174,15 +173,12 @@ export function Panel({ title, note, unit, kind, series, limit, marks = [], wide
                 );
               })}
             </tbody>
-          </table>
+          </table></div>
         </>
       )}
     </section>
   );
 }
-
-const HOUR_MS = 3_600_000;
-const DAY_MS = 24 * HOUR_MS;
 
 /**
  * Is this hour normal for this hour: the day the window ends on, hour by

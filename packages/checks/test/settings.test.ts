@@ -9,14 +9,15 @@ describe('settingNames', () => {
    * `io_method` is in the list unconditionally: `pg_settings` returns no row
    * for a setting that does not exist, so there is nothing to branch on.
    */
-  it("asks for exactly pgHero 4.0.1's three groups, in pgHero's order", () => {
+  it("asks for pgHero 4.0.1's three groups in pgHero's order, then the timeouts and the freeze age the pages reason about", () => {
     expect(settingNames()).toEqual([
       'max_connections', 'shared_buffers', 'effective_cache_size', 'maintenance_work_mem',
       'checkpoint_completion_target', 'wal_buffers', 'default_statistics_target',
       'random_page_cost', 'effective_io_concurrency', 'work_mem', 'huge_pages',
       'jit', 'wal_compression', 'io_method', 'min_wal_size', 'max_wal_size',
+      'statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout', 'deadlock_timeout',
       'autovacuum', 'autovacuum_max_workers', 'autovacuum_vacuum_cost_limit',
-      'autovacuum_vacuum_scale_factor', 'autovacuum_analyze_scale_factor',
+      'autovacuum_vacuum_scale_factor', 'autovacuum_analyze_scale_factor', 'autovacuum_freeze_max_age',
       'vacuum_cost_limit',
     ]);
   });
@@ -85,7 +86,7 @@ describe('toSettings', () => {
     expect(settings.thresholds).toBeUndefined();
   });
 
-  it('places server facts in the status line, not in a gate', () => {
-    expect(settings.gate).toBe('server');
+  it('belongs to the server, which Server draws', () => {
+    expect(settings.home).toBe('server');
   });
 });

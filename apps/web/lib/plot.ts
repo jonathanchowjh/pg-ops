@@ -1,3 +1,5 @@
+import { DAY_MS, HOUR_MS } from './clock';
+
 /**
  * A population laid out on two log axes, and readings laid on a window's
  * columns, worked out where a test can reach them. The components draw what
@@ -146,8 +148,30 @@ export function onColumns(
   });
 }
 
-const HOUR_MS = 3_600_000;
-const DAY_MS = 24 * HOUR_MS;
+/**
+ * Per-second rates from a counter kept once a minute: each minute against
+ * the one before, over the seconds between, laid at the interval's start.
+ * A fall, a missing reading or a change of `epoch` (a statistics reset)
+ * gives no rate, not a zero.
+ */
+export function perSecond<T extends { at: number }>(
+  points: readonly T[],
+  pick: (p: T) => number | null,
+  epoch: (p: T) => unknown = () => null,
+): { at: number; value: number }[] {
+  const sorted = [...points].sort((a, b) => a.at - b.at);
+  const out: { at: number; value: number }[] = [];
+  for (let i = 1; i < sorted.length; i += 1) {
+    const prev = sorted[i - 1]!;
+    const cur = sorted[i]!;
+    const a = pick(prev);
+    const b = pick(cur);
+    if (a === null || b === null || b < a || epoch(prev) !== epoch(cur) || cur.at <= prev.at) continue;
+    out.push({ at: prev.at, value: (b - a) / ((cur.at - prev.at) / 1000) });
+  }
+  return out;
+}
+
 
 /**
  * Is this hour normal for this hour: the mean of each hour of the day over

@@ -12,7 +12,7 @@ const SUGGESTION_DEFAULTS = { minMeanMs: 20, minCalls: 50, limit: 100 } as const
 
 export interface SuggestedIndexOpts { minMeanMs?: number; minCalls?: number; limit?: number }
 
-export interface QueryAdvice {
+interface QueryAdvice {
   queryid: string | null;
   query: string;
   calls: number;
@@ -22,7 +22,7 @@ export interface QueryAdvice {
   advice: IndexAdvice[];
 }
 
-export interface SuggestedIndex extends IndexSuggestion {
+interface SuggestedIndex extends IndexSuggestion {
   queries: { queryid: string | null; query: string }[];
 }
 

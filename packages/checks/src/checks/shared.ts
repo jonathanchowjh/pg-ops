@@ -9,7 +9,7 @@ import type { Threshold, Verdict } from '../types.js';
  * The cap every list check shares. A capped list carries its true total via
  * `count(*) OVER ()`, and verdicts read that total, never `rows.length`.
  */
-export interface ListOpts { limit?: number }
+interface ListOpts { limit?: number }
 
 /**
  * A list check that can be asked about one relation.

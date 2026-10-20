@@ -11,7 +11,7 @@ import { redactTree } from '@/components/sql';
 import { RowsView } from '@/components/tree-view';
 import { catalogFor, scansFor } from '@/lib/catalog';
 import { readStore, runCheckFor, runSeriesFor } from '@/lib/check';
-import { CLASSES, CLASS_NAMES, EVENT_NAMES, keepQuery, type Search } from '@/lib/clock';
+import { CLASSES, CLASS_NAMES, DAY_MS, EVENT_NAMES, HOUR_MS, keepQuery, type Search } from '@/lib/clock';
 import { actionsAllowed } from '@/lib/config';
 import { formatBytes, plural } from '@/lib/format';
 import { onColumns } from '@/lib/plot';
@@ -19,8 +19,6 @@ import { clockFor, treeFor } from '@/lib/samples';
 import { shapesFor } from '@/lib/shapes';
 import { unseenAt } from '@/lib/tree';
 
-const HOUR_MS = 3_600_000;
-const DAY_MS = 24 * HOUR_MS;
 /** A size reading stands until the capture after next. */
 const SIZE_SPAN_MS = 10 * 60_000;
 const SECTION = 'mt-5 mb-2 text-sm/5 font-semibold text-foreground';
@@ -108,7 +106,7 @@ export default async function TablePage({ params, searchParams }: {
         {grid.live ? <div className="flex justify-end pt-1.5"><Refresh intervalMs={5_000} /></div> : null}
         <CatalogNote at={catalog.at} failed={catalog.failed} shown={1} total={null} what="tables" />
         <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-          <Panel wide title="Load" note="sessions not idle" unit="sessions" kind="stack" series={load} marks={marks(false)} />
+          <Panel wide title="Load" note="sessions not idle" unit="sessions" kind="stack" seen={tree.seen} series={load} marks={marks(false)} />
           {!hours.ok ? (
             <p className="text-xs text-muted-foreground md:col-span-2">
               {hours.kind === 'off' ? 'No store is configured, so this table’s hours are not kept.' : `The store could not be read: ${hours.message}`}

@@ -142,7 +142,7 @@ export async function runSeriesFor<P, Opts>(
 
 /**
  * The same seam, for a tool. A tool's result is a `CheckResult` with
- * `verdict: null`, so it renders through `CheckPanel` like any check.
+ * `verdict: null`: the same envelope as a check, rendered the same way.
  */
 export async function runToolFor<Input, Data>(
   name: string,

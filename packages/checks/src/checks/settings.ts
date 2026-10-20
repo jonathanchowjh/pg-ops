@@ -17,17 +17,23 @@ SELECT name, current_setting(name) AS value
 FROM pg_settings
 WHERE name = ANY($1)`;
 
-/** pgHero's main group. The array is the presentation order. */
+/**
+ * pgHero's main group, then the timeouts the pages reason about: a chain
+ * nothing ends, an idle transaction nothing closes, a deadlock Postgres
+ * breaks. The array is the presentation order. Server tags a timeout of 0
+ * "off".
+ */
 const MAIN = [
   'max_connections', 'shared_buffers', 'effective_cache_size', 'maintenance_work_mem',
   'checkpoint_completion_target', 'wal_buffers', 'default_statistics_target',
   'random_page_cost', 'effective_io_concurrency', 'work_mem', 'huge_pages',
   'jit', 'wal_compression', 'io_method', 'min_wal_size', 'max_wal_size',
+  'statement_timeout', 'lock_timeout', 'idle_in_transaction_session_timeout', 'deadlock_timeout',
 ];
 
 const AUTOVACUUM = [
   'autovacuum', 'autovacuum_max_workers', 'autovacuum_vacuum_cost_limit',
-  'autovacuum_vacuum_scale_factor', 'autovacuum_analyze_scale_factor',
+  'autovacuum_vacuum_scale_factor', 'autovacuum_analyze_scale_factor', 'autovacuum_freeze_max_age',
 ];
 
 const VACUUM = ['vacuum_cost_limit'];
@@ -73,8 +79,7 @@ export function toSettings(rows: SettingRow[]): SettingsData {
 export const settings: Check<SettingRow, SettingsData> = {
   id: 'settings',
   title: 'Settings',
-  /** `server`: server facts go in the status line, not in a band. */
-  gate: 'server',
+  /** `server`: a server's settings are listed on its Server page. */
   home: 'server',
   class: 'live',
   timeoutMs: 10_000,

@@ -52,10 +52,10 @@ export function Sql({ children, whole = false }: {
 
   // Clamped, not scrolled: `overflow-x: auto` computes the other axis from
   // `visible` to `auto` too, so each statement would be a two-axis scroll
-  // container that captures a trackpad gesture beginning over it. `ui/table`
-  // still scrolls the table sideways as one piece.
+  // container that captures a trackpad gesture beginning over it. The row's
+  // own container scrolls sideways as one piece.
   //
-  // `whitespace-normal` is load-bearing. `ui/table`'s TableCell carries
+  // `whitespace-normal` is load-bearing. The cells this sits in carry
   // `whitespace-nowrap`, which inherits into this element; without the
   // override the statement never wraps and `line-clamp-2` clips it mid-token
   // with no ellipsis.

@@ -2,7 +2,7 @@ import type { PoolClient, Pool } from 'pg';
 import type { CounterPoint } from '../series/query-stats.js';
 import type { SessionClass } from '../checks/sessions.js';
 import { BUCKET_MS, type EventKind, type LoadCell, type Sample, type StatementInfo, type StoredEvent } from '../samples.js';
-import type { CapturedRead } from './write.js';
+import { BUCKET, type CapturedRead } from './write.js';
 
 export interface StoredShape {
   queryid: string;
@@ -10,86 +10,11 @@ export interface StoredShape {
   points: CounterPoint[];
 }
 
-export interface ReadOpts {
-  /**
-   * Keep only the N most recent capture timestamps in the window. The
-   * queries page passes 2, enough for one interval; unbounded, a polling
-   * page reads every snapshot of every shape with its query text.
-   */
-  maxSnapshots?: number;
-  /** Keep only these shapes. */
-  queryids?: string[];
-}
-
-/**
- * Stored snapshots for one database in one window, grouped by shape, each
- * shape's points ordered by captured_at.
- */
-export async function readQueryStats(
-  store: Pool | PoolClient,
-  databaseName: string,
-  from: Date,
-  to: Date,
-  opts: ReadOpts = {},
-): Promise<StoredShape[]> {
-  // Built as a list of `$n` fragments, never interpolated values.
-  const values: unknown[] = [databaseName, from, to];
-  let snapshotFilter = '';
-  if (opts.maxSnapshots !== undefined) {
-    values.push(opts.maxSnapshots);
-    snapshotFilter = `
-      AND s.captured_at IN (
-        SELECT s2.captured_at
-          FROM pgops.query_stats s2
-         WHERE s2.database_id = d.id AND s2.captured_at >= $2 AND s2.captured_at <= $3
-         GROUP BY s2.captured_at
-         ORDER BY s2.captured_at DESC
-         LIMIT $${values.length})`;
-  }
-  let shapeFilter = '';
-  if (opts.queryids !== undefined) {
-    if (opts.queryids.length === 0) return [];
-    values.push(opts.queryids);
-    shapeFilter = `\n      AND q.queryid = ANY($${values.length}::bigint[])`;
-  }
-
-  const { rows } = await store.query<Row>(
-    `SELECT q.queryid::text          AS queryid,
-            q.query                  AS query,
-            s.captured_at            AS captured_at,
-            s.calls::text            AS calls,
-            s.total_exec_time        AS total_exec_time,
-            s.rows::text             AS rows,
-            s.shared_blks_hit::text  AS shared_blks_hit,
-            s.shared_blks_read::text AS shared_blks_read,
-            s.stats_reset            AS stats_reset
-       FROM pgops.query_stats s
-       JOIN pgops.queries   q ON q.id = s.query_id
-       JOIN pgops.databases d ON d.id = s.database_id
-      WHERE d.name = $1 AND s.captured_at >= $2 AND s.captured_at <= $3${snapshotFilter}${shapeFilter}
-      ORDER BY q.queryid, s.captured_at`,
-    values,
-  );
-
-  const byShape = new Map<string, StoredShape>();
-  for (const r of rows) {
-    let shape = byShape.get(r.queryid);
-    if (!shape) {
-      shape = { queryid: r.queryid, query: r.query, points: [] };
-      byShape.set(r.queryid, shape);
-    }
-    shape.points.push(counterPoint(r));
-  }
-  return [...byShape.values()];
-}
-
 /** The counter columns of `pgops.query_stats`, bigints as text. */
 interface CounterRow {
   captured_at: Date; calls: string; total_exec_time: number; rows: string;
   shared_blks_hit: string; shared_blks_read: string; stats_reset: Date | null;
 }
-interface Row extends CounterRow { queryid: string; query: string }
-
 function counterPoint(r: CounterRow): CounterPoint {
   return {
     capturedAt: r.captured_at,
@@ -100,75 +25,6 @@ function counterPoint(r: CounterRow): CounterPoint {
     sharedBlksRead: Number(r.shared_blks_read),
     statsReset: r.stats_reset,
   };
-}
-
-export interface StoredGrowth {
-  relation: string;
-  firstBytes: number;
-  lastBytes: number;
-  firstAt: Date;
-  lastAt: Date;
-  /** Captures in the window. 1 means there is no interval to measure. */
-  points: number;
-}
-
-interface GrowthRow {
-  relation: string;
-  /** bigint -> string, per this package's convention. */
-  first_bytes: string;
-  last_bytes: string;
-  first_at: Date;
-  last_at: Date;
-  points: string;
-}
-
-/**
- * Each relation's first and last captured size in the window.
- *
- * Both endpoints come from the store. pgHero subtracts the first stored size
- * from the live size, which makes the figure move on every render.
- */
-export async function readSpaceGrowth(
-  store: Pool | PoolClient,
-  databaseName: string,
-  from: Date,
-  to: Date,
-): Promise<StoredGrowth[]> {
-  const { rows } = await store.query<GrowthRow>(
-    `WITH bounds AS (
-       SELECT s.relation,
-              min(s.captured_at) AS first_at,
-              max(s.captured_at) AS last_at,
-              count(*)           AS points
-         FROM pgops.space_stats s
-         JOIN pgops.databases d ON d.id = s.database_id
-        WHERE d.name = $1 AND s.captured_at >= $2 AND s.captured_at <= $3
-        GROUP BY s.relation
-     )
-     SELECT b.relation,
-            f.size_bytes::text AS first_bytes,
-            l.size_bytes::text AS last_bytes,
-            b.first_at,
-            b.last_at,
-            b.points::text     AS points
-       FROM bounds b
-       JOIN pgops.databases d ON d.name = $1
-       JOIN pgops.space_stats f
-         ON f.database_id = d.id AND f.relation = b.relation AND f.captured_at = b.first_at
-       JOIN pgops.space_stats l
-         ON l.database_id = d.id AND l.relation = b.relation AND l.captured_at = b.last_at
-      ORDER BY (l.size_bytes - f.size_bytes) DESC, b.relation`,
-    [databaseName, from, to],
-  );
-
-  return rows.map((r) => ({
-    relation: r.relation,
-    firstBytes: Number(r.first_bytes),
-    lastBytes: Number(r.last_bytes),
-    firstAt: r.first_at,
-    lastAt: r.last_at,
-    points: Number(r.points),
-  }));
 }
 
 export interface StoredSize { capturedAt: Date; sizeBytes: number }
@@ -212,50 +68,6 @@ export async function readRelationSpace(
   return rows.map((r) => ({ capturedAt: r.captured_at, sizeBytes: Number(r.size_bytes) }));
 }
 
-/** The database's total size at one capture. */
-export interface StoredTotal {
-  capturedAt: Date;
-  sizeBytes: number;
-  /** How many relations that total was summed across. */
-  relations: number;
-}
-
-/**
- * The whole database's captured size over a window, one point per capture.
- *
- * Summed in Postgres: `space_stats` holds one row per relation per capture,
- * and the aggregate runs over `space_stats_captured_at_idx`.
- *
- * `relations` is returned because the sum covers only what pgops measured.
- * A capture that read fewer relations sums less, which would draw as the
- * database shrinking; the count lets the surface tell.
- */
-export async function readDatabaseSpace(
-  store: Pool | PoolClient,
-  databaseName: string,
-  from: Date,
-  to: Date,
-): Promise<StoredTotal[]> {
-  const { rows } = await store.query<{
-    captured_at: Date; size_bytes: string; relations: string;
-  }>(
-    `SELECT s.captured_at,
-            sum(s.size_bytes)::text AS size_bytes,
-            count(*)::text          AS relations
-       FROM pgops.space_stats s
-       JOIN pgops.databases d ON d.id = s.database_id
-      WHERE d.name = $1 AND s.captured_at >= $2 AND s.captured_at <= $3
-      GROUP BY s.captured_at
-      ORDER BY s.captured_at ASC`,
-    [databaseName, from, to],
-  );
-  return rows.map((r) => ({
-    capturedAt: r.captured_at,
-    sizeBytes: Number(r.size_bytes),
-    relations: Number(r.relations),
-  }));
-}
-
 /**
  * The most recent snapshot strictly before `before`, keyed by `query_id`.
  *
@@ -286,26 +98,6 @@ export async function readLastSnapshot(
 }
 
 interface SnapshotRow extends CounterRow { query_id: number }
-
-/**
- * One shape's statement text, by `queryid`. The text was redacted before it
- * was written. `null` when the store does not have the shape, which is
- * ordinary: it may have aged out of retention.
- */
-export async function readQueryText(
-  store: Pool | PoolClient,
-  databaseName: string,
-  queryid: string,
-): Promise<string | null> {
-  const { rows } = await store.query<{ query: string }>(
-    `SELECT q.query
-       FROM pgops.queries q
-       JOIN pgops.databases d ON d.id = q.database_id
-      WHERE d.name = $1 AND q.queryid = $2`,
-    [databaseName, queryid],
-  );
-  return rows[0]?.query ?? null;
-}
 
 /** A window of samples, ascending. An empty bucket is a sample with no sessions. */
 export async function readSamples(store: Pool, name: string, from: Date, to: Date): Promise<Sample[]> {
@@ -383,6 +175,52 @@ export async function readCoverage(store: Pool, name: string, from: Date, to: Da
   const out = Array.from({ length: columns }, () => 0);
   for (const r of rows) if (r.col >= 0 && r.col < columns) out[r.col] = Math.min(1, (r.n * BUCKET_MS) / 1000 / widthSecs);
   return out;
+}
+
+/**
+ * One minute of the health row, as the clock reads it: levels as numbers,
+ * counters as numbers to be differenced between consecutive points, and
+ * `statsReset` so a counter that fell with a reset is not read as a fall.
+ * Null is "pgops could not look". `at` and `statsReset` are epoch ms.
+ */
+export interface HealthMinute {
+  at: number;
+  connections: number | null;
+  serverConnections: number | null;
+  maxConnections: number | null;
+  lagSecs: number | null;
+  lagBytes: number | null;
+  walBytes: number | null;
+  xidAge: number | null;
+  xminAge: number | null;
+  deadlocks: number | null;
+  commits: number | null;
+  rollbacks: number | null;
+  statsReset: number | null;
+}
+
+/**
+ * The health rows of one window, oldest first, with the one row before
+ * `from` so the first interval has a predecessor and a stretch that began
+ * before the window is known to have begun before it.
+ */
+export async function readHealth(store: Pool | PoolClient, name: string, from: Date, to: Date): Promise<HealthMinute[]> {
+  const { rows } = await store.query<HealthMinute>(
+    `SELECT (extract(epoch FROM h.captured_at) * 1000)::float8 AS at,
+            h.connections, h.server_connections AS "serverConnections", h.max_connections AS "maxConnections",
+            h.replication_lag_secs AS "lagSecs", h.replication_lag_bytes::float8 AS "lagBytes",
+            h.wal_bytes::float8 AS "walBytes", h.xid_age::float8 AS "xidAge", h.xmin_age::float8 AS "xminAge",
+            h.deadlocks::float8, h.xact_commit::float8 AS commits, h.xact_rollback::float8 AS rollbacks,
+            (extract(epoch FROM h.stats_reset) * 1000)::float8 AS "statsReset"
+       FROM pgops.health_stats h JOIN pgops.databases d ON d.id = h.database_id
+      WHERE d.name = $1
+        AND h.captured_at >= coalesce((SELECT max(p.captured_at) FROM pgops.health_stats p
+                                        WHERE p.database_id = d.id AND p.captured_at < $2), $2)
+        AND h.captured_at < $3
+      ORDER BY h.captured_at`,
+    [name, from, to],
+  );
+  return rows;
 }
 
 /**
@@ -646,4 +484,14 @@ export async function readHourly(
     [name, kind, key, from, to],
   );
   return rows.map((r) => ({ at: Math.round(r.at), sessions: r.sessions }));
+}
+
+/** Whether this database's bucket at `at` (the store's now when omitted) is written. The sampler's skip. */
+export async function bucketFilled(store: Pool, name: string, at?: Date): Promise<boolean> {
+  const { rowCount } = await store.query(
+    `SELECT 1 FROM pgops.sample_buckets b JOIN pgops.databases d ON d.id = b.database_id
+      WHERE d.name = $2 AND b.bucket = ${BUCKET}`,
+    [at ?? null, name],
+  );
+  return (rowCount ?? 0) > 0;
 }

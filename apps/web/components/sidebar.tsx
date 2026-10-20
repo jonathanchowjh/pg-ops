@@ -13,8 +13,7 @@ import { cn } from '@/lib/utils';
  * catalog scan on a five-second timer.
  *
  * The first entry is the database itself, the tree; the sidebar prints the
- * database's name for it. Cleanup and Health are the old console's until
- * Stage 3 replaces them with Server.
+ * database's name for it.
  */
 export interface Page {
   /** What `useSelectedLayoutSegment` returns one level below /db/[name]; null on the tree. */
@@ -31,8 +30,7 @@ export const PAGES: readonly Page[] = [
   { segment: 'tables', href: '/tables', label: 'Tables', polls: false },
   { segment: 'queries', href: '/queries', label: 'Queries', polls: true, also: ['explain'] },
   { segment: 'indexes', href: '/indexes', label: 'Indexes', polls: false },
-  { segment: 'cleanup', href: '/cleanup', label: 'Cleanup', polls: true },
-  { segment: 'health', href: '/health', label: 'Health', polls: false },
+  { segment: 'server', href: '/server', label: 'Server', polls: true },
 ];
 
 const ITEM = 'flex items-center rounded-[5px] px-2 py-1 whitespace-nowrap hover:bg-muted hover:text-foreground '

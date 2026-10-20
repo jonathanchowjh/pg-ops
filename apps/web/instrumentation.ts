@@ -10,7 +10,7 @@
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
-  const [{ startScheduler }, { contextFor, databaseNames, ownStatementsTotal, storePool }, { sampleTick }, { placeTick }, checks] =
+  const [{ startScheduler }, { contextFor, databaseNames, storePool }, { sampleTick }, { placeTick }, checks] =
     await Promise.all([
       import('./lib/scheduler'),
       import('./lib/pools'),
@@ -22,8 +22,6 @@ export async function register(): Promise<void> {
   // The try/catch below is a backstop: register() is awaited by Next during
   // server preparation, so an escape here is the whole console failing to
   // boot over an optional history store.
-  /** This process's own-statement total at each database's last stored health row. */
-  const ownAtLastRow = new Map<string, number>();
   try {
     const store = storePool(process.env);
     // No store is not a reason to stop: the sampler keeps fifteen minutes in
@@ -42,16 +40,7 @@ export async function register(): Promise<void> {
         }
       },
       capture: async (name) => checks.captureOnce(await contextFor(name), name),
-      health: async (name) => {
-        const ctx = await contextFor(name);
-        const total = ownStatementsTotal(name);
-        const prev = ownAtLastRow.get(name);
-        const outcome = await checks.captureHealth(ctx, name, prev === undefined ? null : total - prev);
-        // Move the mark only when a row was written (or there was no mark):
-        // a skipped tick's statements belong to the next row, not to nobody.
-        if (outcome.ok === true || prev === undefined) ownAtLastRow.set(name, total);
-        return outcome;
-      },
+      health: async (name) => checks.captureHealth(await contextFor(name), name),
       migrate: checks.migrate,
       sample: sampleTick,
       place: placeTick,

@@ -15,7 +15,7 @@ import { DEFAULT_LIMIT, capped, visibleSchemas } from './shared.js';
  * space series is the `tables` rows' sizes, so it leaves it out too.
  */
 
-export type TableKind = 'table' | 'partitioned' | 'matview';
+type TableKind = 'table' | 'partitioned' | 'matview';
 
 export interface TableRead {
   name: string;
@@ -206,7 +206,6 @@ export function toTables(rows: TableReadRow[]): TablesData {
 export const tables: Check<TableReadRow, TablesData, TablesOpts> = {
   id: 'tables',
   title: 'Tables',
-  gate: 'keep-up',
   home: 'table',
   class: 'captured',
   timeoutMs: 10_000,
@@ -223,7 +222,7 @@ export const tables: Check<TableReadRow, TablesData, TablesOpts> = {
 };
 
 /** What a table's row is tagged with, most urgent first. A node shows two. */
-export type TableFlag = 'vacuum overdue' | 'xid age' | 'full scans' | 'not validated' | 'vacuuming';
+type TableFlag = 'vacuum overdue' | 'xid age' | 'full scans' | 'not validated' | 'vacuuming';
 
 /** pgHero's `missing_indexes` bounds: enough rows to matter, and under 95 % of its scans by index. */
 const FULL_SCAN_MIN_ROWS = 10_000;
@@ -368,7 +367,6 @@ export function toIndexes(rows: IndexReadRow[]): IndexesData {
 export const indexes: Check<IndexReadRow, IndexesData, IndexesOpts> = {
   id: 'indexes',
   title: 'Indexes',
-  gate: 'work',
   home: 'index',
   class: 'captured',
   timeoutMs: 10_000,
@@ -376,7 +374,7 @@ export const indexes: Check<IndexReadRow, IndexesData, IndexesOpts> = {
   map: toIndexes,
 };
 
-export type IndexFlag = 'invalid' | 'duplicate' | 'never used';
+type IndexFlag = 'invalid' | 'duplicate' | 'never used';
 
 /**
  * "Never used" is no scan since `statsReset`, and only where a drop could be

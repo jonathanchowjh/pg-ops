@@ -11,6 +11,9 @@ describe('settings against a real server', () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.data.main.find((s) => s.name === 'max_connections')?.value).toBeTruthy();
+      // A timeout the pages reason about, as SHOW prints it: `0` when off.
+      expect(result.data.main.find((s) => s.name === 'idle_in_transaction_session_timeout')?.value).toBe('0');
+      expect(result.data.autovacuum.find((s) => s.name === 'autovacuum_freeze_max_age')?.value).toBe('200000000');
       expect(result.data.autovacuum.length).toBeGreaterThan(0);
       expect(result.data.vacuum.length).toBeGreaterThan(0);
       expect(result.verdict).toBeNull();

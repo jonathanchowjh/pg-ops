@@ -60,6 +60,28 @@ describe('the scatter', () => {
     expect(view.text()).not.toContain('off the plot');
   });
 
+  /** Measured at 390 px: "1 session not idle" started near the right edge and scrolled the page sideways. */
+  it('leaves a cost line\'s label off where it would run past the plot', async () => {
+    view = await render(
+      <Scatter {...axes} marks={[mark('a', { x: 1, y: 1 }), mark('b', { x: 100, y: 100 })]}
+        iso={[{ product: 100, label: '0.1 not idle' }, { product: 7000, label: 'one session not idle, and more' }]} />,
+    );
+    expect(view.container.querySelectorAll('line')).toHaveLength(2);
+    expect(view.text()).toContain('0.1 not idle');
+    expect(view.text()).not.toContain('one session not idle');
+  });
+
+  it('leaves a point\'s label off where a cost line\'s label starts', async () => {
+    // The line x·y = 100 enters at the top left, at (1, 100); a point there is under its label.
+    view = await render(
+      <Scatter {...axes} marks={[mark('a', { x: 1, y: 1 }), mark('b', { x: 100, y: 100 }), mark('public.top', { x: 1, y: 100, weight: 3 })]}
+        iso={[{ product: 100, label: '0.1 not idle' }]} />,
+    );
+    expect(view.text()).toContain('0.1 not idle');
+    expect(view.text()).not.toContain('public.top');
+    expect(dots()).toHaveLength(3);
+  });
+
   it('rules a byte axis at round binary units, never at powers of ten printed as "9.8 KB"', async () => {
     view = await render(<Scatter {...axes} marks={[mark('a', { y: 8_192 }), mark('b', { y: 20e9 })]} />);
     const rules = [...view.container.querySelectorAll('i[aria-hidden] > span')].map((s) => s.textContent!).filter((t) => / [KMGT]?B$/.test(t));

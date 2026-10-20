@@ -62,7 +62,6 @@ SELECT pg_is_in_recovery() AS in_recovery,
 
 export const replicationLag: Check<ReplicationRow, ReplicationData> = {
   id: 'replicationLag',
-  gate: 'keep-up',
   home: 'server',
   title: 'Replication',
   class: 'live',

@@ -54,7 +54,6 @@ ORDER BY retained_bytes_num DESC NULLS LAST, slot_name`;
 
 export const slots: Check<SlotRow, SlotsData> = {
   id: 'slots',
-  gate: 'keep-up',
   home: 'server',
   title: 'Replication slots',
   class: 'live',

@@ -11,18 +11,24 @@ vi.mock('next/navigation', () => ({ useRouter: () => router }));
 const state = vi.hoisted(() => ({
   sessions: [] as unknown[],
   fail: null as unknown,
-  wraparound: null as { level: string; note: string } | null,
+  xidAge: 1000,
+  used: 5,
   run: [] as string[],
 }));
 
 vi.mock('@/lib/check', () => ({
+  // No store: the health row is off, and the live reads are the one minute.
+  readStore: async () => ({ ok: false, kind: 'off', message: 'History is off.' }),
   runCheckFor: vi.fn(async (_name: string, check: { id: string }) => {
     state.run.push(check.id);
     if (check.id === 'sessions') {
       return state.fail ?? { ok: true, verdict: null, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } };
     }
-    const verdict = check.id === 'wraparound' && state.wraparound !== null ? state.wraparound : { level: 'ok' };
-    return { ok: true, verdict, measuredAt: 0, data: {} };
+    const data = check.id === 'wraparound'
+      ? { worst: [{ database: 'prod', xactAge: state.xidAge, txnsUntilShutdown: 2_147_483_647 - state.xidAge, pctToForcedVacuum: 0 }] }
+      : check.id === 'connections' ? { max: 100, used: state.used, reserved: 3, headroom: 97 - state.used }
+        : { inRecovery: false, lagSeconds: null, standbys: 0, receiving: null };
+    return { ok: true, verdict: { level: 'ok' }, measuredAt: 0, data };
   }),
 }));
 
@@ -54,7 +60,7 @@ const buttons = (label: string) => [...view.container.querySelectorAll('button')
 
 beforeEach(() => {
   forget();
-  Object.assign(state, { sessions: [], fail: null, wraparound: null, run: [] });
+  Object.assign(state, { sessions: [], fail: null, xidAge: 1000, used: 5, run: [] });
   catalog.tablesFor.mockClear();
   catalog.value.sequences = [];
   vi.stubEnv('PGOPS_ALLOW_ACTIONS', 'true');
@@ -150,10 +156,12 @@ describe('the database page', () => {
     expect(view.container.querySelector('a[href="/db/prod/tables/public.events"]')).not.toBeNull();
   });
 
-  it('shows what a Server read judged, pointing at the page that holds it', async () => {
-    state.wraparound = { level: 'warn', note: '212M transactions old' };
+  it('judges the live Server reads as the newest minute, with no store, pointing at Server', async () => {
+    state.xidAge = 2_147_483_647 - 400_000_000;
+    state.used = 90;
     await mount();
-    expect(view.text()).toContain('212M transactions old');
-    expect(view.container.querySelector('a[href="/db/prod/cleanup"]')).not.toBeNull();
+    expect(view.text()).toContain('transaction ID age 1.7B transactions old');
+    expect(view.text()).toContain('connections 90 of 97');
+    expect(view.container.querySelector('a[href="/db/prod/server"]')).not.toBeNull();
   });
 });

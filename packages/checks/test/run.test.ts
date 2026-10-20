@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { OWN_SQL_MARKER, ownSql, runCheck, runTool } from '../src/run.js';
 import type { Check, CheckContext } from '../src/types.js';
 import { sessions } from '../src/checks/sessions.js';
-import { blocked } from '../src/checks/blocked.js';
+import { connections } from '../src/checks/connections.js';
 
 /** A fake pool: only `query` is ever called by runCheck. */
 function fakeCtx(impl: () => Promise<{ rows: unknown[] }>): CheckContext {
@@ -11,7 +11,7 @@ function fakeCtx(impl: () => Promise<{ rows: unknown[] }>): CheckContext {
 }
 
 const doubler: Check<{ n: string }, number> = {
-  id: 'doubler', gate: 'work', home: 'database',
+  id: 'doubler', home: 'database',
   title: 'Doubler',
   class: 'live',
   sql: 'SELECT 1 AS n',
@@ -45,7 +45,7 @@ describe('runCheck', () => {
     // `mock.calls[0]` as the empty tuple, which cannot be indexed.
     const impl = vi.fn(async (..._args: unknown[]) => ({ rows: [] }));
     await runCheck(fakeCtx(impl), {
-      id: 'x', title: 'x', gate: 'work', home: 'database', class: 'live', sql: 'SELECT 1', map: () => ({}),
+      id: 'x', title: 'x', home: 'database', class: 'live', sql: 'SELECT 1', map: () => ({}),
     } as never);
     expect(impl.mock.calls[0]?.[0]).toBe('SELECT 1\n/* pgops */');
   });
@@ -53,7 +53,7 @@ describe('runCheck', () => {
   it('marks a parameterised statement too, leaving its values alone', async () => {
     const impl = vi.fn(async (..._args: unknown[]) => ({ rows: [] }));
     await runCheck(fakeCtx(impl), {
-      id: 'x', title: 'x', gate: 'work', home: 'database', class: 'live',
+      id: 'x', title: 'x', home: 'database', class: 'live',
       sql: (o: { n: number }) => ({ text: 'SELECT $1', values: [o.n] }), map: () => ({}),
     } as never, { n: 7 });
     expect(impl.mock.calls[0]?.[0]).toBe('SELECT $1\n/* pgops */');
@@ -166,7 +166,7 @@ describe('runCheck’s arity is part of its type (I1)', () => {
       await runCheck(ctx, sessions);
       await runCheck(ctx, sessions, { limit: 10 });
       // A void-Opts check keeps its two-argument call.
-      await runCheck(ctx, blocked);
+      await runCheck(ctx, connections);
     };
     expect(typeof neverCalled).toBe('function');
   });
@@ -234,7 +234,7 @@ describe('queryWithTimeout: pool hygiene when ROLLBACK itself fails', () => {
  */
 describe('runCheck resolves the threshold a verdict crossed', () => {
   const graded: Check<{ n: string }, number> = {
-    id: 'graded', gate: 'work', home: 'database',
+    id: 'graded', home: 'database',
     title: 'Graded',
     class: 'live',
     sql: 'SELECT 1 AS n',

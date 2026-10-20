@@ -14,7 +14,7 @@ export interface WraparoundRow {
   freeze_max_age: number;
 }
 
-export interface WraparoundEntry {
+interface WraparoundEntry {
   database: string;
   xactAge: number;
   /** Transactions remaining before the server refuses writes. The alarm. */
@@ -47,7 +47,6 @@ LIMIT 10`;
 
 export const wraparound: Check<WraparoundRow, WraparoundData> = {
   id: 'wraparound',
-  gate: 'keep-up',
   home: 'server',
   title: 'Transaction ID wraparound',
   class: 'live',

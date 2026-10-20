@@ -11,9 +11,9 @@ import { audited } from './audited.js';
  *                       reused), or it is not a client backend.
  * - `gone`           — the pid is no longer present; nothing to do.
  */
-export type KillOutcome = 'terminated' | 'session-changed' | 'gone';
+type KillOutcome = 'terminated' | 'session-changed' | 'gone';
 
-export interface KillTarget {
+interface KillTarget {
   pid: number;
   /** Session identity captured at selection (pg_stat_activity.backend_start::text). */
   backendStart: string | null;
@@ -62,7 +62,7 @@ export async function killBackend(ctx: CheckContext, target: KillTarget, meta: A
   }, (outcome) => outcome);
 }
 
-export interface BulkKillResult {
+interface BulkKillResult {
   pid: number;
   outcome: KillOutcome;
   /**

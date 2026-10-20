@@ -4,7 +4,7 @@ import { withPostgres } from './harness.js';
 import type { Check } from '../src/types.js';
 
 const version: Check<{ v: string }, number> = {
-  id: 'version', gate: 'work', home: 'database', title: 'Server version', class: 'live',
+  id: 'version', home: 'database', title: 'Server version', class: 'live',
   // No bind parameter on purpose: a plain-string `check.sql` gets no `values`
   // array from runCheck, so a literal `$1` would be rejected with 42P02.
   sql: "SELECT current_setting('server_version_num')::text AS v",

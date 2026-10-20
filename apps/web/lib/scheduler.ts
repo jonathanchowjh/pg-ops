@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { messageOf } from '@pgops/checks';
+import { BUCKET_MS, messageOf } from '@pgops/checks';
 
 /**
  * The capture cadence. Dense enough for query-stat deltas to chart, sparse
@@ -8,8 +8,8 @@ import { messageOf } from '@pgops/checks';
 export const CAPTURE_INTERVAL_MS = 5 * 60_000;
 
 /**
- * The health cadence. One row per database per minute, which is the
- * resolution the Health pages chart at for ninety days.
+ * The health cadence. One row per database per minute: the resolution
+ * Server's panels and the health row read, kept for ninety days.
  */
 export const HEALTH_INTERVAL_MS = 60_000;
 
@@ -24,7 +24,7 @@ export const HEALTH_SLOW_PASS_MS = 30_000;
  * The sample cadence: one bucket. A tick reads only when no page's poll has
  * filled the current bucket, so with a page open it sends nothing.
  */
-export const SAMPLE_INTERVAL_MS = 15_000;
+export const SAMPLE_INTERVAL_MS = BUCKET_MS;
 
 /** The placement cadence. A shape is in two snapshots within ten minutes of first running; this plans it within the next. */
 export const PLACE_INTERVAL_MS = 60_000;

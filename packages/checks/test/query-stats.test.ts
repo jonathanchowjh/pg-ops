@@ -1,11 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   queryStats,
-  slowQueries,
-  SLOW_QUERY_DEFAULTS,
   type QueryStatRow,
-  type QueryStatRowData,
-  type QueryStatsData,
   type QueryStatsOpts,
 } from '../src/checks/query-stats.js';
 
@@ -151,45 +147,3 @@ describe('queryStats shape', () => {
   });
 });
 
-describe('slowQueries', () => {
-  const q = (calls: number, meanMs: number): QueryStatRowData => ({
-    queryid: `${calls}-${meanMs}`, query: 'SELECT 1', calls, totalMs: calls * meanMs,
-    meanMs, stddevMs: 0, rows: calls, cacheHitPct: 100, redacted: false,
-  });
-  const data = (rows: QueryStatRowData[]): Pick<QueryStatsData, 'rows'> => ({ rows });
-
-  /**
-   * pgHero's defaults: PGHERO_SLOW_QUERY_CALLS=100 and PGHERO_SLOW_QUERY_MS=20.
-   * A query called twice that takes a second is a one-off, and one called a
-   * million times at 1ms is the database working.
-   */
-  it('needs BOTH enough calls and enough mean time', () => {
-    const rows = [q(100, 20), q(99, 20), q(100, 19), q(1, 5000), q(1e6, 1)];
-    expect(slowQueries(data(rows)).map((r) => r.queryid)).toEqual(['100-20']);
-  });
-
-  it('treats each default as inclusive at its exact value', () => {
-    expect(slowQueries(data([q(100, 20)]))).toHaveLength(1);
-    expect(slowQueries(data([q(99, 20)]))).toHaveLength(0);
-    expect(slowQueries(data([q(100, 19.999)]))).toHaveLength(0);
-  });
-
-  it('takes overrides for both bounds', () => {
-    const rows = [q(5, 50)];
-    expect(slowQueries(data(rows), { minCalls: 5, minMeanMs: 50 })).toHaveLength(1);
-    expect(slowQueries(data(rows), { minCalls: 6, minMeanMs: 50 })).toHaveLength(0);
-  });
-
-  /**
-   * A redacted row still carries full cost figures. Dropping it would hide
-   * the slowest query when the operator lacks privilege to name it.
-   */
-  it('keeps a redacted row whose cost qualifies', () => {
-    const redacted = { ...q(500, 100), queryid: null, query: null, redacted: true };
-    expect(slowQueries(data([redacted]))).toHaveLength(1);
-  });
-
-  it('exposes the pgHero defaults it applies', () => {
-    expect(SLOW_QUERY_DEFAULTS).toEqual({ minCalls: 100, minMeanMs: 20 });
-  });
-});

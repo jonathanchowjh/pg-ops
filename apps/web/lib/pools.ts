@@ -20,26 +20,17 @@ export class UnknownDatabaseError extends Error {
   }
 }
 
-/**
- * What this process holds for one monitored database.
- *
- * `ownTotal` counts the statements issued since the process started, at the
- * client, where a statement leaves the process. Per process, so a second
- * replica's polling is invisible. The health tick takes its own window over
- * it.
- */
+/** What this process holds for one monitored database. */
 interface Target {
   pool: Pool;
   /** Probed on first use; cannot change without a restart, which drops the pool. */
   serverVersion?: number;
-  ownTotal: number;
 }
 
 interface Held {
   /**
    * Keyed by connection URL rather than by name, so two names pointing at
-   * one database share a pool and the `pg_stat_database` row the counts are
-   * compared against, and a renamed database does not strand its pool.
+   * one database share a pool, and a renamed database does not strand its pool.
    */
   targets: Map<string, Target>;
   /** Replaced when PGOPS_STORE_URL changes, so it is retired, not left open. */
@@ -47,21 +38,6 @@ interface Held {
 }
 const KEY = Symbol.for('pgops.pools');
 const HELD: Held = ((globalThis as { [KEY]?: Held })[KEY] ??= { targets: new Map(), store: null });
-
-/** The state for a configured name, if it resolves and has been contacted. Never throws. */
-function targetNamed(name: string): Target | undefined {
-  try {
-    const url = configured().find((d) => d.name === name)?.url;
-    return url === undefined ? undefined : HELD.targets.get(url);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Statements this process has sent the named database since it started. */
-export function ownStatementsTotal(name: string): number {
-  return targetNamed(name)?.ownTotal ?? 0;
-}
 
 function configured(): DatabaseConfig[] {
   return readDatabases(process.env);
@@ -72,25 +48,8 @@ export function databaseNames(): string[] {
 }
 
 /** The longest any statement to a monitored database runs, and waits on a lock, unless its check says otherwise. */
-export const TARGET_STATEMENT_MS = 15_000;
-export const TARGET_LOCK_MS = 1_000;
-
-const TRANSACTION_CONTROL = /^\s*(BEGIN|COMMIT|ROLLBACK|SET LOCAL)\b/i;
-
-/**
- * Count every statement this process sends the database into `ownTotal`,
- * at the client, where both `pool.query` and a checked-out client end up.
- * BEGIN, COMMIT, ROLLBACK and SET LOCAL are not counted; they are the
- * envelope, not a statement.
- */
-function countStatements(target: Target): void {
-  onEveryStatement(target.pool, (args) => {
-    const first = args[0];
-    const text = typeof first === 'string' ? first : (first as { text?: unknown } | null)?.text;
-    if (typeof text === 'string' && !TRANSACTION_CONTROL.test(text)) target.ownTotal += 1;
-    return args;
-  });
-}
+const TARGET_STATEMENT_MS = 15_000;
+const TARGET_LOCK_MS = 1_000;
 
 function targetFor(db: DatabaseConfig): Target {
   const existing = HELD.targets.get(db.url);
@@ -117,8 +76,7 @@ function targetFor(db: DatabaseConfig): Target {
   // A pool-level error with no listener is an unhandled 'error' event, which
   // terminates the Node process.
   pool.on('error', () => {});
-  const target: Target = { pool, ownTotal: 0 };
-  countStatements(target);
+  const target: Target = { pool };
   HELD.targets.set(db.url, target);
   return target;
 }
@@ -144,8 +102,8 @@ export async function contextFor(name: string): Promise<CheckContext> {
 }
 
 /** What any one store statement may take, and wait on a lock. */
-export const STORE_STATEMENT_MS = 10_000;
-export const STORE_LOCK_MS = 2_000;
+const STORE_STATEMENT_MS = 10_000;
+const STORE_LOCK_MS = 2_000;
 
 /**
  * Retire the cached pool, if any. Best-effort: `.end()` rejecting must not
@@ -215,8 +173,7 @@ function markOwnStatements(pool: Pool): void {
 
 /**
  * Pass every statement any client of `pool` sends through `each`, which
- * returns the arguments to send: to mark the store's statements, and to
- * count those sent to a monitored database.
+ * returns the arguments to send: to mark the store's statements as pgops's own.
  *
  * The client is the one place to stand, because every statement ends up
  * there: `pool.query` checks a client out itself, through the callback form

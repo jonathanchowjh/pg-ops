@@ -92,7 +92,6 @@ Two things about the test setup catch people:
 ```
 packages/checks/          Everything that knows Postgres. No React, no Next, no HTTP.
   src/types.ts            Check, Threshold, Verdict, CheckResult, Series, Tool, ActionMeta
-  src/gates.ts            The four gates: the console's organising model, as data
   src/run.ts              runCheck / runSeries / runTool: run one thing, never throw
   src/registry.ts         CHECKS, ACTIONS, SERIES, TOOLS, and the pgHero parity map
   src/checks/             One file per area: locks, sessions, catalog, wraparound…
@@ -133,7 +132,7 @@ the codebase is variations.
 
 1. **A check is an object**, not a class:
    [`Check<Row, Data, Opts>`](packages/checks/src/types.ts). It carries an
-   `id`, a `title`, a `gate`, a `class`, its `sql`, a pure `map` from rows to
+   `id`, a `title`, a `home`, a `class`, its `sql`, a pure `map` from rows to
    domain data, and optionally `thresholds` and a pure `verdict`.
 2. **`runCheck`** ([run.ts](packages/checks/src/run.ts)) checks the
    requirements, runs the SQL, calls `map`, calls `verdict`, and returns a
@@ -146,10 +145,10 @@ the codebase is variations.
    dynamic so Next cannot prerender it at build time, and converts
    configuration errors into results that say "the console is misconfigured"
    rather than "your database is down".
-4. **`CheckPanel`** ([components/check-panel.tsx](apps/web/components/check-panel.tsx))
-   renders the result. The failed case is handled here, once, so a page written
-   later cannot forget it. A `verdict` that crossed a threshold renders the
-   threshold's `because` and `remedy`.
+4. **The page** renders the result where its rows would be. A read that
+   failed says so in that place, never an empty list: `ReadAlert` for the
+   sessions, a line for anything else. A finding past its mark is a line in
+   the tree's answer, with the way to its node.
 
 A `Series` is the same idea for "how has this moved", reading the store and
 yielding points with no verdict. A `Tool` is a question the operator asks with
@@ -168,11 +167,11 @@ of two ways the project tried.
 | Rule | Held by |
 |---|---|
 | `packages/checks` depends on `pg` and nothing else, and imports nothing from the app | `boundaries.test.ts` |
-| Every check declares a gate, and its gate agrees with the registry | `registry.test.ts` |
+| Every check declares a home, and every parity entry names a check that exists | `registry.test.ts` |
 | Every pgHero capability resolves to exactly one state, and none is owed | `registry.test.ts` |
 | The README's parity counts match what the registry computes | `registry.test.ts`, which parses `README.md` |
 | Every page is dynamic; nothing opts back into static rendering | `guards.test.ts`, and the image smoke test end to end |
-| Only pages of live reads and the overview render `<Refresh>`; a captured read never runs on a poll | `guards.test.ts` |
+| Only pages of live reads and the fleet render `<Refresh>`; a captured read never runs on a poll | `guards.test.ts` |
 | No page or component constructs a `Pool` or renders a query outside `<Sql>` | `guards.test.ts` |
 | DDL appears only under `store/migrations/` | `guards.test.ts` |
 | A statistics reset is named in exactly one file, and never on the capture path | `guards.test.ts` |
@@ -203,31 +202,32 @@ authority.
   that is always rolled back. pgops's own sessions and statements are
   counted, not hidden.
 
-### The four gates
+### The tree
 
-Every check belongs to one of four gates. A request has to clear them in
-order. The gates are being retired for the tree: each check now also declares a
-`home`, the node its finding belongs to, and the database page no longer renders
-by gate.
+Every check declares a `home`: the node its finding belongs to. The nodes are
+one tree, and the database's page is that tree on a clock.
 
 ```
-1 connect   can it get in?          connections, sessions, sources
-2 wait      can it get its locks?   blocked sessions, the wait graph
-3 work      can it do the work?     long-running queries, statement statistics
-4 keep-up   can the server keep up? replication, vacuum, space
+Database                  one configured connection
+├─ Table
+│   ├─ Query              a statement shape that reads or writes this table
+│   │   └─ Session        a connection running that statement now
+│   ├─ Index
+│   └─ Sequence
+├─ not on any table       BEGIN, SET, idle in transaction holding nothing
+└─ its Server             connections, replication, WAL, transaction ID age
 ```
 
-The order matters for two reasons. Causes run down it and **symptoms run up
-it**: vacuum falls behind at gate 4, tables bloat, queries slow at gate 3,
-connections pile up at gate 1. And a failure at one gate disguises itself as
-the next: a session blocked at gate 2 is `active` in `pg_stat_activity`, so a
-naive tool lists it as a long-running query at gate 3 and offers to terminate
-it. pgops marks such a session with the root blocker it is queued behind and
-withholds the terminate advice, because killing a waiter frees nothing.
+A finding is stated once, on its node, and every finding surfaces at the top
+of the tree, worst first. A lock chain is one finding on the table fought
+over, naming its root, with Terminate on the root alone. A session waiting on
+a lock is `active` in `pg_stat_activity`, so a naive tool lists it as a
+long-running query and offers to terminate it; pgops ties it to its root and
+offers nothing on it, because killing a waiter frees nothing.
 
-The gate tree is data, in
-[packages/checks/src/gates.ts](packages/checks/src/gates.ts). Every check
-declares its gate, and a test fails if any capability is added without one.
+The tree is built in one pure function,
+[apps/web/lib/tree.ts](apps/web/lib/tree.ts), with its tests beside it, and
+`coverage.test.ts` fails if a check's home draws it nowhere.
 
 ### Why two packages
 
@@ -426,7 +426,6 @@ puts the decision on a web page with the reasoning written beside it.
 | **Check** | One question about a database, as one SQL query plus the code that turns rows into an answer. `connections`, `locks`, `wraparound` are checks. |
 | **Verdict** | A check's opinion: `ok`, `warn` or `critical`, with a short note. Some checks only report and have no verdict. |
 | **Threshold** | The number a verdict is judged against, with two sentences: `because` (why this number) and `remedy` (what to do). |
-| **Gate** | Which of the four stages of a request's life a check measures: `connect`, `wait`, `work` or `keep-up`. Being retired; see **Home**. |
 | **Home** | The node a check's finding belongs to: `database`, `table`, `query`, `session`, `index`, `sequence` or `server`. |
 | **Class** | How a check runs. `live` may run on a page's five-second poll. `captured` is a catalog scan: the capture stores its rows, a table's own page asks about that table, and a button runs the bloat estimate. |
 | **Series** | A reading over time, read from the store. Query load per interval, a table's size per day. |
@@ -465,7 +464,7 @@ puts the decision on a web page with the reasoning written beside it.
 Read these files in this order, including the comments.
 
 1. [packages/checks/src/types.ts](packages/checks/src/types.ts) — the shapes.
-2. [packages/checks/src/gates.ts](packages/checks/src/gates.ts) — the model.
+2. [apps/web/lib/tree.ts](apps/web/lib/tree.ts) — the model.
 3. [packages/checks/src/checks/connections.ts](packages/checks/src/checks/connections.ts)
    — a complete check with thresholds and a verdict. Notice the comments
    explaining a `::int` cast and a `missing_ok` argument; both prevented real
@@ -476,10 +475,10 @@ Read these files in this order, including the comments.
 5. [packages/checks/src/run.ts](packages/checks/src/run.ts) — how a check is
    run and why it never throws.
 6. [apps/web/lib/check.ts](apps/web/lib/check.ts) — the web wrapper.
-7. [apps/web/app/db/[name]/cleanup/page.tsx](apps/web/app/db/%5Bname%5D/cleanup/page.tsx)
-   — a page that renders three checks.
-8. [apps/web/components/check-panel.tsx](apps/web/components/check-panel.tsx)
-   — where the failed case and the verdict badge render.
+7. [apps/web/app/db/[name]/server/page.tsx](apps/web/app/db/%5Bname%5D/server/page.tsx)
+   — a page that renders the server's reads, live and on the clock.
+8. [apps/web/components/panel.tsx](apps/web/components/panel.tsx)
+   — one fact about a node across the clock's window.
 
 ### Day 3: run the tests, then break a guard on purpose
 
@@ -497,9 +496,9 @@ message, and revert:
   in "the poll boundary". Read the test's comment for why.
 - Change the `Shipped` row in the README's parity table to 59. `npm test`
   fails in "the README parity claims".
-- Delete the `gate:` line from `connections.ts`. `npm run typecheck:test`
-  fails with `TS2741: Property 'gate' is missing`. Now run `npm test`: it
-  also fails, but in two registry tests rather than on the type. Vitest strips
+- Delete the `home:` line from `connections.ts`. `npm run typecheck:test`
+  fails with `TS2741: Property 'home' is missing`. Now run `npm test`: it
+  also fails, but in the registry tests rather than on the type. Vitest strips
   types without checking them, which is why the pre-commit hook runs the
   typechecks as their own steps and why you should too.
 - Add `CREATE TABLE x (id int)` as a string constant anywhere under
@@ -548,7 +547,6 @@ WHERE datname = current_database()`;
  */
 export const tempFiles: Check<TempFilesRow, TempFilesData> = {
   id: 'tempFiles',
-  gate: 'work',
   home: 'server',
   title: 'Temporary files',
   class: 'live',
@@ -560,7 +558,7 @@ export const tempFiles: Check<TempFilesRow, TempFilesData> = {
 };
 ```
 
-Notice what the compiler makes you say: a `gate`, a `class`, a `map`. Leave
+Notice what the compiler makes you say: a `home`, a `class`, a `map`. Leave
 `verdict` out, and the check reports without judging. If you did add one, you
 would add `thresholds` with a non-empty `because` on each, and a test at each
 boundary.
@@ -569,13 +567,7 @@ boundary.
 `tempFiles` to the `CHECKS` object. Add `export type * from
 './checks/temp-files.js';` to `packages/checks/src/index.ts` so the console
 can name `TempFilesData`. Run `npm test`; the registry tests confirm the
-check exists, has a gate and has a home.
-
-`npm run test:web` now fails in "the overview covers every live check": a
-live check is one the fleet page runs. In `worstVerdict`, in
-`apps/web/app/page.tsx`, add `runCheckFor(name, CHECKS.tempFiles)` at the end
-of the `Promise.all`, and `tempFiles` at the end of both lists of names
-around it.
+check exists and has a home.
 
 **3. Test it.** Create `packages/checks/test/temp-files.int.test.ts`:
 
@@ -602,28 +594,28 @@ describe('tempFiles', () => {
 `npm run test:int -- temp-files` to run only this file.
 
 **4. Render it.** The check is live, so it may go on a page that polls. Its
-home is `server`, whose reads the Cleanup page draws until Server has a page
-of its own; `apps/web/test/coverage.test.ts` fails until some page of its
-home names it. In `apps/web/app/db/[name]/cleanup/page.tsx`, add it to the
-page's `Promise.all` and render a `CheckPanel` with the others:
+home is `server`, so it belongs on `/server`; `apps/web/test/coverage.test.ts`
+fails until some page of its home names it. In
+`apps/web/app/db/[name]/server/page.tsx`, add it to the page's `Promise.all`
+under `live ?`, and render it as a section with the others:
 
 ```tsx
-  runCheckFor(name, CHECKS.tempFiles),  // last in the Promise.all; name it `temp`
+    live ? runCheckFor(name, CHECKS.tempFiles) : null,  // last in the Promise.all; name it `temp`
 // …
-<CheckPanel title="Temporary files" result={temp}>
-  {(d) => <p className="text-sm">{formatCount(d.files)} files, {formatBytes(d.bytes)}</p>}
-</CheckPanel>
+<h2 className={SECTION}>Temporary files<small className={NOTE}>since the statistics were reset</small></h2>
+{temp === null ? null : !temp.ok ? <p className="text-muted-foreground">Temporary files could not be read: {temp.message}</p>
+  : <p>{formatCount(temp.data.files)} files, {formatBytes(temp.data.bytes)}</p>}
 ```
 
 The page's own test mocks `runCheckFor` and hands back an empty object for
 any check it has no fixture for, so it keeps passing. That is worth noticing:
-a new panel is not tested until you add a fixture and an assertion for it in
-`apps/web/test/cleanup-page.test.tsx`.
+a new section is not tested until you add a fixture and an assertion for it in
+`apps/web/test/server-page.test.tsx`.
 
 Run `npm run test:web` and `npm run --workspace @pgops/web typecheck`.
 
-**5. Look at it.** `npm run --workspace @pgops/web dev`, open the Cleanup page,
-and stop the container to see the panel go `UNAVAILABLE`. That is the whole
+**5. Look at it.** `npm run --workspace @pgops/web dev`, open Server,
+and stop the container to see the section say it could not be read. That is the whole
 path: SQL, map, registry, test, page. Every step above was run against this
 repository at 2.5.0 and passes; if one does not for you, the code has moved
 and this guide needs a fix, which is itself a good first pull request.
@@ -649,7 +641,7 @@ repository. Treat the comment itself as the record of the decision.
 Whichever you pick:
 
 1. Find the existing test closest to what you are about to write and read it
-   whole. `tree-page.test.tsx` and `check-panel.test.tsx` are good
+   whole. `tree-page.test.tsx` and `tree-view.test.tsx` are good
    starting points for page and component tests.
 2. Write the test first and watch it fail for the reason you expect. Then
    make it pass. Every fix in the changelog was built this way.

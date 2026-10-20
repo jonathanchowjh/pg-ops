@@ -1,5 +1,36 @@
-import type { PoolClient } from 'pg';
+import type { Pool, PoolClient } from 'pg';
+import { guardClient } from '../run.js';
+import { chainEvents, type EventKind, type Sample, type StatementInfo } from '../samples.js';
 import type { CounterPoint } from '../series/query-stats.js';
+
+/**
+ * A fixed key for the migration lock. Arbitrary, but it must never change:
+ * two pgops versions racing to migrate the same store have to contend on the
+ * same key or the lock does nothing.
+ */
+export const MIGRATION_LOCK_KEY = 4021975;
+
+/**
+ * Namespace for per-database capture locks, used with the two-int form
+ * `pg_try_advisory_lock(ns, database_id)` so a capture lock can never collide
+ * with the single-int migration lock above.
+ */
+export const CAPTURE_LOCK_NS = 4021976;
+
+/**
+ * Namespace for the per-database sample lock, taken for one transaction:
+ * two writers of one database's adjacent buckets each recompute the minute
+ * from what the other has committed, never from a snapshot that misses it.
+ */
+const SAMPLE_LOCK_NS = 4021978;
+
+/**
+ * Namespace for the per-database health lock. Separate from the capture
+ * lock: the five-minute capture can hold its lock for a long time, and a
+ * health tick that shared it would skip every minute the capture ran.
+ */
+export const HEALTH_LOCK_NS = 4021977;
+
 
 export interface Retention {
   queryStatsDays: number; spaceStatsDays: number; healthStatsDays: number;
@@ -220,20 +251,16 @@ export async function prune(
 
 /**
  * The metric columns of pgops.health_stats, in table order. The insert is
- * built from this list, so a column added to migration 005's successor is
+ * built from this list, so a column added by a migration after 011 is
  * added here and nowhere else.
  */
 export const HEALTH_COLUMNS = [
   'connections', 'server_connections', 'max_connections',
-  'sessions', 'sessions_abandoned', 'sessions_fatal', 'sessions_killed',
-  'blocked', 'longest_wait_secs', 'idle_in_txn', 'idle_in_transaction_time', 'deadlocks',
-  'active', 'active_time', 'longest_query_secs',
-  'xact_commit', 'xact_rollback', 'blks_hit', 'blks_read', 'temp_bytes',
-  'own_statements', 'stats_reset',
-  'replication_lag_secs', 'wal_bytes', 'xid_age', 'xmin_age', 'size_bytes',
+  'deadlocks', 'xact_commit', 'xact_rollback', 'stats_reset',
+  'replication_lag_secs', 'replication_lag_bytes', 'wal_bytes', 'xid_age', 'xmin_age', 'size_bytes',
 ] as const;
 
-export type HealthColumn = (typeof HEALTH_COLUMNS)[number];
+type HealthColumn = (typeof HEALTH_COLUMNS)[number];
 
 /**
  * 64-bit and numeric counters travel as strings, the way the sampling
@@ -437,4 +464,159 @@ export async function writeCaptured(
      ON CONFLICT DO NOTHING`,
     [databaseId, w.read, rows],
   );
+}
+
+/** The bucket a moment falls in. `$1` is the moment; null means the store's now. */
+export const BUCKET = `to_timestamp(floor(extract(epoch FROM COALESCE($1::timestamptz, now())) / 15) * 15)`;
+
+/**
+ * Write one sample into its bucket, or find the bucket already written.
+ *
+ * The bucket is the store's clock, not this process's: two replicas and
+ * three browser tabs all poll the same database, and the bucket row's
+ * primary key is what makes exactly one of them the sample.
+ *
+ * One transaction, and it never waits on the monitored database: the
+ * sample was read before this was called.
+ */
+export async function recordSample(
+  store: Pool,
+  name: string,
+  sample: Sample,
+  texts: ReadonlyMap<string, StatementInfo>,
+  at?: Date,
+): Promise<'written' | 'filled'> {
+  const client = await store.connect();
+  const release = guardClient(client);
+  try {
+    const databaseId = await upsertDatabase(client, name);
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1, $2)', [SAMPLE_LOCK_NS, databaseId]);
+    const claim = await client.query<{ bucket: Date; at: Date }>(
+      `INSERT INTO pgops.sample_buckets (database_id, bucket, hidden, truncated)
+       VALUES ($2, ${BUCKET}, $3, $4)
+       ON CONFLICT DO NOTHING
+       RETURNING bucket, COALESCE($1::timestamptz, now()) AS at`,
+      [at ?? null, databaseId, sample.hidden, sample.truncated],
+    );
+    if (claim.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return 'filled';
+    }
+    const { bucket, at: storeAt } = claim.rows[0]!;
+
+    // `since` is written as an age back from the store's moment, so a
+    // process whose clock is off does not shift every span.
+    await client.query(
+      `INSERT INTO pgops.session_samples
+         (database_id, bucket, pid, backend_start, app, class, since, statement, relations, blocked_by)
+       SELECT $1, $2, s.pid, s.backend_start, s.app, s.class,
+              $3::timestamptz - s.age_ms * interval '1 millisecond', s.statement,
+              ARRAY(SELECT jsonb_array_elements_text(s.relations)), s.blocked_by
+         FROM jsonb_to_recordset($4::jsonb)
+           AS s(pid int, backend_start text, app text, class text, age_ms double precision,
+                statement text, relations jsonb, blocked_by int)
+       ON CONFLICT DO NOTHING`,
+      [databaseId, bucket, storeAt, JSON.stringify(sample.sessions.map((s) => ({
+        pid: s.pid, backend_start: s.backendStart, app: s.app, class: s.cls,
+        age_ms: sample.at - s.since, statement: s.statement, relations: s.relations, blocked_by: s.blockedBy,
+      })))],
+    );
+
+    await client.query(
+      `INSERT INTO pgops.sample_statements (database_id, key, query, relations)
+       SELECT $1, t.key, t.query, ARRAY(SELECT jsonb_array_elements_text(t.relations))
+         FROM jsonb_to_recordset($2::jsonb) AS t(key text, query text, relations jsonb)
+       ON CONFLICT (database_id, key) DO UPDATE
+          SET relations = ARRAY(SELECT DISTINCT r
+                                  FROM unnest(pgops.sample_statements.relations || EXCLUDED.relations) AS r
+                                 ORDER BY r
+                               )
+        WHERE NOT pgops.sample_statements.relations @> EXCLUDED.relations`,
+      [databaseId, JSON.stringify([...texts].map(([key, v]) => ({ key, query: v.text, relations: v.relations })))],
+    );
+
+    // Every class seen in this minute is recomputed, so each row's mean is
+    // over the buckets the minute has so far.
+    await client.query(
+      `WITH m AS (SELECT date_trunc('minute', $2::timestamptz) AS minute),
+       n AS (SELECT count(*)::real AS buckets FROM pgops.sample_buckets b, m
+              WHERE b.database_id = $1 AND b.bucket >= m.minute AND b.bucket < m.minute + interval '1 minute'),
+       s AS (SELECT x.* FROM pgops.session_samples x, m
+              WHERE x.database_id = $1 AND x.bucket >= m.minute AND x.bucket < m.minute + interval '1 minute'),
+       r AS (
+         SELECT 'd' AS kind, '' AS key, class, count(*) AS c FROM s GROUP BY class
+         UNION ALL
+         SELECT 't', t.relation, s.class, count(*)
+           FROM s CROSS JOIN LATERAL unnest(CASE WHEN cardinality(s.relations) = 0 THEN ARRAY['']
+                                                 ELSE s.relations END) AS t(relation)
+          GROUP BY t.relation, s.class
+         UNION ALL
+         SELECT 'q', statement, class, count(*) FROM s WHERE statement IS NOT NULL GROUP BY statement, class
+       )
+       INSERT INTO pgops.load_minutes (database_id, minute, kind, key, class, sessions)
+       SELECT $1, m.minute, r.kind, r.key, r.class, r.c / n.buckets FROM r, m, n
+       ON CONFLICT (database_id, minute, kind, key, class) DO UPDATE SET sessions = EXCLUDED.sessions`,
+      [databaseId, bucket],
+    );
+
+    // The sample before this one, however long ago: `chainEvents` says what a gap means.
+    const { rows: prior } = await client.query<{ relations: string[]; bucket: Date }>(
+      `SELECT ARRAY(SELECT DISTINCT COALESCE(s.relations[1], '')
+                      FROM pgops.session_samples s
+                     WHERE s.database_id = $1 AND s.bucket = b.bucket AND s.class = 'lock') AS relations,
+              b.bucket
+         FROM pgops.sample_buckets b
+        WHERE b.database_id = $1 AND b.bucket < $2
+        ORDER BY b.bucket DESC
+        LIMIT 1`,
+      [databaseId, bucket],
+    );
+    const before = prior[0];
+    const marks = chainEvents(
+      before === undefined ? null : { bucket: before.bucket.getTime(), tables: before.relations },
+      sample,
+      bucket.getTime(),
+    );
+    for (const e of marks) {
+      await client.query(
+        `INSERT INTO pgops.events (database_id, at, kind, relation) VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING`,
+        [databaseId, new Date(e.at), e.kind, e.relation],
+      );
+    }
+    await client.query('COMMIT');
+    return 'written';
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Record an event at the store's now. `unreachable` and `reachable` are
+ * transitions: written only when the last of the pair was the other one, so
+ * an outage is one mark and not one per tick.
+ */
+export async function recordEvent(store: Pool, name: string, kind: EventKind, relation = ''): Promise<void> {
+  const client = await store.connect();
+  const release = guardClient(client);
+  try {
+    const databaseId = await upsertDatabase(client, name);
+    const transition = kind === 'unreachable' || kind === 'reachable';
+    await client.query(
+      `INSERT INTO pgops.events (database_id, at, kind, relation)
+       SELECT $1, now(), $2, $3
+        WHERE NOT $4::boolean
+           OR COALESCE((SELECT e.kind FROM pgops.events e
+                         WHERE e.database_id = $1 AND e.kind IN ('unreachable', 'reachable')
+                         ORDER BY e.at DESC LIMIT 1), 'reachable') <> $2
+       ON CONFLICT DO NOTHING`,
+      [databaseId, kind, relation, transition],
+    );
+  } finally {
+    release();
+  }
 }

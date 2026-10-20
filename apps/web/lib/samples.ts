@@ -1,22 +1,32 @@
 import {
-  BUCKET_MS, CHAIN_THRESHOLDS, CHECKS, IDLE_THRESHOLDS, bucketFilled, chainEvents, lockTables, readCoverage, readEvents, readLoad,
+  BUCKET_MS, CHAIN_THRESHOLDS, CHECKS, IDLE_THRESHOLDS, XID_WRAPAROUND, bucketFilled, chainEvents, lockTables, readCoverage, readEvents, readHealth, readLoad,
   messageOf, readSamples, readStatements, recordEvent, recordSample, runCheck, sampleOf,
-  type CheckResult, type EventKind, type LoadCell, type Sample, type SessionsData, type StatementInfo, type StoredEvent,
-  type Threshold,
+  type CheckResult, type ConnectionsData, type EventKind, type HealthMinute, type LoadCell, type ReplicationData, type Sample,
+  type SessionsData, type StatementInfo, type StoredEvent, type Threshold, type WraparoundData,
 } from '@pgops/checks';
-import { runCheckFor } from './check';
+import { readStore, runCheckFor, type StoreRead } from './check';
 import { DAY_MS, gridFor, one, type Grid, type Search } from './clock';
 import { ConfigError } from './config';
 import { UnknownDatabaseError, contextFor, storePool } from './pools';
-import { buildTree, type Marks, type Tree, type TreeInput } from './tree';
+import { GAP_MS, buildTree, type Marks, type Tree, type TreeInput } from './tree';
 
 /** What the console remembers with no store: the last fifteen minutes, in this process. */
 export const MEMORY_MS = 15 * 60_000;
 /** The 24-hour strip's columns: eight minutes each. */
-export const DAY_COLUMNS = 180;
+const DAY_COLUMNS = 180;
 const DAY_COLUMN_MS = DAY_MS / DAY_COLUMNS;
 /** Where the 24-hour strip ends: the close of the column holding `now`. */
-const dayEnd = (now: number): number => Math.floor(now / DAY_COLUMN_MS) * DAY_COLUMN_MS + DAY_COLUMN_MS;
+export const dayEnd = (now: number): number => Math.floor(now / DAY_COLUMN_MS) * DAY_COLUMN_MS + DAY_COLUMN_MS;
+
+/** The 24-hour strip's columns from the day's cells: per column, sessions not waiting on a lock, and waiting. */
+export function dayColumns(day: readonly LoadCell[], into?: [number, number][]): [number, number][] {
+  const columns = into ?? Array.from({ length: DAY_COLUMNS }, (): [number, number] => [0, 0]);
+  for (const c of day) {
+    const col = columns[c.col];
+    if (col !== undefined) col[c.cls === 'lock' ? 1 : 0] += c.sessions;
+  }
+  return columns;
+}
 
 interface Ring { samples: Sample[]; events: StoredEvent[]; statements: Map<string, StatementInfo>; down: boolean }
 
@@ -182,7 +192,7 @@ async function filled(name: string): Promise<boolean> {
 }
 
 /** `SampleWindow`, not `Window`: this file is compiled with the DOM lib, where `Window` is the browser's. */
-export interface SampleWindow {
+interface SampleWindow {
   samples: Sample[];
   cells: LoadCell[];
   /** How much of each column was sampled, for a window that reads the rollup. Null otherwise: the samples say. */
@@ -257,7 +267,7 @@ async function fromStore(
   return { samples, cells, coverage, day, events, statements: await readStatements(store, name, [...keys]), kept: 'store', failed: null };
 }
 
-export interface ClockRead {
+interface ClockRead {
   grid: Grid;
   now: number;
   /** The live sessions read. Null for a window in the past, and for a page with no sessions on it. */
@@ -300,11 +310,7 @@ export async function clockFor(
   const made = read === null ? null : await recordFor(name, read, readAt);
   const stored = await windowFor(name, sessions ? grid : { ...grid, raw: false, columns: 1 }, opts.relation);
 
-  const columns: [number, number][] = Array.from({ length: DAY_COLUMNS }, () => [0, 0]);
-  for (const c of stored.day) {
-    const col = columns[c.col];
-    if (col !== undefined) col[c.cls === 'lock' ? 1 : 0] += c.sessions;
-  }
+  const columns = dayColumns(stored.day);
   const dayTo = dayEnd(now);
   const pinAt = Number(one(sp.at));
   return {
@@ -320,16 +326,88 @@ export async function clockFor(
   };
 }
 
-const mark = (list: Threshold[], level: 'warn' | 'critical'): number => list.find((t) => t.level === level)!.value;
+const mark = (list: Threshold[] | undefined, level: 'warn' | 'critical'): number => list!.find((t) => t.level === level)!.value;
 
-/** The chain's and the idle transaction's marks, as every page that builds a tree passes them. */
+/** Every finding's marks, from the checks' own thresholds, as every page that builds a tree passes them. */
 export const MARKS: Marks = {
   chainCriticalSecs: mark(CHAIN_THRESHOLDS, 'critical'),
   idleWarnSecs: mark(IDLE_THRESHOLDS, 'warn'),
   idleCriticalSecs: mark(IDLE_THRESHOLDS, 'critical'),
+  headroomWarnPct: mark(CHECKS.connections.thresholds, 'warn'),
+  headroomCriticalPct: mark(CHECKS.connections.thresholds, 'critical'),
+  // `replicationLag` follows pgHero and judges nothing; the standby marks judge both sides.
+  lagWarnSecs: mark(CHECKS.standbys.thresholds, 'warn'),
+  lagCriticalSecs: mark(CHECKS.standbys.thresholds, 'critical'),
+  xidWarnAge: XID_WRAPAROUND - mark(CHECKS.wraparound.thresholds, 'warn'),
+  xidCriticalAge: XID_WRAPAROUND - mark(CHECKS.wraparound.thresholds, 'critical'),
 };
 
+/** The health row's minutes over a window. No store and a store that will not answer are told apart. */
+export function healthFor(name: string, grid: { from: number; to: number }): Promise<StoreRead<HealthMinute[]>> {
+  return readStore((store) => readHealth(store, name, new Date(grid.from), new Date(grid.to)));
+}
+
+/**
+ * The three Server reads a live tree makes, as the newest minute of the
+ * health series: so one function judges the past and now, and a console
+ * with no store still has its live findings. The health row's limit is net
+ * of the reserved connections, so this one is too. A primary's standby lag
+ * is the row's: `replicationLag` is a standby's own view.
+ */
+export function liveMinute(
+  at: number,
+  lag: CheckResult<ReplicationData> | null,
+  xid: CheckResult<WraparoundData> | null,
+  connections: CheckResult<ConnectionsData> | null,
+): HealthMinute {
+  const worst = xid?.ok ? xid.data.worst[0] : undefined;
+  return {
+    at,
+    connections: null,
+    serverConnections: connections?.ok ? connections.data.used : null,
+    maxConnections: connections?.ok ? connections.data.max - connections.data.reserved : null,
+    lagSecs: lag?.ok && lag.data.inRecovery === true ? lag.data.lagSeconds : null,
+    lagBytes: null, walBytes: null, xidAge: worst?.xactAge ?? null, xminAge: null,
+    deadlocks: null, commits: null, rollbacks: null, statsReset: null,
+  };
+}
+
 type FromClock = 'from' | 'to' | 'columns' | 'live' | 'raw' | 'coverage' | 'samples' | 'cells' | 'events' | 'statements' | 'bucketMs' | 'marks';
+
+/** One database's row on the fleet: its tree with no tables, which is its band, its findings and what was sampled; and when it was last reachable. */
+export interface FleetRow {
+  name: string;
+  /** What a row draws of its tree, and no more: the client is sent this for every database. */
+  tree: Pick<Tree, 'from' | 'to' | 'columns' | 'band' | 'seen' | 'findings' | 'marks'>;
+  /** The last 24 hours' reachability transitions, oldest first, so the row can say "unreachable since" at any cursor. */
+  transitions: { at: number; kind: 'unreachable' | 'reachable' }[];
+}
+
+/**
+ * One database's fleet row, from the store or this process's memory and
+ * from nothing else: the fleet contacts no database, so one that is down
+ * costs the others nothing. The health row's minutes are the server's
+ * findings; with no live read, the newest stored minute stands for now.
+ */
+export async function fleetRowFor(name: string, grid: Grid): Promise<{ row: FleetRow; day: LoadCell[]; events: StoredEvent[] }> {
+  const [stored, health] = await Promise.all([windowFor(name, grid), healthFor(name, grid)]);
+  // At live the newest sample stands for now, as the tree's fresh read does, while it is newer than a gap:
+  // the sampler's next tick is due, not missed. An older one is a database nobody is sampling.
+  const newest = stored.samples.at(-1);
+  const live = grid.live && newest !== undefined && grid.to - newest.at <= GAP_MS;
+  const samples = live ? [...stored.samples, { ...newest!, at: grid.to - 1 }] : stored.samples;
+  const tree = buildTree({
+    from: grid.from, to: grid.to, columns: grid.columns, live, raw: grid.raw,
+    coverage: stored.coverage ?? undefined, samples, cells: stored.cells, events: stored.events,
+    statements: stored.statements, bucketMs: BUCKET_MS, marks: MARKS, health: health.ok ? health.value : [],
+    tables: [], tablesTotal: null, shapes: [], open: new Set(), find: '',
+  });
+  const transitions = stored.events
+    .filter((e): e is StoredEvent & { kind: 'unreachable' | 'reachable' } => e.kind === 'unreachable' || e.kind === 'reachable')
+    .map((e) => ({ at: e.at, kind: e.kind }));
+  const { from, to, columns, band, seen, findings, marks } = tree;
+  return { row: { name, tree: { from, to, columns, band, seen, findings, marks }, transitions }, day: stored.day, events: stored.events };
+}
 
 /** The tree over the clock's window. Every page that draws one takes these from the clock the same way. */
 export function treeFor(clock: ClockRead, input: Omit<TreeInput, FromClock>): Tree {

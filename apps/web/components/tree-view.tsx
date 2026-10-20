@@ -1,19 +1,26 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, type KeyboardEvent, type MouseEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Axis, ClockLines, Readout, Track, useClock } from '@/components/clock';
+import { Axis, ClockLines, Readout, Track, useClock, useWidth } from '@/components/clock';
 import { EntityLink } from '@/components/entity-link';
 import { KillButton } from '@/components/actions';
 import {
-  CLASS_BG, MoreRow, QuietRow, QuietTableRow, ROW_PX, SessionRow, StatementRow, StripSvg, TableRow, Ties, Unseen, reading,
+  CLASS_BG, ClassKey, MoreRow, QuietRow, QuietTableRow, ROW_PX, SessionRow, StatementRow, StripSvg, TableRow, Ties, Unseen, reading,
   type RowContext,
 } from '@/components/tree-rows';
-import { CLASS_NAMES, CLASSES, clockTime, columnAt, EVENT_NAMES, fractionAt, keepQuery, toggled, windowQuery } from '@/lib/clock';
+import { CLASS_NAMES, CLASSES, clockTime, columnAt, EVENT_NAMES, fractionAt, keepQuery, labelMarks, toggled, windowQuery } from '@/lib/clock';
 import { formatDuration } from '@/lib/format';
 import { flatten, listRows, readingAt, tiesOf, type Show } from '@/lib/rows';
-import { FOLD_NONE, FOLD_QUIET, NONE, UNSEEN, findingsAt, scaleSteps, unseenAt, type Pointer, type Ranked, type Tree } from '@/lib/tree';
+import {
+  FOLD_NONE, FOLD_QUIET, NONE, UNSEEN, findingsAt, scaleSteps, unseenAt, type HealthKind, type Pointer, type Ranked, type Tree,
+} from '@/lib/tree';
+
+/** What the answer calls a server finding. The figure follows in mono. */
+const HEALTH_LABEL: Record<HealthKind, string> = {
+  connections: 'connections', replication: 'replication', xid: 'transaction ID age', deadlock: 'deadlock',
+};
 import { cn } from '@/lib/utils';
 
 /**
@@ -69,9 +76,10 @@ export function TreeView({ database, tree, find, pointers, catalog, grant, kept,
 
   // An empty database still has a server under it: its findings are not the tree's to hide.
   if (tree.empty) {
+    const shown = clock.live ? pointers : [];
     return (
       <>
-        {clock.live && pointers.length > 0 ? <Answer database={database} ranked={[]} pointers={pointers} ctx={ctx} pidHref={pidHref} /> : null}
+        {ranked.length > 0 || shown.length > 0 ? <Answer database={database} ranked={ranked} pointers={shown} ctx={ctx} pidHref={pidHref} /> : null}
         <p className="my-3 rounded-md border bg-card px-3.5 py-2.5 text-muted-foreground">This database has no tables and no sessions.</p>
       </>
     );
@@ -83,6 +91,9 @@ export function TreeView({ database, tree, find, pointers, catalog, grant, kept,
       <Answer database={database} ranked={ranked} pointers={clock.live ? pointers : []} ctx={ctx} pidHref={pidHref} />
       <div
         role="treegrid"
+        tabIndex={0}
+        onKeyDown={onTreeKey}
+        onMouseDown={onTreeMouseDown}
         aria-label={`${database}: tables, statements and sessions`}
         className="relative mb-4 overflow-hidden rounded-md border bg-card select-none [--lab:max(240px,40%)] max-md:[--lab:max(132px,42%)]"
       >
@@ -175,7 +186,13 @@ function Answer({ database, ranked, pointers, ctx, pidHref }: {
     : <> on <EntityLink database={database} name={table} className="font-mono font-semibold hover:underline" /></>);
   return (
     <div role="status" className="relative my-3 rounded-md border border-l-[3px] border-l-warning-ink bg-warning-surface px-3.5 text-foreground">
-      {ranked.map(({ finding: f, waiting, secs }) => (
+      {ranked.map(({ finding: f, waiting, secs }) => (f.level !== undefined ? (
+        // The server's: no node to open and no action; Server holds the figure over time.
+        <div key={f.id} className={line} data-level={f.kind}>
+          <span>{HEALTH_LABEL[f.kind as HealthKind]} <b className="font-mono font-semibold">{f.note}</b></span>
+          <Link href={`/db/${database}/server`} className="ml-auto text-[13px] text-muted-foreground hover:text-foreground hover:underline">where ›</Link>
+        </div>
+      ) : (
         <div key={f.id} className={line} data-level={f.kind}>
           {f.kind === 'idle' ? (
             <span><Link href={pidHref(f.table, f.pid!)} className="font-mono font-semibold hover:underline">{f.pid}</Link> idle in transaction{where(f.table)}</span>
@@ -196,7 +213,7 @@ function Answer({ database, ranked, pointers, ctx, pidHref }: {
             <span className="ml-auto"><KillButton prominent database={database} pid={f.pid} backendStart={f.backendStart} /></span>
           ) : null}
         </div>
-      ))}
+      )))}
       {worstFirst.map((s) => (
         <div key={`${s.label}/${s.note}`} className={line}>
           <span>{s.label} <b className="font-mono font-semibold">{s.note}</b></span>
@@ -213,7 +230,12 @@ function Band({ tree, ctx }: { tree: Tree; ctx: RowContext }) {
   const unseen = unseenAt(tree.seen, ctx.col);
   const steps = scaleSteps(tree.band.reduce((m, c) => Math.max(m, c[0]! + c[1]! + c[2]! + c[3]! + c[4]!), 0) * 1.05);
   const top = steps.at(-1)!;
-  const marks = tree.events.filter((e) => EVENT_NAMES[e.kind] !== undefined);
+  const [plot, width] = useWidth<HTMLDivElement>();
+  const marks = labelMarks(
+    tree.events.filter((e) => EVENT_NAMES[e.kind] !== undefined)
+      .map((e) => ({ ...e, label: `${EVENT_NAMES[e.kind]}${e.relation === '' ? '' : ` ${e.relation.replace(/^public\./, '')}`}` })),
+    tree, width,
+  );
   return (
     <div className="grid grid-cols-[var(--lab)_minmax(0,1fr)] items-stretch">
       <div className="flex min-w-0 flex-col px-2.5 py-2 pr-[30px]">
@@ -228,7 +250,7 @@ function Band({ tree, ctx }: { tree: Tree; ctx: RowContext }) {
           </div>
         ))}
       </div>
-      <div className="relative min-w-0">
+      <div ref={plot} className="relative min-w-0">
         <Track
           className="aspect-[2.8/1] max-h-[280px] min-h-40 w-full border-l"
           tip={(t) => {
@@ -246,13 +268,17 @@ function Band({ tree, ctx }: { tree: Tree; ctx: RowContext }) {
           {marks.map((e) => (
             <i
               key={`${e.at}/${e.kind}/${e.relation}`}
+              data-mark
               aria-hidden
               className="absolute inset-y-0 border-l border-dashed border-foreground"
-              style={{ left: `${Math.max(0, Math.min(1, fractionAt(tree, e.at))) * 100}%` }}
+              style={{ left: `${e.x * 100}%` }}
             >
-              <span className="absolute top-0 left-1 rounded-xs bg-card px-0.5 text-xs/4 whitespace-nowrap text-foreground">
-                {EVENT_NAMES[e.kind]}{e.relation === '' ? '' : ` ${e.relation.replace(/^public\./, '')}`}
-              </span>
+              {/* Near the right edge the label reads leftwards, or the card would cut it. */}
+              {e.named ? (
+                <span className={cn('absolute top-0 rounded-xs bg-card px-0.5 text-xs/4 whitespace-nowrap text-foreground', e.leftward ? 'right-1' : 'left-1')}>
+                  {e.label}
+                </span>
+              ) : null}
             </i>
           ))}
         </Track>
@@ -266,7 +292,8 @@ function Band({ tree, ctx }: { tree: Tree; ctx: RowContext }) {
 function BandTable({ tree, offset }: { tree: Tree; offset: (t: number) => number }) {
   const width = (tree.to - tree.from) / tree.columns;
   return (
-    <table className="sr-only">
+    // In a block: a table ignores sr-only's 1 px box and would lay out at full width.
+    <div className="sr-only"><table>
       <caption>Sessions not idle, by class</caption>
       <thead><tr><th>Time</th><th>Total</th>{CLASSES.map((c) => <th key={c}>{CLASS_NAMES[c]}</th>)}</tr></thead>
       <tbody>
@@ -279,7 +306,7 @@ function BandTable({ tree, offset }: { tree: Tree; offset: (t: number) => number
           </tr>
         ))}
       </tbody>
-    </table>
+    </table></div>
   );
 }
 
@@ -311,6 +338,9 @@ export function RowsView({ database, tree, show, actions, moreHref }: {
     <>
       <div
         role="treegrid"
+        tabIndex={0}
+        onKeyDown={onTreeKey}
+        onMouseDown={onTreeMouseDown}
         aria-label={sessionsOnly ? 'Sessions' : 'Statements and sessions'}
         className="relative mb-4 overflow-hidden rounded-md border bg-card select-none [--lab:max(300px,46%)] max-md:[--lab:max(132px,42%)]"
       >
@@ -320,13 +350,7 @@ export function RowsView({ database, tree, show, actions, moreHref }: {
             <span suppressHydrationWarning className="max-md:hidden">at {clockTime(clock.at, clock.offset(clock.at))}</span>
             <span className="ml-auto">{sessionsOnly ? 'in this state for' : 'sessions not idle'}</span>
           </div>
-          <div className="flex flex-wrap items-center gap-x-3 self-stretch border-l px-2.5">
-            {CLASSES.map((c) => (
-              <span key={c} className="flex items-center gap-1.5">
-                <i aria-hidden className={cn('size-2 rounded-xs', CLASS_BG[c])} />{CLASS_NAMES[c]}
-              </span>
-            ))}
-          </div>
+          <ClassKey />
         </div>
         <div className="relative">
           {rows.map((r) => {
@@ -363,4 +387,51 @@ export function RowsView({ database, tree, show, actions, moreHref }: {
       <Readout />
     </>
   );
+}
+
+/**
+ * The treegrid's keys. The arrows walk the rows, Home and End jump; right
+ * opens a fold, left closes it or climbs to the row above it; Enter follows
+ * the row's link. A key in a row's own control is the control's, and with no
+ * row focused only the keys that reach one are taken: the rest step the clock.
+ * A key with a modifier is the browser's, as it is the clock's.
+ */
+function onTreeKey(e: KeyboardEvent<HTMLDivElement>): void {
+  const target = e.target as HTMLElement;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (target.matches('button, a, input, textarea')) return;
+  const rows = [...e.currentTarget.querySelectorAll<HTMLElement>('[role=row]')];
+  const row = target.closest<HTMLElement>('[role=row]');
+  const i = row === null ? -1 : rows.indexOf(row);
+  if (i < 0 && !['ArrowDown', 'Home', 'End'].includes(e.key)) return;
+  const fold = row?.querySelector<HTMLElement>('[role=rowheader] button[aria-expanded]');
+  const level = Number(row?.getAttribute('aria-level') ?? 1);
+  switch (e.key) {
+    case 'ArrowDown': rows[Math.min(rows.length - 1, i + 1)]?.focus(); break;
+    case 'ArrowUp': rows[Math.max(0, i - 1)]?.focus(); break;
+    case 'Home': rows[0]?.focus(); break;
+    case 'End': rows.at(-1)?.focus(); break;
+    case 'ArrowRight': if (fold?.getAttribute('aria-expanded') === 'false') fold.click(); break;
+    case 'ArrowLeft':
+      if (fold?.getAttribute('aria-expanded') === 'true') fold.click();
+      else rows.slice(0, i).reverse().find((r) => Number(r.getAttribute('aria-level') ?? 1) < level)?.focus();
+      break;
+    case 'Enter': row?.querySelector<HTMLElement>('[role=rowheader] a')?.click(); break;
+    default: return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+/**
+ * A click in the tree is for the clock: it pins, or drags a window. A row it
+ * focused would keep the arrows, and a pinned page could not step, so the
+ * click focuses nothing and lets go of the row the keys had. A row's own
+ * controls take focus as usual.
+ */
+function onTreeMouseDown(e: MouseEvent<HTMLDivElement>): void {
+  if ((e.target as HTMLElement).closest('button, a, input, textarea, select') !== null) return;
+  e.preventDefault();
+  const held = document.activeElement;
+  if (held instanceof HTMLElement && e.currentTarget.contains(held)) held.blur();
 }

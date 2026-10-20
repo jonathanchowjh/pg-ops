@@ -1,9 +1,11 @@
-import type { LoadCell, Sample, SampleSession, SessionClass, StatementInfo, StoredEvent } from '@pgops/checks';
+// Types only: this file reaches the client bundle, and the checks package carries `pg`.
+import type { HealthMinute, LoadCell, Sample, SampleSession, SessionClass, StatementInfo, StoredEvent } from '@pgops/checks';
 import { CLASSES } from './clock';
+import { formatBytes, formatCompact, formatDuration } from './format';
 
 /** A session shorter than this in one state is counted on its statement, never listed. */
-export const LASTING_MS = 30_000;
-export const SESSIONS_SHOWN = 3;
+const LASTING_MS = 30_000;
+const SESSIONS_SHOWN = 3;
 export const STATEMENTS_SHOWN = 20;
 export const QUIET_SHOWN = 200;
 /** Hot tables past this many are counted, and reached by the find box. */
@@ -33,7 +35,23 @@ export interface TableFact {
 
 /** A finding whose home is another page: the top of the tree names it and points there. */
 export interface Pointer { label: string; note: string; level: 'warn' | 'critical'; href: string }
-export interface Marks { chainCriticalSecs: number; idleWarnSecs: number; idleCriticalSecs: number }
+/** The marks every finding is judged against, read once from the checks' own thresholds. */
+export interface Marks {
+  chainCriticalSecs: number;
+  idleWarnSecs: number;
+  idleCriticalSecs: number;
+  /** Connections left as a share of the limit, in percent: warn below the first, critical below the second. */
+  headroomWarnPct: number;
+  headroomCriticalPct: number;
+  lagWarnSecs: number;
+  lagCriticalSecs: number;
+  /** Transaction ID age: warn at or past the first, critical at or past the second. Wraparound less the transactions left. */
+  xidWarnAge: number;
+  xidCriticalAge: number;
+}
+
+/** A health row's minute holds until the next; past this with no next it says nothing. */
+const HEALTH_HOLD_MS = 150_000;
 
 /** A statement the window's snapshots saw run, and where its plan puts it. */
 export interface Shape {
@@ -85,6 +103,8 @@ export interface TreeInput {
   only?: string;
   /** Lasting sessions listed under a statement before the rest are counted. */
   sessionsMax?: number;
+  /** The health row's minutes, with the live reads as the newest. The tree and the fleet pass them; a node's page has none. */
+  health?: readonly HealthMinute[];
 }
 
 export interface Span { cls: SessionClass; from: number; to: number; blockedBy: number | null }
@@ -119,9 +139,12 @@ export interface TableNode {
   flags: string[];
 }
 
-export interface Finding {
+export type HealthKind = 'connections' | 'replication' | 'xid' | 'deadlock';
+
+interface Finding {
   id: string;
-  kind: 'chain' | 'idle';
+  kind: 'chain' | 'idle' | HealthKind;
+  /** A health finding is the server's: `NONE`. */
   table: string;
   /** The chain's root or the idle session. Null for a chain known only from its events. */
   pid: number | null;
@@ -133,6 +156,9 @@ export interface Finding {
   from: number;
   to: number;
   waiters: { pid: number; from: number; to: number }[];
+  /** A health finding's level, fixed for its stretch, and its worst figure as text. A chain's and an idle's are read at the cursor. */
+  level?: 'warn' | 'critical';
+  note?: string;
 }
 
 export interface Tree {
@@ -193,8 +219,9 @@ export function roundUp(max: number): number {
 /**
  * Every node's strip, counted from the samples. A sample holds from its own
  * moment to the next one, so a column narrower than a bucket is not striped.
- * `seen` is every node any sample named, including the live one, whose
- * moment is the window's end and so covers no column yet.
+ * `seen` is every node any sample named. On a live window that reads samples
+ * the last one is the live read, and it is the newest column whole: a
+ * session ended since the bucket before it reads nothing there (decision 48).
  */
 function fromSamples(input: TreeInput): { strips: Map<string, Strip>; seen: Set<string>; cover: number[] } {
   const { from, to, columns, samples, bucketMs } = input;
@@ -221,6 +248,12 @@ function fromSamples(input: TreeInput): { strips: Map<string, Strip>; seen: Set<
       // Once per table it is on: a session on three tables lights all three.
       for (const r of s.relations.length > 0 ? s.relations : [NONE]) bump(`t:${r}`, ci);
       bump(`q:${s.statement ?? NONE}`, ci);
+    }
+    if (input.live && input.raw && i === samples.length - 1) {
+      for (const strip of strips.values()) strip[columns - 1] = [0, 0, 0, 0, 0];
+      for (const [k, v] of counts) stripOf(k)[columns - 1] = [...v];
+      cover[columns - 1] = 1;
+      return;
     }
     const a = Math.max(sample.at, from);
     const b = Math.min(sample.at + bucketMs, samples[i + 1]?.at ?? Infinity, to);
@@ -376,6 +409,78 @@ function fromEvents(input: TreeInput, sampled: readonly Finding[]): Finding[] {
   return out;
 }
 
+const HEALTH_KINDS = ['connections', 'replication', 'xid'] as const;
+type Judged = (typeof HEALTH_KINDS)[number];
+
+/** One minute of one kind against the marks: its level and the figure judged, or null within the marks or unread. */
+function judge(kind: Judged, p: HealthMinute, marks: Marks): { level: 'warn' | 'critical'; value: number } | null {
+  const level = (critical: boolean, warn: boolean): 'warn' | 'critical' | null => (critical ? 'critical' : warn ? 'warn' : null);
+  if (kind === 'connections') {
+    if (p.serverConnections === null || p.maxConnections === null || p.maxConnections <= 0) return null;
+    const left = (100 * (p.maxConnections - p.serverConnections)) / p.maxConnections;
+    const l = level(left < marks.headroomCriticalPct, left < marks.headroomWarnPct);
+    return l === null ? null : { level: l, value: p.serverConnections };
+  }
+  if (kind === 'replication') {
+    if (p.lagSecs === null) return null;
+    const l = level(p.lagSecs >= marks.lagCriticalSecs, p.lagSecs >= marks.lagWarnSecs);
+    return l === null ? null : { level: l, value: p.lagSecs };
+  }
+  if (p.xidAge === null) return null;
+  const l = level(p.xidAge >= marks.xidCriticalAge, p.xidAge >= marks.xidWarnAge);
+  return l === null ? null : { level: l, value: p.xidAge };
+}
+
+function noteOf(kind: Judged, p: HealthMinute): string {
+  if (kind === 'connections') return `${p.serverConnections} of ${p.maxConnections}`;
+  if (kind === 'replication') {
+    return p.lagBytes === null ? formatDuration(p.lagSecs) : `${formatDuration(p.lagSecs)} · ${formatBytes(p.lagBytes)}`;
+  }
+  return `${formatCompact(p.xidAge ?? 0)} transactions old`;
+}
+
+/**
+ * The server's findings over the window, from the health row's minutes:
+ * connections, replication lag and transaction ID age as one finding per
+ * run of one level, each noting its worst minute; a deadlock as the counter
+ * advancing between two minutes with the same `stats_reset`. A minute holds
+ * until the next, or for HEALTH_HOLD_MS with none: where nobody looked,
+ * nothing is said. Pure.
+ */
+function healthFindings(points: readonly HealthMinute[], marks: Marks, to: number): Finding[] {
+  const sorted = [...points].sort((a, b) => a.at - b.at);
+  const out: Finding[] = [];
+  const runs = new Map<Judged, { finding: Finding; worst: number }>();
+  const make = (kind: HealthKind, from: number, end: number, level: 'warn' | 'critical', note: string): Finding => ({
+    id: `${kind}@${from}`, kind, table: NONE, pid: null, backendStart: null, app: null,
+    since: from, from, to: end, waiters: [], level, note,
+  });
+  sorted.forEach((p, i) => {
+    const end = Math.min(sorted[i + 1]?.at ?? to, p.at + HEALTH_HOLD_MS, to);
+    for (const kind of HEALTH_KINDS) {
+      const j = judge(kind, p, marks);
+      const run = runs.get(kind);
+      if (j !== null && run !== undefined && run.finding.level === j.level && run.finding.to >= p.at) {
+        run.finding.to = end;
+        if (j.value > run.worst) { run.worst = j.value; run.finding.note = noteOf(kind, p); }
+        continue;
+      }
+      runs.delete(kind);
+      if (j === null) continue;
+      const f = make(kind, p.at, end, j.level, noteOf(kind, p));
+      out.push(f);
+      runs.set(kind, { finding: f, worst: j.value });
+    }
+    const prev = sorted[i - 1];
+    if (prev !== undefined && p.deadlocks !== null && prev.deadlocks !== null
+      && p.statsReset === prev.statsReset && p.deadlocks > prev.deadlocks) {
+      const n = p.deadlocks - prev.deadlocks;
+      out.push(make('deadlock', prev.at, p.at, 'warn', `${n} deadlock${n === 1 ? '' : 's'}`));
+    }
+  });
+  return out.filter((f) => f.to > f.from);
+}
+
 interface Seen { s: SampleSession; at: number }
 
 /** One session's stretches on one statement. A new state, a new `since` or a gap starts a new one. */
@@ -425,8 +530,9 @@ export function buildTree(input: TreeInput): Tree {
   const strip = (k: string): Strip => strips.get(k) ?? blank(columns);
 
   const sampled = findingsOf(input);
-  const findings = (sessionsShown ? sampled : [...sampled, ...fromEvents(input, sampled)])
+  const onTable = (sessionsShown ? sampled : [...sampled, ...fromEvents(input, sampled)])
     .sort((a, b) => a.from - b.from || a.id.localeCompare(b.id));
+  const findings = [...onTable, ...healthFindings(input.health ?? [], input.marks, to)];
   const rootPids = new Set(sampled.filter((f) => f.kind === 'chain').map((f) => f.pid));
   const chainPids = new Set<number | null>(rootPids);
   for (const f of sampled) for (const w of f.waiters) chainPids.add(w.pid);
@@ -532,7 +638,7 @@ export function buildTree(input: TreeInput): Tree {
     .sort((a, b) => load(strip(`t:${b}`)) - load(strip(`t:${a}`)) || (weight.get(b) ?? 0) - (weight.get(a) ?? 0) || a.localeCompare(b));
   const hotSet = new Set(hot);
   // With no word from the URL, open where the newest finding is, else the hottest table.
-  const newest = [...findings].sort((a, b) => b.to - a.to)[0];
+  const newest = [...onTable].sort((a, b) => b.to - a.to)[0];
   const opened = input.open ?? new Set([newest === undefined ? hot[0] ?? '' : newest.table === NONE ? FOLD_NONE : newest.table]);
 
   const facts = new Map(input.tables.map((t) => [t.name, t]));
@@ -603,6 +709,8 @@ export interface Ranked { finding: Finding; level: 'warn' | 'critical'; waiting:
 export function findingsAt(tree: Pick<Tree, 'findings' | 'marks'>, at: number): Ranked[] {
   const level = (secs: number, critical: number): 'warn' | 'critical' => (secs >= critical ? 'critical' : 'warn');
   return tree.findings.filter((f) => f.from <= at && at < f.to).map((finding): Ranked => {
+    // A health finding was judged when it was built; its stretch is one level.
+    if (finding.level !== undefined) return { finding, level: finding.level, waiting: 0, secs: (at - finding.from) / 1000 };
     if (finding.kind === 'idle') {
       const secs = (at - finding.since) / 1000;
       return { finding, level: level(secs, tree.marks.idleCriticalSecs), waiting: 0, secs };

@@ -39,21 +39,19 @@ describe('captureHealth', () => {
     await withPostgres(async (ctx, pool) => {
       await migrate(pool);
       await counted(pool);
-      const outcome = await captureHealth({ ...ctx, store: pool }, 'prod', 4);
+      const outcome = await captureHealth({ ...ctx, store: pool }, 'prod');
       expect(outcome).toEqual({ ok: true, missing: [] });
       const [row] = await rows(pool, 'prod');
       expect(row.connections).toBeGreaterThan(0);
       expect(row.server_connections).toBeGreaterThanOrEqual(row.connections);
       expect(row.max_connections).toBeGreaterThan(0);
-      expect(row.blocked).toBe(0);
-      expect(row.longest_wait_secs).toBe(0);
       expect(Number(row.xact_commit)).toBeGreaterThan(0);
       expect(Number(row.size_bytes)).toBeGreaterThan(0);
       expect(Number(row.wal_bytes)).toBeGreaterThan(0);
       expect(Number(row.xid_age)).toBeGreaterThan(0);
-      expect(row.own_statements).toBe(4);
       // A primary with no standby has no lag figure. Null, not zero.
       expect(row.replication_lag_secs).toBeNull();
+      expect(row.replication_lag_bytes).toBeNull();
     });
   });
 
@@ -98,50 +96,8 @@ describe('captureHealth', () => {
     });
   });
 
-  /**
-   * Two databases on one server, a lock chain in one. The live `blocked`
-   * check would report it from either; the stored row for the quiet database
-   * must say zero.
-   */
-  it('does not charge one database with another database\'s lock chain', async () => {
-    await withPostgres(async (ctxA, poolA) => {
-      await withPostgres(async (ctxB) => {
-        await migrate(poolA);
-        await poolA.query('CREATE TABLE held (id int)');
-        const holder = await poolA.connect();
-        const waiter = await poolA.connect();
-        try {
-          await holder.query('BEGIN');
-          await holder.query('LOCK TABLE held IN ACCESS EXCLUSIVE MODE');
-          const waiting = waiter.query('SELECT count(*) FROM held').catch(() => {});
-          await awaitPublished(poolA, 'the lock wait',
-            `SELECT count(*) > 0 AS ready FROM pg_stat_activity
-              WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0`);
-
-          expect(await captureHealth({ ...ctxA, store: poolA }, 'busy')).toMatchObject({ ok: true });
-          expect(await captureHealth({ ...ctxB, store: poolA }, 'quiet')).toMatchObject({ ok: true });
-
-          const [busy] = await rows(poolA, 'busy');
-          const [quiet] = await rows(poolA, 'quiet');
-          expect(busy.blocked).toBe(1);
-          expect(busy.longest_wait_secs).toBeGreaterThan(0);
-          expect(quiet.blocked).toBe(0);
-          expect(quiet.longest_wait_secs).toBe(0);
-          // The server total is the same from both; the per-database counts are not.
-          expect(Math.abs(busy.server_connections - quiet.server_connections)).toBeLessThanOrEqual(2);
-
-          await holder.query('ROLLBACK');
-          await waiting;
-        } finally {
-          holder.release();
-          waiter.release();
-        }
-      });
-    });
-  });
-
-  /** Everything the role can read must still land. */
-  it('counts the connections for a role that cannot read other sessions, and nulls what needs a state', async () => {
+  /** Nothing in the row needs a session's state, so everything lands. */
+  it('counts the connections for a role that cannot read other sessions', async () => {
     await withPostgres(async (ctx, pool) => {
       await migrate(pool);
       await counted(pool);
@@ -160,11 +116,9 @@ describe('captureHealth', () => {
         // The superuser's own connection is in this database and unreadable to the role.
         expect(row.connections).toBeGreaterThanOrEqual(2);
         expect(row.server_connections).toBeGreaterThanOrEqual(row.connections);
-        expect(row.active).toBeNull();
-        expect(row.idle_in_txn).toBeNull();
         expect(row.max_connections).toBeGreaterThan(0);
         expect(Number(row.xact_commit)).toBeGreaterThan(0);
-        expect(row.blocked).toBe(0);
+        expect(Number(row.xmin_age)).toBeGreaterThanOrEqual(0);
       } finally {
         await blind.end().catch(() => {});
         await pool.query(`DROP ROLE ${role}`);

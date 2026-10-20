@@ -1,5 +1,5 @@
-import type { Check, Threshold, Verdict } from '../types.js';
-import { escalate, ownSession, unreadableClient, visibleSchemas } from './shared.js';
+import type { Check, Threshold } from '../types.js';
+import { ownSession, unreadableClient, visibleSchemas } from './shared.js';
 
 export type SessionClass = 'cpu' | 'io' | 'idle' | 'other' | 'lock';
 
@@ -205,7 +205,6 @@ const num = (s: string | null): number | null => (s == null ? null : Number(s));
 
 export const sessions: Check<SessionRow, SessionsData, SessionOpts> = {
   id: 'sessions',
-  gate: 'connect',
   home: 'session',
   title: 'Sessions',
   class: 'live',
@@ -253,7 +252,7 @@ export const CHAIN_THRESHOLDS: Threshold[] = [
     remedy: 'Terminate the root blocker, not a waiter.' },
 ];
 
-/** Idle in transaction: the two marks `sessionStates` carries, for the tree's finding. */
+/** Idle in transaction: the two marks the tree's finding is judged by. */
 export const IDLE_THRESHOLDS: Threshold[] = [
   { level: 'warn', value: 60, unit: 'seconds',
     because: 'a transaction idle for a minute is holding row locks and pinning the '
@@ -262,160 +261,3 @@ export const IDLE_THRESHOLDS: Threshold[] = [
     because: 'five minutes of idle-in-transaction blocks autovacuum from reclaiming '
            + 'anything newer, so bloat starts accumulating on top of the locking' },
 ];
-
-export interface PrepareOpts { sort: 'triage' | 'active'; filter: string }
-
-/** Triage priority: idle-in-transaction first. */
-function rank(r: Session): number {
-  if (isIdleInTransaction(r.state)) return 0;
-  if (r.state === 'active') return 1;
-  return 2;
-}
-
-/**
- * Pure: sort and filter for the sessions table.
- *
- * `filter` sees only `rows`, the page that survived the SQL's LIMIT. When
- * `SessionsData.truncated` is true it can miss a live session; use
- * `SessionOpts.pid` to look one up, and show `truncated` beside the filter.
- */
-export function prepareSessions(rows: Session[], o: PrepareOpts): Session[] {
-  const needle = o.filter.trim().toLowerCase();
-  const filtered = needle
-    // pid is searchable. A numeric needle can also match inside `query`.
-    ? rows.filter((r) => [String(r.pid), r.user, r.app, r.state, r.query]
-        .some((f) => f?.toLowerCase().includes(needle)))
-    : rows;
-
-  return [...filtered].sort((a, b) => {
-    const byRank = rank(a) - rank(b);
-    if (byRank !== 0) return byRank;
-    // An idle session's queryAgeSecs is time since its last query ended,
-    // so non-active sessions sort on inStateSecs.
-    const key = (r: Session) => (r.state === 'active' ? r.queryAgeSecs : r.inStateSecs) ?? 0;
-    return key(b) - key(a);
-  });
-}
-
-export interface StateRow {
-  /**
-   * `state` is the census, one row per session state. `oldest` is the one
-   * idle-in-transaction session that set the verdict, with its identity.
-   */
-  kind: 'state' | 'oldest';
-  state: string | null;
-  sessions: number;
-  longest_secs: string | null;
-  /** `oldest` rows only; null on every census row. */
-  pid: number | null;
-  /** `oldest` rows only, and null there too for a session this role cannot see. */
-  app: string | null;
-}
-
-export interface StatesData {
-  byState: { state: string; sessions: number; longestInStateSecs: number }[];
-  oldestIdleInTxnSecs: number | null;
-  /**
-   * The session that set `oldestIdleInTxnSecs`, so the panel can link it and
-   * the triage page can tell whether the lock graph already names it.
-   */
-  oldestIdleInTxnPid: number | null;
-  /** Null when this role cannot read the session's `application_name`. */
-  oldestIdleInTxnApp: string | null;
-}
-
-/**
- * No LIMIT: GROUP BY state yields a handful of rows.
- *
- * Both branches read one `MATERIALIZED` CTE, so the census and the named
- * session are the same snapshot. `LIMIT 1` sits inside the `oldest` CTE; on
- * the UNION it would clip the census.
- *
- * `ORDER BY sessions DESC` only, not `ORDER BY kind`, which
- * boundaries.test.ts rejects as sorting a `::text` alias. The `oldest` row
- * has `sessions = 0`, so it lands last.
- *
- * Unlike `sessions`, this counts the checking backend itself.
- */
-const STATES_SQL = `
-WITH act AS MATERIALIZED (
-  SELECT state, state_change, pid, application_name AS app
-    FROM pg_stat_activity
-   WHERE backend_type = 'client backend'
-),
-census AS (
-  SELECT state, count(*)::int AS sessions,
-         max(EXTRACT(EPOCH FROM (now() - state_change)))::text AS longest_secs
-    FROM act GROUP BY state
-),
-oldest AS (
-  SELECT pid, app,
-         EXTRACT(EPOCH FROM (now() - state_change))::text AS longest_secs
-    FROM act
-   WHERE state LIKE 'idle in transaction%'
-   ORDER BY state_change ASC, pid
-   LIMIT 1
-)
-SELECT 'state'::text AS kind, state, sessions, longest_secs,
-       NULL::int AS pid, NULL::text AS app
-  FROM census
-UNION ALL
-SELECT 'oldest'::text AS kind, NULL::text AS state, 0 AS sessions, longest_secs,
-       pid, app
-  FROM oldest
-ORDER BY sessions DESC`;
-
-export const sessionStates: Check<StateRow, StatesData> = {
-  id: 'sessionStates',
-  gate: 'connect',
-  home: 'session',
-  title: 'Session states',
-  class: 'live',
-  sql: STATES_SQL,
-  map: (rows) => {
-    const byState = rows
-      .filter((r) => r.kind === 'state')
-      .map((r) => ({
-        state: r.state ?? 'unknown',
-        sessions: r.sessions,
-        longestInStateSecs: r.longest_secs == null ? 0 : Number(r.longest_secs),
-      }));
-    const oldestIdleInTxnSecs = byState.reduce<number | null>((longest, st) => {
-      if (!isIdleInTransaction(st.state)) return longest;
-      return longest == null || st.longestInStateSecs > longest ? st.longestInStateSecs : longest;
-    }, null);
-    // Identity only: the age comes from the census above.
-    const oldest = rows.find((r) => r.kind === 'oldest');
-    return {
-      byState,
-      oldestIdleInTxnSecs,
-      oldestIdleInTxnPid: oldest?.pid ?? null,
-      oldestIdleInTxnApp: oldest?.app ?? null,
-    };
-  },
-  thresholds: [
-    { level: 'warn', value: 60, unit: 'seconds',
-      because: 'a transaction idle for a minute is holding row locks and pinning the '
-             + 'xmin horizon for no reason; almost always an application bug',
-      // "The pid above": the verdict's note names the pid and application.
-      remedy: 'Fix the path in that application that does work between BEGIN and '
-            + 'COMMIT; the pid above links to its session.' },
-    { level: 'critical', value: 300, unit: 'seconds',
-      because: 'five minutes of idle-in-transaction blocks autovacuum from reclaiming '
-             + 'anything newer, so bloat starts accumulating on top of the locking',
-      remedy: 'Terminate it: at this age it blocks autovacuum as well as holding locks. '
-            + 'Set idle_in_transaction_session_timeout on that role so Postgres does '
-            + 'this without you.' },
-  ],
-  /** sessions.test.ts holds the `>=` boundary. */
-  verdict: (d, t): Verdict => {
-    const s = d.oldestIdleInTxnSecs;
-    if (s == null) return { level: 'ok' };
-    // A restricted role reads `application_name` as null for a session it
-    // does not own; the pid is still named.
-    const who = d.oldestIdleInTxnPid == null
-      ? ''
-      : ` · pid ${d.oldestIdleInTxnPid}${d.oldestIdleInTxnApp == null ? '' : ` ${d.oldestIdleInTxnApp}`}`;
-    return escalate(s, t, `idle in transaction for ${Math.round(s)}s${who}`);
-  },
-};

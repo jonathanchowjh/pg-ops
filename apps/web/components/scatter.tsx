@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useState, type FocusEvent, type MouseEvent } from 'react';
 import { useWidth } from '@/components/clock';
+import { CHAR_PX } from '@/lib/clock';
 import { formatCount, formatRate, formatUnit, type Unit } from '@/lib/format';
 import { along, byteDecades, decades, isoLine, layScatter, type LogAxis, type Mark, type Placed } from '@/lib/plot';
 import { cn } from '@/lib/utils';
@@ -11,25 +12,25 @@ import { cn } from '@/lib/utils';
 const pct = (v: number): string => `${Math.round(v * 10_000) / 100}%`;
 /** A tick is a power of ten, or of a binary unit for bytes, printed as one: a mean's "<0.1ms" would label two ticks alike. */
 const tickLabel = (unit: Unit, v: number): string => (unit === 'millis' && v < 0.1 ? `${formatRate(v)}ms` : formatUnit(unit, v));
-/** A label's box, roughly: twelve-pixel sans, sixteen high, eight from its point. */
-const CHAR_PX = 6.6;
+/** Left, top, right, bottom, in pixels from the plot's top left. */
+type Box = [number, number, number, number];
 /**
  * The named points whose labels fit, heaviest first: a label that would
- * cover another, or a named point, is left to the readout.
+ * cover another, a named point or a box already `taken` is left to the readout.
  */
-function fitting(named: readonly Placed[], at: (m: Placed) => [number, number], width: number): Set<string> {
-  const boxes = named.map((m) => {
+function fitting(named: readonly Placed[], at: (m: Placed) => [number, number], width: number, taken: readonly Box[] = []): Set<string> {
+  const boxes: Box[] = [...taken, ...named.map((m): Box => {
     const [x, y] = at(m);
     return [x - 6, y - 6, x + 6, y + 6];
-  });
+  })];
   const kept = new Set<string>();
   for (const m of named) {
     const [x, y] = at(m);
     const w = m.label.length * CHAR_PX;
     const x1 = (m.cx ?? 0) > 0.7 ? x - 8 - w : x + 8;
-    const box = [x1, y - 8, x1 + w, y + 8];
-    if (x1 < 0 || box[2]! > width + 24) continue;
-    if (boxes.some((b) => !(box[2]! < b[0]! || box[0]! > b[2]! || box[3]! < b[1]! || box[1]! > b[3]!))) continue;
+    const box: Box = [x1, y - 8, x1 + w, y + 8];
+    if (x1 < 0 || box[2] > width + 24) continue;
+    if (boxes.some((b) => !(box[2] < b[0] || box[0] > b[2] || box[3] < b[1] || box[1] > b[3]))) continue;
     boxes.push(box);
     kept.add(m.id);
   }
@@ -75,19 +76,26 @@ export function Scatter({ marks, x, y, band, iso = [] }: {
   // 2.8 wide to 1 high, from 220 to 420. Set here, not by `aspect-ratio`: with a
   // minimum height that widens a narrow plot past the screen.
   const height = Math.round(Math.max(220, Math.min(420, width / 2.8)));
-  const labelled = fitting(
-    laid.marks.filter((m) => m.named).reverse(), (m) => [share(m.cx) * width, (1 - m.cy) * height], width,
-  );
   const lines = iso.flatMap((l) => {
     const at = isoLine(laid.x, laid.y, l.product);
     return at === null ? [] : [{ ...at, label: l.label }];
   });
-  // A line's label sits where it starts; one that would run into the label before it is left off.
+  // A line's label sits where it starts; one that would run into the label before it, or past the plot, is left off.
   const lineLabels: typeof lines = [];
   for (const l of lines) {
     const prev = lineLabels.at(-1);
+    if (share(l.x1) * width + 4 + l.label.length * CHAR_PX > width) continue;
     if (prev === undefined || l.y1 !== prev.y1 || (l.x1 - prev.x1) * width * (1 - inset) > prev.label.length * CHAR_PX + 8) lineLabels.push(l);
   }
+  // A line's label is laid first: a point's label gives way to it, not the other way.
+  const labelled = fitting(
+    laid.marks.filter((m) => m.named).reverse(), (m) => [share(m.cx) * width, (1 - m.cy) * height], width,
+    lineLabels.map((l): Box => {
+      const lx = share(l.x1) * width + 4;
+      const ly = (1 - l.y1) * height;
+      return [lx, ly - 16, lx + l.label.length * CHAR_PX, ly];
+    }),
+  );
 
   return (
     <figure className="m-0 px-3 pt-1 pb-2">

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  axisTicks, clockTime, columnAt, endShowing, gridFor, hop, keepQuery, openFrom, stamp, step, timeAt, toggled,
+  axisTicks, clockTime, columnAt, endShowing, gridFor, hop, keepQuery, labelMarks, openFrom, stamp, step, timeAt, toggled,
   windowQuery, zoomTo,
 } from '@/lib/clock';
 
@@ -153,5 +153,44 @@ describe('clock times', () => {
     // At +08:00 the day turned sixteen hours before 08:30 UTC.
     const local = axisTicks(day, 900, 480);
     expect(local.find((t) => t.label === 'Oct 12')!.t).toBe(Date.UTC(2026, 9, 11, 16, 0, 0));
+  });
+});
+
+describe('labelMarks', () => {
+  // A 1000 px plot over 0..1000 ms, so a moment is its own pixel. A label of n characters is about 6.6n + 8 px.
+  const grid = { from: 0, to: 1000 };
+  const mark = (at: number, chars = 10) => ({ at, label: 'x'.repeat(chars) });
+  const named = (ms: { at: number; label: string }[], width = 1000) => labelMarks(ms, grid, width).map((m) => m.named);
+
+  it('names the first of two marks whose labels would print over each other', () => {
+    expect(named([mark(100), mark(150)])).toEqual([true, false]);
+  });
+
+  it('names both when their labels clear', () => {
+    expect(named([mark(100), mark(300)])).toEqual([true, true]);
+  });
+
+  it('reads a label leftwards only where it would run past the plot', () => {
+    expect(labelMarks([mark(900, 20)], grid, 1000)[0]!.leftward).toBe(true);
+    expect(labelMarks([mark(900, 10)], grid, 1000)[0]!.leftward).toBe(false);
+  });
+
+  /** Measured at 390 px: "lock chain users" at 80 % of a 220 px band ran past the card. */
+  it('turns a label leftwards on a narrow plot where a wide one would not', () => {
+    expect(labelMarks([mark(800, 16)], grid, 220)[0]!.leftward).toBe(true);
+  });
+
+  /** Found by review: a leftward label covers the room behind its mark. */
+  it('names a label read leftwards only when it clears the label before it', () => {
+    expect(named([mark(750, 20), mark(880, 20)])).toEqual([true, false]);
+    expect(named([mark(580, 20), mark(880, 20)])).toEqual([true, true]);
+  });
+
+  it('names nothing a plot is too narrow to hold', () => {
+    expect(named([mark(50, 20)], 100)).toEqual([false]);
+  });
+
+  it('drops a mark outside the window, and sorts the rest by time', () => {
+    expect(labelMarks([mark(600), mark(1500), mark(200)], grid, 1000).map((m) => m.at)).toEqual([200, 600]);
   });
 });

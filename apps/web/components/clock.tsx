@@ -21,7 +21,7 @@ import { cn } from '@/lib/utils';
  * so pinning a moment, stepping and selecting never ask the server for
  * anything; only a change of window does.
  */
-export interface ClockState {
+interface ClockState {
   grid: Grid;
   /** The pinned moment, or null when the page follows the window's end. */
   cursor: number | null;
@@ -55,6 +55,11 @@ export function usePinned(): boolean | null {
  * within twelve hours. Under a clock it follows the Local/UTC control;
  * outside one, in a page head, it is local.
  */
+/** Its children on a live window with no cursor, and nothing otherwise: a pinned page shows no action. */
+export function LiveOnly({ children }: { children: ReactNode }) {
+  return useClock().live ? <>{children}</> : null;
+}
+
 export function Time({ at }: { at: number | null }) {
   const clock = useContext(ClockContext);
   if (at === null) return <span className="text-muted-foreground">—</span>;
@@ -71,7 +76,7 @@ export function Time({ at }: { at: number | null }) {
  * every pointer move, and only the hover line and the readout should
  * re-render for it, not every row.
  */
-export interface Hover { t: number; x: number; y: number; tip: ReactNode }
+interface Hover { t: number; x: number; y: number; tip: ReactNode }
 let hovered: Hover | null = null;
 const watchers = new Set<() => void>();
 export function setHover(next: Hover | null): void {
@@ -79,7 +84,7 @@ export function setHover(next: Hover | null): void {
   hovered = next;
   for (const w of watchers) w();
 }
-export function useHover(): Hover | null {
+function useHover(): Hover | null {
   return useSyncExternalStore(
     (w) => { watchers.add(w); return () => { watchers.delete(w); }; },
     () => hovered,
@@ -93,7 +98,7 @@ const SEG_ITEM = 'border-l px-2.5 py-[3px] text-xs/[18px] text-body first:border
 const BUTTON = 'rounded-[5px] border bg-card px-2 py-0.5 text-xs/[18px] text-foreground hover:bg-muted';
 const WINDOW_LABELS: Record<number, string> = { 900: '15m', 3600: '1h', 21600: '6h', 86400: '24h' };
 
-export interface DayLoad {
+interface DayLoad {
   /** When the strip ends. It covers the 24 hours before. */
   to: number;
   /** Per column: sessions not waiting on a lock, and sessions waiting on one. */

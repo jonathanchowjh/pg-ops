@@ -25,14 +25,14 @@ count drifts from the code. See [Parity with pgHero](#parity-with-pghero).
 - [Parity with pgHero](#parity-with-pghero)
 - [Documentation](#documentation)
 
-How it is built and why — the four gates, the package boundary, the five
+How it is built and why — the tree, the package boundary, the five
 declines, every deliberate difference from pgHero, and how to work on it —
 is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Features
 
-**Incident pages, polled every 5 seconds.** Every configured database with
-its worst verdict; each database as a tree on a clock: its tables, the
+**Incident pages, polled every 5 seconds.** The fleet, one row per database
+on the clock; each database as a tree on a clock: its tables, the
 statements running on them and the sessions running those, with a lock chain
 as one finding that names its root and offers Terminate, and a cursor that
 pins the page to any moment of the last day; every statement on a scatter
@@ -54,7 +54,7 @@ and index.
 A sample of every session not idle each 15 seconds, kept two days, and its
 per-minute rollup kept fourteen; without a store the tree's clock holds the
 last 15 minutes in memory. One health row per database
-per minute, kept 90 days, charted per fleet and per database.
+per minute, kept 90 days, drawn on Server and judged on the fleet.
 
 **Operations.** HTTP basic auth over every route, a least-privilege role
 documented below, a JSON audit record for every action, secret redaction on
@@ -121,7 +121,7 @@ pgops needs a role with `LOGIN`. These grants cover the reads, terminate and exp
 
 | Grant | Enables |
 |---|---|
-| `pg_read_all_stats` | Other sessions' query text and state. Without it: `insufficient privilege` rows, and Health stores no session counts. |
+| `pg_read_all_stats` | Other sessions' query text and state. Without it the tree says sessions are hidden and what to grant, and counts them without reading them. |
 | `pg_signal_backend` | Terminating sessions. Without it a kill returns Postgres's permission error in the page. |
 | `SELECT` on the tables to be planned, or `pg_read_all_data` | Explain and suggested indexes. Postgres checks `SELECT` even for a plan that reads no rows. Each refused plan names the table. |
 | Table ownership, or `MAINTAIN` on Postgres 17 and newer | The analyze action. A table the role cannot analyze is reported as refused, by name, and the rest proceed. |
@@ -138,8 +138,7 @@ requirement.
 
 | Route | Content | Refresh |
 |---|---|---|
-| `/` | Every database with its worst verdict. An unreachable database shows `UNKNOWN`, never `OK`. | Every 30 s |
-| `/health` | Every database, six charts, last 48 hours. | Every 60 s |
+| `/` | The fleet: one row per database on the clock, its load split by class, its findings as tags, and "unreachable since" when the sampler cannot reach it. Reads the store only. | Every 15 s |
 | `/db/<name>` | The tree on the clock: tables, the statements on them, the sessions running those; a lock chain as one finding with Terminate. | Every 5 s |
 | `/db/<name>/queries` | Every statement on a scatter of calls against mean time, then the hottest on the clock. | Every 5 s |
 | `/db/<name>/queries/<queryid>` | One statement on the clock: its numbers, load, tables and sessions; its plan in place. | Every 5 s |
@@ -147,12 +146,13 @@ requirement.
 | `/db/<name>/tables` | Every table on a scatter of rows written against size, then the rows; unowned sequences at the foot. | On open |
 | `/db/<name>/indexes` | Every index on a scatter of scans against size; the list to drop; bloat and index suggestions from a button. | On open |
 | `/db/<name>/tables/<relation>` | One table on the clock: load, dead rows, rows written and read, size; its statements, indexes and sequences. Analyze. | Every 5 s |
-| `/db/<name>/cleanup` | Wraparound horizon, replication role and lag, slots, server settings. | Every 5 s |
-| `/db/<name>/health` | One database's stored health by gate, 6 hours to 90 days, with trend. | On open |
+| `/db/<name>/server` | What the connection sees of the server, on the clock: connections against the limit, replication lag, WAL, transactions, transaction ID age; who holds the connections; the transactions open longest, with Terminate; the settings the pages depend on; recent terminations. Reset statistics. | Every 5 s |
 
-Every page under `/db/<name>` carries a status line with the database, role,
-version, SSL state and replica flag as the server reports them, and the age
-of the data on screen — so a stalled poll climbs rather than freezing.
+Every page but Explain reads one clock: a window of up to 24 hours on a strip
+you drag. A click pins a moment, and a pinned page has no actions. Arrows step
+a sample, `[` and `]` hop events, Esc returns to live, and in the tree arrows
+walk and fold the rows. Times are clock times, never "ago". Under a database's
+name, one line states its database, user, version, SSL and replica role.
 
 ## Safety model
 

@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { Client } from 'pg';
 import { withConsole } from './harness.js';
 
-describe('/ overview', () => {
-  it('lists every configured database with a verdict', async () => {
+describe('/ the fleet', () => {
+  it('lists every configured database as a row on the clock', async () => {
     await withConsole(async ({ baseUrl }) => {
       const html = await (await fetch(baseUrl)).text();
-      expect(html).toContain('primary');
-      expect(html).toMatch(/OK|WARN|CRITICAL/);
+      expect(html).toContain('href="/db/primary"');
+      expect(html).toContain('sessions not idle');
     });
   }, 180_000);
 
@@ -201,34 +201,24 @@ describe('the two properties, end to end', () => {
   }, 300_000);
 
   /**
-   * Points `/` at a database that is actually unwell. A check called with
-   * missing options throws inside `runCheck`, which never rejects, so it
-   * comes back "unavailable" and the overview reads `OK · 3 unavailable`
-   * over a runaway query; the overview tests above hold while the verdict is
-   * wrong.
-   *
-   * The 60-second wait is needed: `longRunning`'s `minSecs` and warn
-   * threshold are both 60, and the overview calls it with those defaults.
+   * Points `/` at a database that is actually busy. The fleet draws what the
+   * sampler held of it, so a row reads a session once a tick has run; the
+   * wait is for that tick. Nothing on the fleet contacts the database, so
+   * nothing on it can be "unavailable".
    */
-  it('reports a real runaway query rather than OK, and nothing as unavailable', async () => {
-    await withConsole(async ({ baseUrl, url, sql }) => {
+  it('draws a running session on the fleet, and says nothing is unavailable', async () => {
+    await withConsole(async ({ baseUrl, url }) => {
       const runner = new Client({ connectionString: url });
       await runner.connect();
       try {
-        // Started first, so the wait at the end is only what is left over.
         void runner.query('SELECT pg_sleep(600)').catch(() => {});
-        const startedAt = Date.now();
-
-        // With the extension created every incident check can run here, so
-        // "unavailable" means a defect and can be asserted absent.
-        await sql('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
-
-        const elapsed = Date.now() - startedAt;
-        await new Promise((r) => setTimeout(r, Math.max(0, 65_000 - elapsed)));
-
+        // The sampler ticks every 15 seconds from boot.
+        await new Promise((r) => setTimeout(r, 20_000));
         const html = await (await fetch(baseUrl)).text();
-        expect(html).toMatch(/WARN|CRITICAL/);
-        expect(html).not.toMatch(/unavailable/i);
+        expect(html).toContain('href="/db/primary"');
+        // A reading above zero: the last column is the mean over its samples, the one before the sleep among them.
+        expect(html).toMatch(/tabular-nums">(?:0\.[1-9]|[1-9]\d*\.\d)<\/span>/);
+        expect(html).not.toMatch(/unavailable|unreachable/i);
       } finally {
         await runner.end().catch(() => {});
       }

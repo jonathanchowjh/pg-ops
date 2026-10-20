@@ -119,7 +119,7 @@ export default async function StatementPage({ params, searchParams }: {
       <Clock grid={grid} now={clock.now} day={clock.day} events={clock.events} keep={keepQuery('', null)} initialCursor={clock.pinAt}>
         {grid.live ? <div className="flex justify-end pt-1.5"><Refresh intervalMs={5_000} /></div> : null}
         <div className="mb-4 grid grid-cols-1 gap-3">
-          <Panel title="Load" note="sessions not idle" unit="sessions" kind="stack" series={load} />
+          <Panel title="Load" note="sessions not idle" unit="sessions" kind="stack" seen={tree.seen} series={load} />
         </div>
 
         <h2 className={SECTION}>Tables<small className={NOTE}>this statement reads or writes</small></h2>

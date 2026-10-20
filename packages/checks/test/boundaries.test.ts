@@ -267,9 +267,15 @@ describe('the store migrations', () => {
 describe('the pre-push hook, against a throwaway repository', () => {
   const HOOK = new URL('../../../.githooks/pre-push', import.meta.url).pathname;
   const ZERO = '0'.repeat(40);
+  /**
+   * Run from the pre-commit hook, git has set GIT_DIR and GIT_INDEX_FILE. In
+   * a worktree GIT_DIR is absolute, and a child git would commit, tag and
+   * configure this repository instead of the throwaway one.
+   */
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_')));
 
   const git = (cwd: string, ...args: string[]): string =>
-    execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    execFileSync('git', args, { cwd, env, encoding: 'utf8' }).trim();
 
   /**
    * Three commits: one already on the remote, one named by the receipt, one
@@ -299,6 +305,7 @@ describe('the pre-push hook, against a throwaway repository', () => {
   const push = (dir: string, lines: string[]) =>
     spawnSync('sh', [HOOK, 'origin', 'git@example.invalid:o/r.git'], {
       cwd: dir,
+      env,
       input: lines.map((l) => `${l}\n`).join(''),
       encoding: 'utf8',
     });

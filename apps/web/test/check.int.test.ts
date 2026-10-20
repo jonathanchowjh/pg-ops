@@ -55,53 +55,6 @@ describe('runCheckFor', () => {
 });
 
 /**
- * The health tick samples on a checked-out client, so counting only
- * `pool.query` would report zero for statements pgops itself sent.
- */
-describe('ownStatementsTotal', () => {
-  it('counts statements sent on a checked-out client, but not transaction control', async () => {
-    const { contextFor, ownStatementsTotal } = await import('../lib/pools.js');
-    const ctx = await contextFor('primary');
-    const before = ownStatementsTotal('primary');
-    const client = await ctx.target.connect();
-    try {
-      await client.query('BEGIN');
-      await client.query('SET LOCAL statement_timeout = 5000');
-      await client.query('SELECT 1');
-      await client.query({ text: 'SELECT 2' });
-      await client.query('COMMIT');
-    } finally {
-      client.release();
-    }
-    expect(ownStatementsTotal('primary') - before).toBe(2);
-    // The same client comes back from the pool; it must not be wrapped twice.
-    const again = await ctx.target.connect();
-    try {
-      await again.query('SELECT 3');
-    } finally {
-      again.release();
-    }
-    expect(ownStatementsTotal('primary') - before).toBe(3);
-  });
-
-  /**
-   * `pool.query` checks a client out itself. Once that client had been
-   * through `connect()`, the statement was counted at the pool and again at
-   * the client, and the Health page's own-statement rate read double.
-   */
-  it('counts a pool.query once, on a client that has been checked out before', async () => {
-    const { contextFor, ownStatementsTotal } = await import('../lib/pools.js');
-    const ctx = await contextFor('primary');
-    // Every idle client goes through `connect()` once, as a timed check does.
-    const held = await Promise.all(Array.from({ length: 3 }, () => ctx.target.connect()));
-    held.forEach((c) => c.release());
-    const before = ownStatementsTotal('primary');
-    await ctx.target.query('SELECT 1');
-    expect(ownStatementsTotal('primary') - before).toBe(1);
-  });
-});
-
-/**
  * A table page 404s only when the catalog was read without the table in it.
  * A migration's lock fails the read, so the page must say it could not look.
  */

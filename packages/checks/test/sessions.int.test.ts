@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { describe, expect, inject, it } from 'vitest';
 import { runCheck } from '../src/run.js';
-import { sessions, sessionStates } from '../src/checks/sessions.js';
+import { sessions } from '../src/checks/sessions.js';
 import { withPostgres } from './harness.js';
 
 describe('sessions', () => {
@@ -96,42 +96,6 @@ describe('sessions', () => {
       } finally {
         await holder.query('ROLLBACK');
         holder.release();
-      }
-    });
-  }, 120_000);
-
-  it('censuses states', async () => {
-    await withPostgres(async (ctx) => {
-      const r = await runCheck(ctx, sessionStates);
-      if (!r.ok) throw new Error(r.message);
-      expect(r.data.byState.length).toBeGreaterThan(0);
-    });
-  }, 120_000);
-
-  /**
-   * Only a real server proves the statement's second branch produces an
-   * `oldest` row, that its LIMIT 1 is scoped to that branch rather than the
-   * whole UNION, and that the pid it names is idle in transaction.
-   */
-  it('names the oldest idle-in-transaction session, without truncating the census', async () => {
-    await withPostgres(async (ctx, pool) => {
-      const uri = (pool as unknown as { options: { connectionString: string } }).options.connectionString;
-      const holder = new pg.Client({ connectionString: uri, application_name: 'states-holder' });
-      holder.on('error', () => {});
-      try {
-        await holder.connect();
-        await holder.query('BEGIN');
-        await holder.query('SELECT 1');
-        const { rows } = await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
-
-        const r = await runCheck(ctx, sessionStates);
-        if (!r.ok) throw new Error(r.message);
-        expect(r.data.byState.length).toBeGreaterThan(0);
-        expect(r.data.oldestIdleInTxnPid).toBe(rows[0]!.pid);
-        expect(r.data.oldestIdleInTxnApp).toBe('states-holder');
-        expect(r.data.oldestIdleInTxnSecs).not.toBeNull();
-      } finally {
-        await holder.end().catch(() => {});
       }
     });
   }, 120_000);

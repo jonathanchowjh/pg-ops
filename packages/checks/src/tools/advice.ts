@@ -15,9 +15,9 @@ import { ownSql } from '../run.js';
  * suggestion, not a wrong one.
  */
 
-export type Op = '=' | '<>' | '<' | '<=' | '>' | '>=' | '~~' | '~~*' | 'null' | 'not_null';
-export interface Conjunct { column: string; op: Op }
-export interface SortKey { column: string; direction: 'asc' | 'desc' }
+type Op = '=' | '<>' | '<' | '<=' | '>' | '>=' | '~~' | '~~*' | 'null' | 'not_null';
+interface Conjunct { column: string; op: Op }
+interface SortKey { column: string; direction: 'asc' | 'desc' }
 /** One sequential scan the planner chose, and what it filtered and sorted by. */
 export interface Scan { schema: string; table: string; where: Conjunct[]; sort: SortKey[] }
 
@@ -152,9 +152,9 @@ export function scansOf(plan: PlanNode): Scan[] {
   });
 }
 
-export interface ColumnStats { nullFrac: number; nDistinct: number }
+interface ColumnStats { nullFrac: number; nDistinct: number }
 /** `columns` normalized to `column` or `column opclass` — see relationFacts. */
-export interface ExistingIndex { name: string; using: string; columns: string[] }
+interface ExistingIndex { name: string; using: string; columns: string[] }
 export interface RelationFacts { rows: number; columns: Map<string, ColumnStats>; indexes: ExistingIndex[] }
 
 export interface IndexSuggestion {

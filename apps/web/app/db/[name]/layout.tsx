@@ -5,7 +5,7 @@ import { databaseNames } from '@/lib/pools';
 import { ConfigError } from '@/lib/config';
 import { ConfigErrorPage } from '@/components/config-error';
 import { Sidebar } from '@/components/sidebar';
-import { StatusBar } from '@/components/status-bar';
+import { identityLine } from '@/lib/format';
 import { runCheckFor } from '@/lib/check';
 import { CHECKS } from '@pgops/checks';
 
@@ -43,9 +43,10 @@ export default async function DbLayout({
     <div className="grid min-h-screen grid-cols-[minmax(0,1fr)] max-md:grid-rows-[auto_1fr] md:grid-cols-[208px_minmax(0,1fr)]">
       <Sidebar name={name} />
       <main className="min-w-0 px-4 pb-16 text-[13px]/5 md:px-5">
-        {/* What the server on the other end says it is, on every page under
-            /db/<name>, including the one with the terminate button. */}
-        <div className="pt-2"><StatusBar result={who} /></div>
+        {/* What the server on the other end says it is, on every page under /db/<name>, including the
+            ones with Terminate. Every other surface names a database by the operator's label; this line
+            is the one place the server answers. See checks/identity.ts. */}
+        <p className="pt-2 text-xs text-muted-foreground">{identityLine(who.ok ? who.data : null)}</p>
         {children}
       </main>
     </div>

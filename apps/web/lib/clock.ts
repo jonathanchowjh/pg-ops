@@ -11,14 +11,15 @@
 
 export const BUCKET_MS = 15_000;
 export const MINUTE_MS = 60_000;
-export const DAY_MS = 24 * 3_600_000;
+export const HOUR_MS = 3_600_000;
+export const DAY_MS = 24 * HOUR_MS;
 /** The four windows the bar offers, in seconds, as the URL carries them. */
 export const WINDOWS = [900, 3600, 21_600, 86_400] as const;
-export const DEFAULT_WINDOW_SECS = 3600;
-export const MIN_WINDOW_SECS = 120;
+const DEFAULT_WINDOW_SECS = 3600;
+const MIN_WINDOW_SECS = 120;
 /** Session rows, and raw samples, at two hours or closer. */
-export const RAW_WINDOW_MS = 2 * 3_600_000;
-export const COLUMNS = 120;
+const RAW_WINDOW_MS = 2 * 3_600_000;
+const COLUMNS = 120;
 
 /** The five classes, bottom up. A copy of `CLASSES` in @pgops/checks, as `BUCKET_MS` is. */
 export const CLASSES = ['cpu', 'io', 'idle', 'other', 'lock'] as const;
@@ -122,6 +123,32 @@ export function fractionAt(grid: Pick<Grid, 'from' | 'to'>, t: number): number {
   return (t - grid.from) / (grid.to - grid.from);
 }
 
+/** A twelve-pixel sans character's width, roughly: what a label's box is reckoned from. */
+export const CHAR_PX = 6.6;
+
+/**
+ * Events on a plot `width` pixels wide, in the window and in order. A label
+ * reads rightwards from its mark, or `leftward` where it would run past the
+ * plot. A mark is `named` when its label clears the last named one's; the
+ * rest are marks with their label left to the readout.
+ */
+export function labelMarks<T extends { at: number; label: string }>(
+  marks: readonly T[], grid: Pick<Grid, 'from' | 'to'>, width: number,
+): (T & { x: number; named: boolean; leftward: boolean })[] {
+  let end = -Infinity;
+  return marks.filter((m) => m.at >= grid.from && m.at <= grid.to).sort((a, b) => a.at - b.at).map((m) => {
+    const x = fractionAt(grid, m.at);
+    const px = x * width;
+    // Four pixels from the mark, two of padding each side.
+    const w = m.label.length * CHAR_PX + 8;
+    const leftward = px + w > width;
+    const [left, right] = leftward ? [px - w, px] : [px, px + w];
+    const named = left >= 0 && left > end + 4;
+    if (named) end = right;
+    return { ...m, x, named, leftward };
+  });
+}
+
 /** The moment under a point `x` of the way across, snapped to a sample. */
 export function timeAt(grid: Pick<Grid, 'from' | 'to'>, x: number): number {
   const t = grid.from + Math.max(0, Math.min(1, x)) * (grid.to - grid.from);
@@ -156,7 +183,7 @@ export function hop(events: readonly { at: number }[], cursor: number, dir: -1 |
 export function zoomTo(a: number, b: number): { winSecs: number; end: number } {
   const from = Math.min(a, b);
   const to = Math.max(a, b);
-  return { winSecs: Math.max(MIN_WINDOW_SECS, Math.round((to - from) / BUCKET_MS) * 15), end: to };
+  return { winSecs: Math.max(MIN_WINDOW_SECS, Math.round((to - from) / BUCKET_MS) * (BUCKET_MS / 1000)), end: to };
 }
 
 /** The window's end that brings `t` into view, three tenths from the right, as the mock does. */
@@ -184,7 +211,7 @@ export function stamp(t: number, offsetMins: number, now: number): string {
   return `${date}${clockTime(t, offsetMins)}`;
 }
 
-export interface Tick { t: number; at: number; label: string }
+interface Tick { t: number; at: number; label: string }
 
 const STEPS_SECS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10_800, 21_600, 43_200];
 
@@ -206,4 +233,14 @@ export function axisTicks(grid: Pick<Grid, 'from' | 'to'>, widthPx: number, offs
     out.push({ t, at, label: midnight ? `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}` : clockTime(t, offsetMins, false) });
   }
   return out;
+}
+
+/** When the database was last marked unreachable at a moment, or null if it was reachable then. */
+export function downSince(transitions: readonly { at: number; kind: 'unreachable' | 'reachable' }[], at: number): number | null {
+  let since: number | null = null;
+  for (const t of transitions) {
+    if (t.at > at) break;
+    since = t.kind === 'unreachable' ? t.at : null;
+  }
+  return since;
 }

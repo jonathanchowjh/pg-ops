@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { runCheck } from '../src/run.js';
-import { databaseActivity, counterRates } from '../src/checks/database-activity.js';
+import { databaseActivity } from '../src/checks/database-activity.js';
 import { awaitPublished, withPostgres } from './harness.js';
 
 describe('databaseActivity', () => {
@@ -9,8 +9,8 @@ describe('databaseActivity', () => {
       // On Postgres 14 the statistics collector creates a database's entry
       // when its first message arrives, a moment after the database exists.
       // Read before that, `stats_reset` is null; read after, it is the
-      // entry's creation time, and `counterRates` rightly calls that a
-      // reset. Wait for the entry.
+      // entry's creation time, which a reader would call a reset. Wait for
+      // the entry.
       await awaitPublished(
         pool,
         'the database\'s statistics entry',
@@ -32,9 +32,8 @@ describe('databaseActivity', () => {
       );
       const b = await runCheck(ctx, databaseActivity);
       if (!b.ok) throw new Error(b.message);
-      const r = counterRates(a.data, b.data, (b.measuredAt - a.measuredAt) / 1000);
-      expect(r).not.toBeNull();
-      expect(r!.commitsPerSec).toBeGreaterThan(0);
+      expect(b.data.statsResetAt).toBe(a.data.statsResetAt);
+      expect(b.data.xactCommit).toBeGreaterThan(a.data.xactCommit);
       expect(b.data.tupInserted - a.data.tupInserted).toBeGreaterThanOrEqual(20);
     });
   }, 120_000);

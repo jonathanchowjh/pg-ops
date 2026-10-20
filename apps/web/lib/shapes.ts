@@ -8,7 +8,7 @@ import type { Shape } from './tree';
 /** A window's snapshots are read at most this often: they change every five minutes. */
 const FRESH_MS = 60_000;
 /** The costliest this many shapes of a window. */
-export const SHAPES_READ = 500;
+const SHAPES_READ = 500;
 /** Two captures at the five-minute cadence, with room for one that was skipped. */
 const MIN_SPAN_MS = 11 * 60_000;
 /** Windows remembered: a past window's end is part of its key. */
@@ -16,16 +16,16 @@ const KEPT = 50;
 
 /** Planning: a few a tick, never queued behind a lock, and never long. */
 export const PLACE_PER_TICK = 5;
-export const PLACE_LOCK_MS = 100;
+const PLACE_LOCK_MS = 100;
 /** Nobody waits on these plans, so a plan that takes longer is not worth the connection: the operator's Explain allows ten. */
-export const PLACE_TIMEOUT_MS = 1_000;
+const PLACE_TIMEOUT_MS = 1_000;
 const PLACE_WINDOW_MS = 3_600_000;
 /** A statement that cannot be planned is asked again this often: the table it names may have been made since. */
 const RETRY_MS = 3_600_000;
 const LOCK_NOT_AVAILABLE = '55P03';
 const PLACED_KEPT = 5_000;
 
-export interface WindowShape extends Shape {
+interface WindowShape extends Shape {
   calls: number;
   /** Milliseconds of execution in the window. */
   totalMs: number;

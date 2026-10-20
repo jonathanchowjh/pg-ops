@@ -35,6 +35,37 @@ describe('a panel', () => {
     expect(table.querySelector('tbody td')!.textContent).toBe('1.5K');
   });
 
+  /** Measured on Server: 19.5 KB a second ruled as 4.9, 9.8, 15 and 20 KB/s. */
+  it('rules a byte rate in steps round in the unit it prints', async () => {
+    await under(<Panel title="WAL" unit="bytesPerSec" kind="stack" series={[{ name: 'WAL', tone: 0, values: cols(20_000) }]} />);
+    const ticks = [...view.container.querySelectorAll('i > span')].map((e) => e.textContent);
+    expect(ticks.length).toBeGreaterThan(1);
+    for (const t of ticks) expect(t).toMatch(/^\d+ (B|KB|MB)\/s$/);
+  });
+
+  it('hatches the stretch nobody sampled, as the tree does', async () => {
+    const seen = Array.from({ length: grid.columns }, (_, c) => (c >= 30 && c < 60 ? 0 : 1));
+    const values = seen.map((s) => (s === 0 ? null : 2));
+    await under(<Panel title="Load" unit="sessions" kind="stack" seen={seen} series={[{ name: 'CPU', tone: 'cpu', values }]} />);
+    const hatched = [...view.container.querySelectorAll<HTMLElement>('[data-unseen]')];
+    expect(hatched).toHaveLength(1);
+    expect(hatched[0]!.style.left).toBe('25%');
+    expect(hatched[0]!.style.width).toBe('25%');
+  });
+
+  it('says a window nobody sampled was not sampled, never that nothing was kept', async () => {
+    await under(<Panel title="Load" unit="sessions" kind="stack" seen={Array(grid.columns).fill(0)} series={[{ name: 'CPU', tone: 'cpu', values: cols(null) }]} />);
+    expect(view.text()).toContain('not sampled in this window');
+    expect(view.text()).not.toContain('nothing kept');
+  });
+
+  it('hatches no further than seen describes', async () => {
+    await under(<Panel title="Load" unit="sessions" kind="stack" seen={Array(60).fill(0)} series={[{ name: 'CPU', tone: 'cpu', values: cols(1) }]} />);
+    const hatched = view.container.querySelector<HTMLElement>('[data-unseen]')!;
+    expect(hatched.style.width).toBe('100%');
+    expect(hatched.parentElement!.style.width).toBe('50%');
+  });
+
   it('wears a class hue only for a class', async () => {
     await under(<Panel title="Load" unit="sessions" kind="stack" series={[{ name: 'Lock wait', tone: 'lock', values: cols(2) }]} />);
     expect(view.container.querySelector('svg path')!.getAttribute('class')).toBe('fill-class-lock');

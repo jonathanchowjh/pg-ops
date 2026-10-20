@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { Sample, SampleSession, StatementInfo } from '@pgops/checks';
+import type { HealthMinute, Sample, SampleSession, StatementInfo } from '@pgops/checks';
 import {
   FOLD_NONE, FOLD_QUIET, QUIET_SHOWN, STATEMENTS_SHOWN, TABLES_SHOWN, buildTree, findingsAt, roundUp, scaleSteps,
-  type Shape, type Strip, type TreeInput,
+  type Shape, type Strip, type Tree, type TreeInput,
 } from '@/lib/tree';
 
 const T0 = Date.UTC(2026, 9, 12, 8, 0, 0);
 const MIN = 60_000;
 const BUCKET = 15_000;
-const MARKS = { chainCriticalSecs: 60, idleWarnSecs: 60, idleCriticalSecs: 300 };
+const MARKS = { chainCriticalSecs: 60, idleWarnSecs: 60, idleCriticalSecs: 300, headroomWarnPct: 20, headroomCriticalPct: 10, lagWarnSecs: 30, lagCriticalSecs: 300, xidWarnAge: 1_647_483_647, xidCriticalAge: 2_047_483_647 };
 
 const ses = (pid: number, over: Partial<SampleSession> = {}): SampleSession => ({
   pid, backendStart: `b${pid}`, app: 'web', cls: 'cpu', since: T0, statement: 'q1',
@@ -122,6 +122,28 @@ describe('strips', () => {
   it('shares one scale: the hottest row\'s peak, rounded up', () => {
     const tree = buildTree(input({ samples: [sample(0, [...Array(7)].map((_, i) => ses(i + 1)))] }));
     expect(tree.scale).toBe(8);
+  });
+
+  it('reads the live sample, not the bucket before it, in the newest column', () => {
+    const to = T0 + 15 * MIN;
+    const gone = buildTree(input({ live: true, samples: [sample(0, [ses(1)], { at: to - 10_000 }), sample(0, [], { at: to })], statements: texts({ q1: 'UPDATE users' }) }));
+    expect(total(gone.tables.find((t) => t.name === 'public.users')!.strip, 59)).toBe(0);
+    const here = buildTree(input({ live: true, samples: [sample(0, [], { at: to - 10_000 }), sample(0, [ses(1)], { at: to })], statements: texts({ q1: 'UPDATE users' }) }));
+    expect(total(here.tables.find((t) => t.name === 'public.users')!.strip, 59)).toBe(1);
+    expect(here.seen[59]).toBe(1);
+  });
+
+  /** Guard: a 12-minute column drawn from one instant would be a lie of its own. */
+  it('keeps the rollup\'s mean in the newest column of a wide window', () => {
+    const to = T0 + 6 * 60 * MIN;
+    const cell = { col: 59, kind: 't' as const, key: 'public.users', cls: 'cpu' as const, sessions: 3 };
+    const tree = buildTree(input({
+      to, columns: 60, live: true, raw: false, cells: [cell], coverage: Array(60).fill(1),
+      samples: [sample(0, [], { at: to })], statements: texts({ q1: 'UPDATE users' }),
+      tables: [{ name: 'public.users', sizeBytes: 1, liveRows: 0, flags: [] }], tablesTotal: 1,
+    }));
+    expect(total(tree.tables.find((t) => t.name === 'public.users')!.strip, 59)).toBe(3);
+    expect(tree.seen[59]).toBe(1);
   });
 });
 
@@ -596,5 +618,66 @@ describe('the flat list', () => {
     expect(tree.flat[0]!.sessions).toHaveLength(6);
     expect(tree.flat[0]!.more).toBe(0);
     expect(buildTree(input({ samples: two, only: 'nope' })).flat).toEqual([]);
+  });
+});
+
+describe('the server\'s findings, from the health row', () => {
+  const minute = (i: number, over: Partial<HealthMinute> = {}): HealthMinute => ({
+    at: T0 + i * MIN, connections: 5, serverConnections: 20, maxConnections: 100, lagSecs: 0, lagBytes: 0, walBytes: null,
+    xidAge: 1000, xminAge: null, deadlocks: 0, commits: null, rollbacks: null, statsReset: T0 - MIN, ...over,
+  });
+  const at = (tree: Tree, i: number) => findingsAt(tree, T0 + i * MIN + 1000);
+
+  it('names connections near the limit while they stay there, with the worst minute as the figure', () => {
+    const health = [minute(0), minute(1, { serverConnections: 85 }), minute(2, { serverConnections: 88 }), minute(3, { serverConnections: 86 }), minute(4)];
+    const tree = buildTree(input({ health }));
+    expect(tree.findings).toHaveLength(1);
+    expect(tree.findings[0]).toMatchObject({ kind: 'connections', level: 'warn', note: '88 of 100', from: T0 + MIN, to: T0 + 4 * MIN });
+    expect(at(tree, 0)).toEqual([]);
+    expect(at(tree, 2)[0]).toMatchObject({ level: 'warn', waiting: 0 });
+    expect(at(tree, 4)).toEqual([]);
+  });
+
+  it('is two findings when the level changes, and holds the last minute for two and a half', () => {
+    const health = [minute(0, { serverConnections: 85 }), minute(1, { serverConnections: 95 })];
+    const tree = buildTree(input({ health }));
+    expect(tree.findings.map((f) => [f.kind, f.level, f.from, f.to])).toEqual([
+      ['connections', 'warn', T0, T0 + MIN], ['connections', 'critical', T0 + MIN, T0 + MIN + 150_000],
+    ]);
+    expect(findingsAt(tree, T0 + MIN + 149_000)).toHaveLength(1);
+    expect(findingsAt(tree, T0 + MIN + 151_000)).toEqual([]);
+  });
+
+  it('judges replication by the standby marks and transaction ID age by what is left, naming the figures', () => {
+    const tree = buildTree(input({ health: [minute(0, { lagSecs: 45, lagBytes: 2_000_000 }), minute(1, { xidAge: 2_147_483_647 - 90_000_000, lagSecs: 400, lagBytes: null })] }));
+    expect(at(tree, 0).map((r) => [r.finding.kind, r.level, r.finding.note])).toEqual([['replication', 'warn', '45s · 1.9 MB']]);
+    expect(at(tree, 1).map((r) => [r.finding.kind, r.level, r.finding.note])).toEqual([
+      ['replication', 'critical', '6m 40s'], ['xid', 'critical', '2.1B transactions old'],
+    ]);
+  });
+
+  it('says a deadlock once, for the minute it happened in, and not when the counter fell with a reset', () => {
+    const tree = buildTree(input({ health: [minute(0, { deadlocks: 2 }), minute(1, { deadlocks: 4 }), minute(2, { deadlocks: 4 }), minute(3, { deadlocks: 1, statsReset: T0 + 2 * MIN })] }));
+    expect(tree.findings).toHaveLength(1);
+    expect(tree.findings[0]).toMatchObject({ kind: 'deadlock', level: 'warn', note: '2 deadlocks', from: T0, to: T0 + MIN });
+    expect(at(tree, 0)).toHaveLength(1);
+    expect(at(tree, 1)).toEqual([]);
+    expect(at(tree, 3)).toEqual([]);
+  });
+
+  it('extends a stretch the store began with the live minute, and ranks it with a chain', () => {
+    const live = buildTree(input({
+      live: true, raw: true, to: T0 + 15 * MIN, samples: [sample(59, [ses(1, { cls: 'idle', since: T0 })])],
+      health: [minute(13, { serverConnections: 85 }), minute(14, { serverConnections: 85 }), { ...minute(15), at: T0 + 15 * MIN - 1, serverConnections: 88 }],
+    }));
+    const found = findingsAt(live, T0 + 15 * MIN - 1);
+    expect(found.map((r) => [r.finding.kind, r.level])).toEqual([['idle', 'critical'], ['connections', 'warn']]);
+    expect(live.findings.find((f) => f.kind === 'connections')).toMatchObject({ from: T0 + 13 * MIN, to: T0 + 15 * MIN, note: '88 of 100' });
+  });
+
+  it('says nothing of a minute it could not read, and opens the hottest table rather than a server finding\'s', () => {
+    const tree = buildTree(input({ samples: [sample(0, [ses(1)])], health: [minute(0, { serverConnections: null, lagSecs: null, xidAge: null }), minute(1, { serverConnections: 99 })] }));
+    expect(tree.findings.map((f) => f.kind)).toEqual(['connections']);
+    expect(tree.tables[0]!.open).toBe(true);
   });
 });

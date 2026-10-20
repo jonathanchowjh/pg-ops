@@ -8,7 +8,7 @@ import { OWN_SQL_MARKER } from '../run.js';
  * `cache` sorts ascending: the worst cache hit rate is the smallest. A
  * shape with no I/O (hit + read = 0) sorts last.
  */
-export type QuerySort = 'total' | 'mean' | 'calls' | 'cache';
+type QuerySort = 'total' | 'mean' | 'calls' | 'cache';
 
 export interface QueryStatsOpts {
   sort: QuerySort;
@@ -55,7 +55,7 @@ export interface QueryStatRow {
   all_ms: number;
 }
 
-export interface QueryStatRowData {
+interface QueryStatRowData {
   /** null when `redacted`. */
   queryid: string | null;
   /** null, or the literal `'<insufficient privilege>'`, when `redacted`. */
@@ -170,7 +170,6 @@ const SQL = (o: QueryStatsOpts) => ({
 
 export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
   id: 'queryStats',
-  gate: 'work',
   home: 'query',
   title: 'Query statistics',
   class: 'live',
@@ -214,27 +213,5 @@ export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
   },
 };
 
-export interface SlowQueryOpts {
-  minCalls?: number;
-  minMeanMs?: number;
-}
-
 /** pgHero's defaults. */
 export const SLOW_QUERY_DEFAULTS = { minCalls: 100, minMeanMs: 20 } as const;
-
-/**
- * A filter over `queryStats` rows the caller already has, not a second
- * query. Both bounds must hold.
- *
- * It inherits `queryStats`'s LIMIT, so a slow shape outside the top N by
- * the caller's sort is not surfaced, and no single sort fixes that. The
- * caller must disclose the truncation.
- */
-export function slowQueries(
-  data: Pick<QueryStatsData, 'rows'>,
-  opts: SlowQueryOpts = {},
-): QueryStatRowData[] {
-  const minCalls = opts.minCalls ?? SLOW_QUERY_DEFAULTS.minCalls;
-  const minMeanMs = opts.minMeanMs ?? SLOW_QUERY_DEFAULTS.minMeanMs;
-  return data.rows.filter((r) => r.calls >= minCalls && r.meanMs >= minMeanMs);
-}

@@ -28,7 +28,7 @@ describe('a misconfigured console', () => {
     for (const v of CONFIG_VARS) vi.stubEnv(v, undefined);
     const { default: Overview } = await import('@/app/page');
 
-    const r = await render(await Overview());
+    const r = await render(await Overview({ searchParams: Promise.resolve({}) }));
 
     expect(r.text()).toContain('No database configured');
     // The operator's own inputs, named.

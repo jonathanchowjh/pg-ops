@@ -2,7 +2,7 @@ import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { runCheck } from '../src/run.js';
 import { horizon } from '../src/checks/horizon.js';
-import { withPostgres } from './harness.js';
+import { awaitPublished, withPostgres } from './harness.js';
 
 describe('horizon', () => {
   it('names a backend holding an open snapshot, and does not judge a young one', async () => {
@@ -16,6 +16,8 @@ describe('horizon', () => {
         const b = res.data.holders.find((h) => h.kind === 'backend');
         expect(b).toBeDefined();
         expect(b!.ageSecs).not.toBeNull();
+        // The session's identity, for Terminate's guard, as pg_stat_activity prints it.
+        expect(b!.backendStart).toMatch(/^\d{4}-\d\d-\d\d /);
         // A snapshot one second old on an idle test database pins almost nothing,
         // so `ok` here is the verdict being right, not absent.
         expect(res.data.truncated).toBe(false);
@@ -23,6 +25,44 @@ describe('horizon', () => {
       } finally {
         await holder.query('ROLLBACK');
         holder.release();
+      }
+    });
+  }, 120_000);
+
+  /**
+   * The seeded chain, measured: the root updated a row and went idle in
+   * transaction, so it holds a transaction ID and, under READ COMMITTED, no
+   * snapshot; its waiter holds a snapshot and waits. The root must be named,
+   * and the waiter must say it is waiting, so Server offers it no Terminate.
+   */
+  it('names a writer idle in transaction by its transaction ID, and marks a waiter as waiting', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE TABLE held (id int PRIMARY KEY, n int)');
+      await pool.query('INSERT INTO held VALUES (1, 0)');
+      const root = await pool.connect();
+      const waiter = await pool.connect();
+      try {
+        await root.query('BEGIN');
+        await root.query('UPDATE held SET n = n + 1 WHERE id = 1');
+        const rootPid = (await root.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid;
+        const waitPid = (await waiter.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid;
+        const waiting = waiter.query('UPDATE held SET n = n + 1 WHERE id = 1').catch(() => {});
+        await awaitPublished(pool, 'the lock wait',
+          `SELECT cardinality(pg_blocking_pids(${waitPid})) > 0 AS ready`);
+        const res = await runCheck(ctx, horizon);
+        if (!res.ok) throw new Error(res.message);
+        const byPid = new Map(res.data.holders.map((h) => [h.who, h]));
+        expect(byPid.get(String(rootPid))).toMatchObject({ kind: 'backend', waiting: false });
+        expect(byPid.get(String(rootPid))!.xminAge).toBeGreaterThanOrEqual(0);
+        expect(byPid.get(String(waitPid))).toMatchObject({ waiting: true });
+        // Tied on age, the root is listed first.
+        const order = res.data.holders.map((h) => h.who);
+        expect(order.indexOf(String(rootPid))).toBeLessThan(order.indexOf(String(waitPid)));
+        await root.query('ROLLBACK');
+        await waiting;
+      } finally {
+        root.release();
+        waiter.release();
       }
     });
   }, 120_000);

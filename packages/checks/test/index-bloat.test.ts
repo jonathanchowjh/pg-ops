@@ -62,9 +62,9 @@ describe('toIndexBloat', () => {
 
 describe('the indexBloat contract', () => {
   /** Captured, but never by the capture: a button runs it. */
-  it('is a captured check, at the keep-up gate', () => {
+  it('is a captured check on the index node', () => {
     expect(indexBloat.class).toBe('captured');
-    expect(indexBloat.gate).toBe('keep-up');
+    expect(indexBloat.home).toBe('index');
   });
 
   /** 30s, not a captured read's 10s: an operator asks for this check and waits for it. */

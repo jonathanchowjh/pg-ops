@@ -49,7 +49,7 @@ const tree = (over: Partial<TreeInput> = {}): Tree => {
     ],
     tablesTotal: 3,
     statements: new Map([['42', { text: 'UPDATE users SET n = $1', relations: [] }], ['77', { text: 'DELETE FROM users', relations: [] }], ['tabc', { text: 'BEGIN', relations: [] }]]),
-    shapes: [], open: null, find: '', bucketMs: BUCKET, marks: { chainCriticalSecs: 60, idleWarnSecs: 60, idleCriticalSecs: 300 },
+    shapes: [], open: null, find: '', bucketMs: BUCKET, marks: { chainCriticalSecs: 60, idleWarnSecs: 60, idleCriticalSecs: 300, headroomWarnPct: 20, headroomCriticalPct: 10, lagWarnSecs: 30, lagCriticalSecs: 300, xidWarnAge: 1_647_483_647, xidCriticalAge: 2_047_483_647 },
     ...over,
   });
 };
@@ -74,6 +74,14 @@ const rowsOf = () => [...view.container.querySelectorAll('[role=row]')];
 const rowWith = (text: string) => rowsOf().find((r) => r.textContent!.includes(text))!;
 const terminates = (within: Element = view.container) => [...within.querySelectorAll('button')].filter((b) => b.textContent === 'Terminate');
 const answer = () => view.container.querySelector('[role=status]');
+const click = async (el: Element) => { await act(async () => { el.dispatchEvent(new MouseEvent('click', { bubbles: true })); }); };
+const key = async (k: string, target: EventTarget, mods: KeyboardEventInit = {}) => { await act(async () => { target.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, ...mods })); }); };
+/** A press on `el`; true when the page kept the browser from moving focus. */
+const press = async (el: Element): Promise<boolean> => {
+  const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+  await act(async () => { el.dispatchEvent(down); });
+  return down.defaultPrevented;
+};
 
 beforeEach(() => { router.replace.mockClear(); });
 afterEach(() => { view.unmount(); });
@@ -133,11 +141,23 @@ describe('the answer', () => {
     expect(terminates()).toHaveLength(0);
   });
 
-  it('lists what the Server reads judged, at live only', async () => {
-    const pointers = [{ label: 'transaction ID age', note: '212M', level: 'warn' as const, href: '/db/prod/cleanup' }];
+  it('states a server finding with its figure and the way to Server, and no action', async () => {
+    const minute = { connections: null, lagSecs: null, lagBytes: null, walBytes: null, xidAge: null, xminAge: null, deadlocks: null, commits: null, rollbacks: null, statsReset: null };
+    await mount(tree({ samples: [], health: [{ ...minute, at: NOW - 61_000, serverConnections: 88, maxConnections: 100 }, { ...minute, at: NOW - 1, serverConnections: 85, maxConnections: 100 }] }));
+    // One stretch at one level, noting its worst minute.
+    expect(answer()!.textContent).toContain('connections 88 of 100');
+    expect(answer()!.querySelector('a[href="/db/prod/server"]')).not.toBeNull();
+    expect(terminates()).toHaveLength(0);
+    view.unmount();
+    await mount(tree({ samples: [], health: [{ ...minute, at: NOW - 10 * MIN, serverConnections: 88, maxConnections: 100 }] }), { cursor: NOW - 5 * MIN });
+    expect(answer()).toBeNull();
+  });
+
+  it('lists what the catalog judged, at live only', async () => {
+    const pointers = [{ label: 'public.events', note: 'read by full scan', level: 'warn' as const, href: '/db/prod/tables/public.events' }];
     await mount(tree({ samples: [] }), { pointers });
-    expect(answer()!.textContent).toContain('transaction ID age 212M');
-    expect(answer()!.querySelector('a[href="/db/prod/cleanup"]')).not.toBeNull();
+    expect(answer()!.textContent).toContain('public.events read by full scan');
+    expect(answer()!.querySelector('a[href="/db/prod/tables/public.events"]')).not.toBeNull();
     view.unmount();
     await mount(tree({ samples: [] }), { pointers, cursor: NOW - 5 * MIN });
     expect(answer()).toBeNull();
@@ -221,6 +241,61 @@ describe('the rows', () => {
     expect(router.replace).toHaveBeenCalledWith('?win=900&open=public.users&open=public.orders', { scroll: false });
   });
 
+  it('names one of two events too close to both be read, and marks both', async () => {
+    const at = NOW - 5 * MIN;
+    await mount(tree({ events: [{ at, kind: 'terminate', relation: '' }, { at: at + 10_000, kind: 'analyze', relation: '' }] }));
+    const band = view.container.querySelector('[role=treegrid]')!;
+    expect(band.textContent).toContain('terminated');
+    expect(band.textContent).not.toContain('analyze');
+    expect(band.querySelectorAll('[data-mark]')).toHaveLength(2);
+  });
+
+  it('walks the rows with the arrows, folds a table with the left arrow and opens one with the right', async () => {
+    await mount(tree());
+    const grid = view.container.querySelector<HTMLElement>('[role=treegrid]')!;
+    const rows = [...grid.querySelectorAll<HTMLElement>('[role=row]')];
+    grid.focus();
+    await key('ArrowDown', grid);
+    expect(document.activeElement).toBe(rows[0]);
+    await key('ArrowDown', rows[0]!);
+    expect(document.activeElement).toBe(rows[1]);
+    await key('End', rows[1]!);
+    expect(document.activeElement).toBe(rows.at(-1));
+    await key('ArrowLeft', rowWith('public.users'));
+    expect(router.replace).toHaveBeenLastCalledWith('?win=900&open=', { scroll: false });
+    await key('ArrowRight', rowWith('public.orders'));
+    expect(router.replace).toHaveBeenLastCalledWith('?win=900&open=public.users&open=public.orders', { scroll: false });
+  });
+
+  /** Found by review: a row a click focused kept the arrows, so a pinned page could not step. */
+  it('gives the arrows back to the clock when a row is clicked, and leaves a modified key to the browser', async () => {
+    await mount(tree());
+    const grid = view.container.querySelector<HTMLElement>('[role=treegrid]')!;
+    const rows = [...grid.querySelectorAll<HTMLElement>('[role=row]')];
+    grid.focus();
+    await key('ArrowDown', grid);
+    expect(document.activeElement).toBe(rows[0]);
+    await key('ArrowLeft', rowWith('public.users'), { altKey: true });
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(await press(rows[1]!)).toBe(true);
+    expect(grid.contains(document.activeElement)).toBe(false);
+  });
+
+  /** Guard: the router is a mock, so nothing rerenders between presses; each assertion is on the URL asked for. */
+  it('leaves the cursor keys to the page when no row has focus, and the caret to a box the reader types in', async () => {
+    await mount(tree());
+    // Arm the root's Terminate, so its reason box is in the row. First: an arrow on the page pins the clock, and a pinned page has no actions.
+    await click(terminates(view.container.querySelector('#pid-1')!)[0]!);
+    const box = view.container.querySelector<HTMLElement>('#reason-1')!;
+    box.focus();
+    await key('ArrowLeft', box);
+    expect(document.activeElement).toBe(box);
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(await press(box)).toBe(false);
+    await key('ArrowLeft', view.container.querySelector<HTMLElement>('[role=treegrid]')!);
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
   it('counts the quiet tables in one row and names them when it is opened', async () => {
     await mount(tree());
     expect(rowWith('quiet table').textContent).toContain('1 quiet table');
@@ -274,10 +349,14 @@ describe('what the page could not see', () => {
   });
 
   it('still shows what the server under an empty database is doing', async () => {
-    await mount(tree({ samples: [], tables: [], tablesTotal: 0 }), {
-      pointers: [{ label: 'transaction ID age', note: '212M transactions old', level: 'warn', href: '/db/prod/cleanup' }],
-    });
-    expect(view.text()).toContain('212M transactions old');
+    await mount(tree({
+      samples: [], tables: [], tablesTotal: 0,
+      health: [{
+        at: NOW - 1, connections: null, serverConnections: 85, maxConnections: 100, lagSecs: null, lagBytes: null, walBytes: null,
+        xidAge: null, xminAge: null, deadlocks: null, commits: null, rollbacks: null, statsReset: null,
+      }],
+    }));
+    expect(view.text()).toContain('connections 85 of 100');
     expect(view.text()).toContain('This database has no tables and no sessions.');
   });
 

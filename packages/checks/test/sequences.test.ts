@@ -142,8 +142,8 @@ describe('the sequences verdict', () => {
 });
 
 describe('the sequences contract', () => {
-  it('is a keep-up captured check', () => {
-    expect(sequences.gate).toBe('keep-up');
+  it('is a captured check on the sequence node', () => {
+    expect(sequences.home).toBe('sequence');
     expect(sequences.class).toBe('captured');
     expect(sequences.timeoutMs).toBe(10_000);
   });

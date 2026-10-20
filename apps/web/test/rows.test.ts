@@ -11,7 +11,7 @@ const table = (name: string, statements: StatementNode[], more = 0, open = true)
   ({ name, strip: [], open, shapes: statements.length + more, statements: open ? statements : [], more: open ? more : 0, flags: [] });
 const tree = (over: Partial<Tree>): Tree => ({
   from: 0, to: 1000, columns: 4, live: false, sessionsShown: true, seen: [1, 1, 1, 1], scale: 4, band: [], tables: [], tablesMore: 0, none: null,
-  quiet: [], quietOpen: false, quietTotal: 0, findings: [], events: [], marks: { chainCriticalSecs: 60, idleWarnSecs: 60, idleCriticalSecs: 300 },
+  quiet: [], quietOpen: false, quietTotal: 0, findings: [], events: [], marks: { chainCriticalSecs: 60, idleWarnSecs: 60, idleCriticalSecs: 300, headroomWarnPct: 20, headroomCriticalPct: 10, lagWarnSecs: 30, lagCriticalSecs: 300, xidWarnAge: 1_647_483_647, xidCriticalAge: 2_047_483_647 },
   hidden: false, truncated: false, empty: false, flat: [], flatMore: 0, ...over,
 });
 const kinds = (t: Tree) => flatten(t).map((r) => r.kind);

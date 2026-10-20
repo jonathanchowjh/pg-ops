@@ -1,7 +1,6 @@
-import type { Placement } from './gates.js';
 import type { Pool } from 'pg';
 
-export type VerdictLevel = 'ok' | 'warn' | 'critical';
+type VerdictLevel = 'ok' | 'warn' | 'critical';
 export interface Verdict { level: VerdictLevel; note?: string }
 
 /**
@@ -36,11 +35,9 @@ export interface Check<Row, Data, Opts = void> {
   id: string;
   title: string;
   /**
-   * Which gate of a request's life this check measures; see gates.ts.
-   * Required, so a check cannot be built with no page to render on.
+   * The node this check's finding belongs to: its one placement. Required,
+   * so a check cannot be built with no page to render on.
    */
-  gate: Placement;
-  /** The node this check's finding belongs to. `gate` goes in Stage 3. */
   home: Home;
   /**
    * The run model.

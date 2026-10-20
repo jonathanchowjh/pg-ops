@@ -1,8 +1,9 @@
 import { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
 import { migrate } from '../src/store/schema.js';
-import { readCoverage, readEvents, readLoad, readSamples, readStatements } from '../src/store/read.js';
-import { bucketFilled, recordEvent, recordSample, type Sample, type SampleSession } from '../src/samples.js';
+import { bucketFilled, readCoverage, readEvents, readLoad, readSamples, readStatements } from '../src/store/read.js';
+import { recordEvent, recordSample } from '../src/store/write.js';
+import type { Sample, SampleSession } from '../src/samples.js';
 import { withPostgres } from './harness.js';
 
 const AT = new Date('2026-10-12T08:00:07Z');

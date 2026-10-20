@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  formatBytes, formatCompact, formatCount, formatDuration, formatMillis, formatRate, formatUnit, formatUtc, plural,
+  formatBytes, formatCompact, formatCount, formatDuration, formatMillis, formatRate, formatUnit, plural, identityLine,
 } from '@/lib/format';
 
 describe('formatDuration', () => {
@@ -122,9 +122,29 @@ describe('formatUnit', () => {
   });
 });
 
-describe('formatUtc', () => {
-  it('prints month, day, hour and minute in UTC', () => {
-    expect(formatUtc(Date.parse('2026-10-07T02:14:59Z'))).toBe('10-07 02:14');
+describe('identityLine', () => {
+  const d = { database: 'appdb', user: 'postgres', serverVersion: '17.2', replica: false, ssl: true };
+
+  it('names the server the console is actually talking to, on one line', () => {
+    expect(identityLine(d)).toBe('appdb · postgres · PG 17.2 · SSL');
+  });
+
+  /** A standby changes what Terminate means; a primary is the unremarkable case and says nothing. */
+  it('flags a replica, and stays quiet on a primary', () => {
+    expect(identityLine({ ...d, replica: true })).toMatch(/replica$/);
+    expect(identityLine(d)).not.toMatch(/replica/);
+    expect(identityLine({ ...d, replica: null })).toMatch(/replica unknown$/);
+  });
+
+  it('distinguishes an unknown SSL status from an unencrypted one', () => {
+    expect(identityLine({ ...d, ssl: false })).toContain('no SSL');
+    expect(identityLine({ ...d, ssl: null })).toContain('SSL unknown');
+    expect(identityLine({ ...d, ssl: null })).not.toContain('no SSL');
+  });
+
+  /** The check is a scalar SELECT, so failing means the database was unreachable; the line says so. */
+  it('admits when it could not establish the identity at all', () => {
+    expect(identityLine(null)).toBe('identity unavailable');
   });
 });
 

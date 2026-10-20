@@ -4,8 +4,6 @@ import {
   ACTIONS, CHECKS, JOBS, PGHERO, SERIES, TOOLS,
 } from '../src/registry.js';
 import { HOMES } from '../src/types.js';
-import { GATES, GATE_ORDER } from '../src/gates.js';
-import type { Gate } from '../src/gates.js';
 
 describe('the pgHero parity registry', () => {
   it('has an entry for every capability id 1..65', () => {
@@ -70,51 +68,21 @@ describe('the pgHero parity registry', () => {
 });
 
 /**
- * The tree (gates.ts) is the console's organising model. Every capability
- * must have a place on it, so that one arriving with no home does not get a
- * band invented to hold it.
+ * A check's `home` is its one placement: the node its finding belongs to.
+ * Parity is a promise about capabilities, so an entry names a thing that
+ * exists, and a shipped check names its node.
  */
-describe('every capability has a place on the tree', () => {
-  /**
-   * Pinned to a literal because everything else about the tree is derived
-   * from GATE_ORDER and GATES, so a derived test passes under any reordering.
-   * The order is the model's claim: a request clears the gates in this
-   * sequence, causes run down it and symptoms run up it.
-   */
-  it('is the order a request actually meets the gates', () => {
-    expect(GATE_ORDER).toEqual(['connect', 'wait', 'work', 'keep-up']);
-  });
-
-  it('lists every gate in GATE_ORDER exactly once, and never `server`', () => {
-    // `server` is not a gate and gets no band; it exists so identity and
-    // settings checks have an answer to "which gate?".
-    expect([...GATE_ORDER].sort()).toEqual(Object.keys(GATES).sort());
-    expect(GATE_ORDER).not.toContain('server');
-  });
-
-  it('agrees with the check itself wherever a capability is shipped', () => {
-    // The registry and the check each state the gate, so re-pointing a
-    // capability at a check on a different gate fails here.
+describe('every capability has a home', () => {
+  it('names a check that exists and has a node, wherever it names a check', () => {
     for (const [id, e] of Object.entries(PGHERO)) {
       if (!('check' in e)) continue;
-      expect(e.gate, `capability ${id} (${e.name})`).toBe(CHECKS[e.check].gate);
+      expect(CHECKS, `capability ${id} (${e.name})`).toHaveProperty(e.check);
+      expect(HOMES, `capability ${id} (${e.name})`).toContain(CHECKS[e.check].home);
     }
   });
 
-  it('gives every gate something to hold, now or later', () => {
-    // A gate with nothing behind it would render as an empty heading on the
-    // triage page.
-    for (const gate of GATE_ORDER) {
-      const held = Object.values(PGHERO).filter((e) => e.gate === gate);
-      expect(held.length, `gate ${gate}`).toBeGreaterThan(0);
-    }
-  });
-
-  it('places every shipped check on a gate the triage page renders', () => {
-    for (const [id, check] of Object.entries(CHECKS)) {
-      if (check.gate === 'server') continue;
-      expect(GATE_ORDER, `check ${id}`).toContain(check.gate as Gate);
-    }
+  it('gives every shipped check a home', () => {
+    for (const [id, check] of Object.entries(CHECKS)) expect(HOMES, `check ${id}`).toContain(check.home);
   });
 });
 
@@ -171,8 +139,8 @@ describe('the README is a pitch and a manual, not an essay', () => {
   it('keeps the design record, in CONTRIBUTING', () => {
     const contributing = readFileSync(new URL('../../../CONTRIBUTING.md', import.meta.url), 'utf8');
     for (const claim of [
-      // The four gates' causal order: the console's organising model.
-      'symptoms run up',
+      // The tree: the console's organising model, and why a waiter is never terminated.
+      'killing a waiter frees nothing',
       // Why capture stores cumulative values instead of resetting.
       'never resets',
       // The five declines, by the capability each one names.
