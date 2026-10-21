@@ -105,7 +105,4 @@ describe('connectionDetail', () => {
     });
   });
 
-  it('never escalates — headroom is the connections check\'s job', () => {
-    expect(connectionDetail.verdict).toBeUndefined();
-  });
 });

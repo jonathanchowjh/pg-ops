@@ -126,22 +126,4 @@ describe('slots', () => {
     });
   }, 120_000);
 
-  it('escalates on retained bytes at the documented boundary', () => {
-    const t = slots.thresholds!;
-    const warn = t.find((x) => x.level === 'warn')!.value;
-    const crit = t.find((x) => x.level === 'critical')!.value;
-    const at = (bytes: number) => slots.verdict!(
-      { slots: [{ name: 's', database: 'd', active: false, slotType: 'physical', retainedBytes: bytes }] },
-      t,
-    ).level;
-    // Each threshold at its value and one byte either side.
-    expect(at(warn - 1)).toBe('ok');
-    expect(at(warn)).toBe('warn');
-    expect(at(warn + 1)).toBe('warn');
-
-    expect(at(crit - 1)).toBe('warn');
-    expect(at(crit - 1)).not.toBe('critical');
-    expect(at(crit)).toBe('critical');
-    expect(at(crit + 1)).toBe('critical');
-  });
 });

@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { CHECKS, TOOLS, indexFlags, type BloatedIndex, type CheckResult, type IndexBloatData, type SuggestedIndexes } from '@pgops/checks';
-import { Bar, CatalogNote, IndexRow, List } from '@/components/catalog-rows';
+import { Bar, CELL, CatalogNote, IndexRow, List, NUM } from '@/components/catalog-rows';
 import { Clock, Time } from '@/components/clock';
 import { FindBox, NodeHead } from '@/components/node-head';
 import { Scatter } from '@/components/scatter';
@@ -12,6 +12,7 @@ import { keepQuery, one, windowQuery, type Search } from '@/lib/clock';
 import { formatBytes, formatCount } from '@/lib/format';
 import type { Mark } from '@/lib/plot';
 import { clockFor } from '@/lib/samples';
+import { cn } from '@/lib/utils';
 
 const LISTED = 200;
 const BUTTON = 'rounded-[5px] border bg-card px-2 py-0.5 text-xs/[18px] text-foreground hover:bg-muted aria-[current=true]:bg-foreground aria-[current=true]:text-card';
@@ -48,7 +49,9 @@ export default async function Indexes({ params, searchParams }: {
   const flagged = indexes.filter((i) => indexFlags(i).length > 0);
   const never = catalog.indexes.filter((i) => indexFlags(i).includes('never used'));
   const duplicate = catalog.indexes.filter((i) => indexFlags(i).includes('duplicate'));
-  const reclaim = new Set([...never, ...duplicate]);
+  // A failed CONCURRENTLY build: it serves no query and still costs every write.
+  const invalid = catalog.indexes.filter((i) => indexFlags(i).includes('invalid'));
+  const reclaim = new Set([...never, ...duplicate, ...invalid]);
   /** The window's scans where the store keeps the hours; since the reset where it does not. */
   const scansOf = (i: (typeof indexes)[number]): number => (scans.ok ? scans.value.get(i.name) ?? 0 : i.scans);
   /** Never read is not zero indexes: its failure is in the note. */
@@ -73,7 +76,9 @@ export default async function Indexes({ params, searchParams }: {
             <>
               {formatCount(catalog.indexesTotal!)} · {formatCount(never.length)} never used since{' '}
               {catalog.statsReset === null ? 'statistics began' : <Time at={catalog.statsReset} />}
-              {' · '}{formatCount(duplicate.length)} duplicate · {formatBytes([...reclaim].reduce((a, i) => a + i.sizeBytes, 0))} to reclaim
+              {' · '}{formatCount(duplicate.length)} duplicate
+              {invalid.length === 0 ? null : ` · ${formatCount(invalid.length)} invalid`}
+              {' · '}{formatBytes([...reclaim].reduce((a, i) => a + i.sizeBytes, 0))} to reclaim
             </>
           )}
         </span>
@@ -98,7 +103,7 @@ export default async function Indexes({ params, searchParams }: {
             <p className="px-3 pb-2 text-xs text-muted-foreground">The store could not be read, so scans are since the reset: {scans.message}</p>
           )}
         </section>
-        <List head={['Never used, or a duplicate', 'Table', '', 'Size>', 'Scans>', '']}>
+        <List head={['Never used, a duplicate, or invalid', 'Table', '', 'Size>', 'Scans>', '']}>
           {flagged.slice(0, LISTED).map((i) => (
             <IndexRow key={i.name} database={name} index={i} largest={flagged[0]!.sizeBytes} scans={scansOf(i)} withTable />
           ))}
@@ -126,11 +131,11 @@ function Bloated({ result }: { result: CheckResult<IndexBloatData> }) {
           <List head={['Index', 'Table', 'Wasted, of its size', 'Wasted>', 'Size>']}>
             {rows.map((i: BloatedIndex) => (
               <tr key={i.name}>
-                <td className="border-t px-3 py-[5px] font-mono whitespace-nowrap text-foreground">{i.name}</td>
-                <td className="border-t px-3 py-[5px] font-mono whitespace-nowrap">{i.table}</td>
+                <td className={cn(CELL, 'font-mono text-foreground')}>{i.name}</td>
+                <td className={cn(CELL, 'font-mono')}>{i.table}</td>
                 <td className="border-t px-3 py-[5px]"><Bar share={i.indexBytes > 0 ? i.bloatBytes / i.indexBytes : 0} over /></td>
-                <td className="border-t px-3 py-[5px] text-right font-mono text-foreground tabular-nums">{formatBytes(i.bloatBytes)}</td>
-                <td className="border-t px-3 py-[5px] text-right font-mono text-foreground tabular-nums">{formatBytes(i.indexBytes)}</td>
+                <td className={NUM}>{formatBytes(i.bloatBytes)}</td>
+                <td className={NUM}>{formatBytes(i.indexBytes)}</td>
               </tr>
             ))}
           </List>

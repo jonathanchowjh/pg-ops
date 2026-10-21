@@ -17,7 +17,7 @@ const state = vi.hoisted(() => ({
 vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async (_n: string, check: { id: string }, opts: unknown) => {
     state.ran.push([check.id, opts]);
-    if (check.id === 'sessions') return { ok: true, verdict: null, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } };
+    if (check.id === 'sessions') return { ok: true, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } };
     return state.live;
   }),
 }));
@@ -52,7 +52,7 @@ const liveRow = (over = {}) => ({
   rows: 3000, cacheHitPct: 80, redacted: false, ...over,
 });
 const live = (rows: unknown[]) => ({
-  ok: true, verdict: null, measuredAt: 0,
+  ok: true, measuredAt: 0,
   data: { rows, totalShapes: 9, ownShapes: 0, sort: 'total', statsResetAt: '2026-10-12T00:00:00Z', allMs: 20_000 },
 });
 const shape = { key: '42', text: "UPDATE orders SET token = 'hunter2' WHERE id = $1", relations: ['public.orders'], callsPerSec: 12.4, meanMs: 3.2, calls: 7440, totalMs: 23_808, rowsPerCall: 1, cacheHit: 0.974 };
@@ -133,8 +133,11 @@ describe('/queries/[queryid]', () => {
   it('is a 404 for an id nothing knows, and not when the statistics could not be read', async () => {
     state.live = live([]);
     await expect(mount()).rejects.toThrow('NEXT_NOT_FOUND');
-    state.live = { ok: false, reason: 'missing-extension', message: 'no pg_stat_statements' };
+    state.live = { ok: false, reason: 'missing-extension', message: 'no pg_stat_statements', remedy: 'CREATE EXTENSION pg_stat_statements;' };
     await show();
     expect(view.container.querySelector('h1')!.textContent).toBe('statement 42');
+    // Found by review: dashes and "not placed" with no reason given.
+    expect(view.text()).toContain('could not be read: no pg_stat_statements');
+    expect(view.text()).toContain('CREATE EXTENSION pg_stat_statements;');
   });
 });

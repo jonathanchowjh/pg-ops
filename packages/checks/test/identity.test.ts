@@ -58,7 +58,4 @@ describe('identity', () => {
     expect(v('180000')).toBe('18.0');
   });
 
-  it('never escalates — it is context, not a finding', () => {
-    expect(identity.verdict).toBeUndefined();
-  });
 });

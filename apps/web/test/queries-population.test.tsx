@@ -16,7 +16,7 @@ const state = vi.hoisted(() => ({
 vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async (_n: string, check: { id: string }) => {
     ran.ids.push(check.id);
-    if (check.id === 'sessions') return { ok: true, verdict: null, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } };
+    if (check.id === 'sessions') return { ok: true, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } };
     return state.live;
   }),
 }));
@@ -42,7 +42,7 @@ const liveRow = (queryid: string, text: string, calls: number, meanMs: number) =
   queryid, query: text, calls, totalMs: calls * meanMs, meanMs, stddevMs: 0, rows: calls, cacheHitPct: 100, redacted: false,
 });
 const live = (rows: unknown[], statsResetAt: string | null = '2026-10-12T00:00:00Z') => ({
-  ok: true, verdict: null, measuredAt: 0,
+  ok: true, measuredAt: 0,
   data: { rows, totalShapes: 135, ownShapes: 0, sort: 'total', statsResetAt, allMs: 1_000_000 },
 });
 

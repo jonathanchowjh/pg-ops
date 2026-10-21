@@ -20,7 +20,7 @@ export interface DatabaseActivityData {
 
 /**
  * The cumulative counters for this database, and the `stats_reset` they
- * count from, which Server's head names. No verdict. Bigints come back as
+ * count from, which Server's head names. Bigints come back as
  * text and are parsed to doubles here.
  */
 const SQL = `

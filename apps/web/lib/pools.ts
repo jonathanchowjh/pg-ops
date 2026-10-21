@@ -71,7 +71,18 @@ function targetFor(db: DatabaseConfig): Target {
     // A backstop for every statement no check bounds itself, and a lock it
     // will not wait behind: this pool is aimed at a database that may be
     // the one in trouble. A check's own `SET LOCAL` overrides both.
-    statement_timeout: TARGET_STATEMENT_MS, lock_timeout: TARGET_LOCK_MS,
+    //
+    // A `SET` once connected, not `pg`'s `statement_timeout` option: that
+    // one travels in the startup packet, and Postgres then reports pgops's
+    // value as the server's in both `current_setting` and `reset_val`, so
+    // Server could never show a timeout of 0. After a `SET`, `reset_val` is
+    // still the server's. pg-pool awaits `onConnect` before it hands the
+    // client out, and ends a client whose hook failed rather than hand it out
+    // unbounded.
+    onConnect: async (client) => {
+      await client.query(ownSql(`SET statement_timeout = ${TARGET_STATEMENT_MS}`));
+      await client.query(ownSql(`SET lock_timeout = ${TARGET_LOCK_MS}`));
+    },
   });
   // A pool-level error with no listener is an unhandled 'error' event, which
   // terminates the Node process.

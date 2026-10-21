@@ -1,5 +1,6 @@
 import type { ActionMeta, CheckContext } from '../types.js';
 import { messageOf, ownSql } from '../run.js';
+import { ownSession } from '../checks/shared.js';
 import { audited } from './audited.js';
 
 /**
@@ -25,13 +26,15 @@ interface KillTarget {
  * blocker does not cascade to its waiters. Every call is audit-logged,
  * success or failure.
  *
- * Three guards. Postgres reuses backend pids and the operator may take a
+ * Four guards. Postgres reuses backend pids and the operator may take a
  * while to confirm, so the kill is pinned to the `backend_start` captured at
  * selection. Only a `'client backend'` is killed: `pg_blocking_pids()` can
- * name an autovacuum worker. And only one of this database:
+ * name an autovacuum worker. Only one of this database:
  * pg_stat_activity is server-wide, and `/db/a` must not end a session of `b`.
+ * And never pgops's own: the tree does not list them, but a hand-made POST
+ * could end the connection running the kill, or a capture mid-write.
  *
- * All three sit in the same CASE as the terminate, against one row from one
+ * All four sit in the same CASE as the terminate, against one row from one
  * snapshot of pg_stat_activity. A validating SELECT followed by a separate
  * terminate would leave a window for the pid to be recycled in between. When
  * a guard fails the THEN branch is never evaluated, so no signal is sent;
@@ -40,6 +43,7 @@ interface KillTarget {
 const KILL_SQL = ownSql(`SELECT CASE WHEN backend_start = $2::timestamptz
             AND backend_type = 'client backend'
             AND datname = current_database()
+            AND pid <> pg_backend_pid() AND NOT ${ownSession('application_name')}
             THEN pg_terminate_backend(pid)
             ELSE NULL END AS terminated
 FROM pg_stat_activity

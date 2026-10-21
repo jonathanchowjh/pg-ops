@@ -25,7 +25,6 @@ describe('indexBloat against a real server', () => {
       // the floor is applied.
       expect(result.data.indexes).toEqual([]);
       expect(result.data.total).toBe(0);
-      expect(result.verdict).toBeNull();
     });
   });
 

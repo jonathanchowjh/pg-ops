@@ -72,25 +72,9 @@ describe('the indexBloat contract', () => {
     expect(indexBloat.timeoutMs).toBe(30_000);
   });
 
-  it('never escalates on its own', () => {
-    expect(indexBloat.verdict).toBeUndefined();
-  });
-
   it("floors at pgHero's 100 megabytes of wasted space", () => {
-    const warn = indexBloat.thresholds!.find((t) => t.level === 'warn')!;
-    expect(warn.value).toBe(104857600);
-    expect(warn.unit).toBe('bytes');
-    expect(warn.because).toContain('index_bloat_bytes');
-  });
-
-  /**
-   * The floor is declared once, as the threshold value, so the guidance an
-   * operator reads and the number the query applies cannot drift apart.
-   */
-  it('applies the threshold value as the query default, not a second literal', () => {
-    const warn = indexBloat.thresholds!.find((t) => t.level === 'warn')!;
     const built = (indexBloat.sql as (o: object) => { values: unknown[] })({});
-    expect(built.values[0]).toBe(warn.value);
+    expect(built.values[0]).toBe(104857600);
   });
 
   it('overrides the floor and the cap when asked', () => {

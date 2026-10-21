@@ -1,14 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { standbys, type StandbyRow } from '../src/checks/standbys.js';
 
-const t = standbys.thresholds!;
-
-/** One streaming standby, `replaySecs` behind. */
-const sb = (replaySecs: number | null, app = 'replica-1') => ({
-  app, clientAddr: '10.0.0.2', state: 'streaming', syncState: 'async',
-  writeSecs: 0.1, flushSecs: 0.2, replaySecs, sentBytes: 0, replayBytes: 1024,
-});
-
 const row = (over: Partial<StandbyRow> = {}): StandbyRow => ({
   app: 'replica-1', client_addr: '10.0.0.2', state: 'streaming', sync_state: 'async',
   write_secs: '0.1', flush_secs: '0.2', replay_secs: '1',
@@ -38,48 +30,6 @@ describe('standbys.map', () => {
 
   it('is empty, not broken, on a server with no standbys', () => {
     expect(standbys.map([])).toEqual({ standbys: [] });
-  });
-});
-
-describe('standbys.verdict', () => {
-  const warnAt = t.find((x) => x.level === 'warn')!.value;
-  const critAt = t.find((x) => x.level === 'critical')!.value;
-
-  it('is ok with no standbys and with a caught-up one', () => {
-    expect(standbys.verdict!({ standbys: [] }, t)).toEqual({ level: 'ok' });
-    expect(standbys.verdict!({ standbys: [sb(1)] }, t)).toEqual({ level: 'ok' });
-  });
-
-  it('judges the worst standby and names it, not the first one it read', () => {
-    const v = standbys.verdict!({ standbys: [sb(2), sb(45, 'replica-2')] }, t);
-    expect(v.level).toBe('warn');
-    expect(v.note).toContain('replica-2');
-    expect(v.note).not.toContain('replica-1');
-  });
-
-  it('flips at each threshold itself, not one unit past it', () => {
-    expect(standbys.verdict!({ standbys: [sb(warnAt - 1)] }, t).level).toBe('ok');
-    expect(standbys.verdict!({ standbys: [sb(warnAt)] }, t).level).toBe('warn');
-    expect(standbys.verdict!({ standbys: [sb(critAt - 1)] }, t).level).toBe('warn');
-    expect(standbys.verdict!({ standbys: [sb(critAt)] }, t).level).toBe('critical');
-  });
-
-  /**
-   * A standby whose lag this role cannot read is not judged, and must not
-   * drag a readable standby's verdict down with it.
-   */
-  it('does not judge a standby whose lag it cannot read', () => {
-    expect(standbys.verdict!({ standbys: [sb(null)] }, t)).toEqual({ level: 'ok' });
-    const mixed = standbys.verdict!({ standbys: [sb(null), sb(critAt, 'replica-2')] }, t);
-    expect(mixed.level).toBe('critical');
-    expect(mixed.note).toContain('replica-2');
-  });
-
-  // The threshold lookups must not use a non-null assertion.
-  it('does not throw, and stays visible, when a threshold level is absent', () => {
-    const warnOnly = t.filter((x) => x.level === 'warn');
-    expect(standbys.verdict!({ standbys: [sb(99999)] }, warnOnly).level).toBe('warn');
-    expect(standbys.verdict!({ standbys: [sb(99999)] }, []).level).toBe('ok');
   });
 });
 

@@ -34,7 +34,7 @@ vi.mock('@/lib/check', () => ({
         autovacuum: [{ name: 'autovacuum_freeze_max_age', value: '200000000' }], vacuum: [],
       },
     };
-    return { ok: true, verdict: null, measuredAt: 0, data: data[check.id] ?? {} };
+    return { ok: true, measuredAt: 0, data: data[check.id] ?? {} };
   }),
   readStore: vi.fn(async () => state.health),
 }));
@@ -54,7 +54,7 @@ const holder = (over: Partial<HorizonHolder>): HorizonHolder => ({
 });
 const minute = (over: Partial<HealthMinute> = {}): HealthMinute => ({
   at: NOW - 60_000, connections: 5, serverConnections: 12, maxConnections: 97, lagSecs: null, lagBytes: null, walBytes: 100, xidAge: 1000,
-  xminAge: 10, deadlocks: 0, commits: 10, rollbacks: 0, statsReset: null, ...over,
+  xminAge: 10, deadlocks: 0, commits: 10, rollbacks: 0, statsReset: null, sizeBytes: null, ...over,
 });
 
 let view: Rendered;
@@ -95,6 +95,16 @@ describe('the Server page', () => {
     expect(view.text()).toContain('Replication lag');
     expect(view.text()).toContain('Still to replay');
     expect(view.text()).not.toContain('No replication lag');
+  });
+
+  /** Found by review: the size was written every minute and shown nowhere. */
+  it('states the database size the newest minute measured, and nothing with no store', async () => {
+    await mount();
+    expect(view.text()).not.toContain('on disk');
+    view.unmount();
+    state.health = { ok: true, value: [minute({ sizeBytes: 2048 }), minute({ at: NOW - 30_000, sizeBytes: null })] };
+    await mount();
+    expect(view.container.querySelector('h1')!.parentElement!.textContent).toContain('2 KB on disk');
   });
 
   it('groups who holds the connections by application and state, and skips the background processes', async () => {

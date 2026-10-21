@@ -11,11 +11,26 @@ import type { Check } from '../types.js';
  *
  * `WHERE name = ANY($1)` only saves rows; `map` would produce the same
  * groups without it.
+ *
+ * A timeout pgops set on its own connection reads as pgops's, not the
+ * server's: the pool's backstop and the check's `SET LOCAL` both show in
+ * `current_setting`. Where this session set it, `reset_val` is what the
+ * server gives everyone else, in milliseconds.
  */
 const SETTINGS_SQL = `
-SELECT name, current_setting(name) AS value
+SELECT name, current_setting(name) AS value,
+       CASE WHEN source = 'session' AND unit = 'ms' THEN reset_val END AS reset_ms
 FROM pg_settings
 WHERE name = ANY($1)`;
+
+/** Milliseconds as SHOW prints them: the largest unit that divides evenly, `0` when off. */
+export function showMs(ms: number): string {
+  if (ms === 0) return '0';
+  for (const [unit, size] of [['d', 86_400_000], ['h', 3_600_000], ['min', 60_000], ['s', 1000]] as const) {
+    if (ms % size === 0) return `${ms / size}${unit}`;
+  }
+  return `${ms}ms`;
+}
 
 /**
  * pgHero's main group, then the timeouts the pages reason about: a chain
@@ -47,7 +62,7 @@ export function settingNames(): string[] {
   return [...MAIN, ...AUTOVACUUM, ...VACUUM];
 }
 
-export interface SettingRow { name: string; value: string }
+export interface SettingRow { name: string; value: string; reset_ms?: string | null }
 
 export interface Setting { name: string; value: string }
 
@@ -68,7 +83,7 @@ function group(names: string[], byName: Map<string, string>): Setting[] {
 }
 
 export function toSettings(rows: SettingRow[]): SettingsData {
-  const byName = new Map(rows.map((r) => [r.name, r.value]));
+  const byName = new Map(rows.map((r) => [r.name, r.reset_ms == null ? r.value : showMs(Number(r.reset_ms))]));
   return {
     main: group(MAIN, byName),
     autovacuum: group(AUTOVACUUM, byName),
@@ -85,5 +100,4 @@ export const settings: Check<SettingRow, SettingsData> = {
   timeoutMs: 10_000,
   sql: () => ({ text: SETTINGS_SQL, values: [settingNames()] }),
   map: toSettings,
-  // No verdict: tuning advice that does not know the machine's RAM is a guess.
 };

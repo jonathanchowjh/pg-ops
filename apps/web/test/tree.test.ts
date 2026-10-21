@@ -262,6 +262,21 @@ describe('sessions', () => {
     expect(spans.at(-1)!.to).toBe(to);
   });
 
+  it('says how long a session has been in its state, though it began before the window', () => {
+    const tree = buildTree(input({
+      from: T0 + 3 * 60 * MIN, to: T0 + 3 * 60 * MIN + 15 * MIN,
+      samples: [0, 1, 2].map((i) => sample(12 * 60 + i, [ses(1, { cls: 'idle' })])),
+    }));
+    expect(tree.tables[0]!.statements[0]!.sessions[0]!.spans[0]!.from).toBe(T0);
+  });
+
+  it('keeps one stretch across a gap in the sampling when the state held through it', () => {
+    const tree = buildTree(input({
+      samples: [0, 1, 2, 8, 9].map((i) => sample(i, [ses(1)])),
+    }));
+    expect(tree.tables[0]!.statements[0]!.sessions[0]!.spans).toEqual([{ cls: 'cpu', from: T0, to: T0 + 10 * BUCKET, blockedBy: null }]);
+  });
+
   it('lists three and counts the rest', () => {
     const five = [1, 2, 3, 4, 5].map((p) => ses(p));
     const tree = buildTree(input({ samples: [0, 1, 2].map((i) => sample(i, five)) }));
@@ -371,6 +386,13 @@ describe('findings', () => {
   it('names a blocker the sample does not hold as the root, by pid alone', () => {
     const tree2 = buildTree(input({ samples: [sample(0, [ses(2, { cls: 'lock', blockedBy: 77 })])] }));
     expect(tree2.findings[0]).toMatchObject({ pid: 77, backendStart: null, table: 'public.users' });
+  });
+
+  it('states a chain once across a gap in the sampling, not again for the stretch before it', () => {
+    const gapped = [...Array(60)].map((_, i) => (i >= 20 && i < 40 ? chain(i) : calm(i))).filter((_, i) => i < 25 || i > 29);
+    const t = buildTree(input({ samples: gapped }));
+    expect(t.findings.filter((f) => f.kind === 'chain')).toHaveLength(1);
+    expect(findingsAt(t, T0 + 22 * BUCKET)).toHaveLength(1);
   });
 
   it('finds a transaction idle past a minute, and leaves a chain\'s root to its chain', () => {
@@ -624,7 +646,7 @@ describe('the flat list', () => {
 describe('the server\'s findings, from the health row', () => {
   const minute = (i: number, over: Partial<HealthMinute> = {}): HealthMinute => ({
     at: T0 + i * MIN, connections: 5, serverConnections: 20, maxConnections: 100, lagSecs: 0, lagBytes: 0, walBytes: null,
-    xidAge: 1000, xminAge: null, deadlocks: 0, commits: null, rollbacks: null, statsReset: T0 - MIN, ...over,
+    xidAge: 1000, xminAge: null, deadlocks: 0, commits: null, rollbacks: null, statsReset: T0 - MIN, sizeBytes: null, ...over,
   });
   const at = (tree: Tree, i: number) => findingsAt(tree, T0 + i * MIN + 1000);
 

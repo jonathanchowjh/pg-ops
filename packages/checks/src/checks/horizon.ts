@@ -1,5 +1,5 @@
-import type { Check, Verdict } from '../types.js';
-import { escalate, ownSession } from './shared.js';
+import type { Check } from '../types.js';
+import { ownSession } from './shared.js';
 
 export interface HorizonRow {
   kind: 'backend' | 'slot' | 'prepared';
@@ -30,9 +30,9 @@ export interface HorizonData { holders: HorizonHolder[]; truncated: boolean }
  *
  * Judged on transactions, not seconds: `age(xid)` decides how much garbage
  * cannot be reclaimed, and wall-clock age does not. A slot has no start
- * time, so a verdict on seconds could not judge one, and `slots.ts` judges
- * retained WAL bytes, which a logical slot with a stuck `catalog_xmin` can
- * keep near zero. Seconds are reported for information only.
+ * time, so seconds could not order one, and a logical slot with a stuck
+ * `catalog_xmin` can keep its retained WAL near zero. Seconds are reported
+ * for information only.
  */
 const SQL = `
 SELECT kind, who, xmin_age, age_secs, detail, backend_start, waiting, count(*) OVER ()::int AS total
@@ -41,7 +41,9 @@ FROM (
          EXTRACT(EPOCH FROM (now() - xact_start))::text AS age_secs,
          coalesce(nullif(application_name, ''), '—') || ' · ' || coalesce(state, 'unknown') AS detail,
          backend_start::text AS backend_start,
-         cardinality(pg_blocking_pids(pid)) > 0 AS waiting
+         -- Asked only of a backend waiting on a lock, as in sessions.ts: each
+         -- call takes the lock manager's partition locks.
+         CASE WHEN wait_event_type = 'Lock' THEN cardinality(pg_blocking_pids(pid)) > 0 ELSE false END AS waiting
   FROM pg_stat_activity
   WHERE (backend_xmin IS NOT NULL OR backend_xid IS NOT NULL) AND pid <> pg_backend_pid()
     -- A backend in another database does not hold this one's tables back;
@@ -78,32 +80,4 @@ export const horizon: Check<HorizonRow, HorizonData> = {
     })),
     truncated: (rows[0]?.total ?? 0) > rows.length,
   }),
-  thresholds: [
-    { level: 'warn', value: 50_000_000, unit: 'transactions',
-      because: 'fifty million transactions of pinned history is already tens of gigabytes of dead '
-             + 'rows on a write-heavy database, and vacuum cannot reclaim any of it while the '
-             + 'holder lives, however often it runs',
-      remedy: 'End whatever holds it. A backend can be terminated from Sessions; a prepared '
-            + 'transaction needs COMMIT PREPARED or ROLLBACK PREPARED by its owner; a slot that '
-            + 'no longer has a consumer should be dropped with pg_drop_replication_slot.' },
-    { level: 'critical', value: 200_000_000, unit: 'transactions',
-      because: "200 million is autovacuum_freeze_max_age's default, the point at which Postgres "
-             + 'starts forcing anti-wraparound vacuums that this holder will block, so the '
-             + 'database is now accumulating a problem it cannot resolve on its own',
-      remedy: 'Terminate the holder now — a slot with no consumer should be dropped — then check '
-            + 'the Maintenance page for the tables carrying the most dead rows.' },
-  ],
-  /**
-   * The worst holder by xid distance, whatever kind it is. The note names the
-   * kind because the remedy differs, and gives seconds only where the holder
-   * has a start time.
-   */
-  verdict: (d, t): Verdict => {
-    const worst = d.holders.reduce<HorizonHolder | null>(
-      (o, h) => (o === null || h.xminAge > o.xminAge ? h : o), null);
-    if (worst === null) return { level: 'ok' };
-    const when = worst.ageSecs === null ? '' : `, open ${Math.round(worst.ageSecs / 60)}m`;
-    return escalate(worst.xminAge, t,
-      `${worst.kind} ${worst.who} pins the horizon ${worst.xminAge} transactions back${when}`);
-  },
 };

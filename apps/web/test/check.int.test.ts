@@ -52,6 +52,26 @@ describe('runCheckFor', () => {
     const r = await runCheckFor('primary', broken);
     expect(r.ok).toBe(false);
   });
+
+  /**
+   * The pool bounds every statement, and Server lists the server's own
+   * timeouts. A timeout sent in the startup packet would be reported as the
+   * server's, so a server with none would never read "off".
+   */
+  it("bounds pgops's statements and still reports the server's timeouts", async () => {
+    const { contextFor } = await import('../lib/pools.js');
+    const { runCheckFor } = await import('../lib/check.js');
+    const ctx = await contextFor('primary');
+    const { rows } = await ctx.target.query<{ s: string; l: string }>(
+      "SELECT current_setting('statement_timeout') AS s, current_setting('lock_timeout') AS l");
+    expect(rows[0]).toEqual({ s: '15s', l: '1s' });
+    const r = await runCheckFor('primary', CHECKS.settings);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const shown = Object.fromEntries(r.data.main.map((s) => [s.name, s.value]));
+    expect(shown.statement_timeout).toBe('0');
+    expect(shown.lock_timeout).toBe('0');
+  });
 });
 
 /**

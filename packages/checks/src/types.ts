@@ -1,11 +1,9 @@
 import type { Pool } from 'pg';
 
-type VerdictLevel = 'ok' | 'warn' | 'critical';
-export interface Verdict { level: VerdictLevel; note?: string }
-
 /**
  * A threshold is data, not a constant in a comparison: a number, its unit,
- * and the reason it matters.
+ * and the reason it matters. The tree judges against it, over time
+ * (apps/web/lib/samples.ts, MARKS); a check reports and never judges.
  */
 export interface Threshold {
   level: 'warn' | 'critical';
@@ -57,8 +55,6 @@ export interface Check<Row, Data, Opts = void> {
   sql: string | ((opts: Opts) => SqlQuery);
   /** Pure. Row shape in, domain data out. */
   map: (rows: Row[]) => Data;
-  /** Pure. Absent means this check reports but never escalates. */
-  verdict?: (data: Data, thresholds: Threshold[]) => Verdict;
   thresholds?: Threshold[];
   requires?: Requirement[];
 }
@@ -72,19 +68,8 @@ export type FailureReason =
    */
   | 'missing-store';
 
-/**
- * `verdict: null` means the check does not judge: it reports a reading and
- * has no opinion to escalate. It is not the same as `{level: 'ok'}`.
- */
 export type CheckResult<D> =
-  | {
-      ok: true; data: D; verdict: Verdict | null; measuredAt: number;
-      /**
-       * The threshold `verdict` crossed. Absent for `ok` and for checks that
-       * do not judge.
-       */
-      crossed?: Threshold;
-    }
+  | { ok: true; data: D; measuredAt: number }
   | { ok: false; reason: FailureReason; message: string; remedy?: string };
 
 /** Pools are passed in, never held at module scope. */
@@ -99,8 +84,8 @@ export interface CheckContext {
 export interface TimeRange { from: Date; to: Date }
 
 /**
- * A check answers "what is true now" and yields one verdict. A series answers
- * "how has this moved" and yields many points with no verdict. They share
+ * A check answers "what is true now" with one reading. A series answers
+ * "how has this moved" with many points. They share
  * pools, requirements and the failure envelope, and nothing else.
  */
 export interface Series<Point, Opts = void> {
@@ -114,7 +99,7 @@ export interface Series<Point, Opts = void> {
  * A tool answers a question the operator asks ("how would this statement
  * run?"), where a check answers one pgops asks of every database on every
  * render. Unlike a check it may take several dependent round trips. It reads
- * only, and never judges: `runTool` yields `verdict: null`.
+ * only.
  */
 export interface Tool<Input, Data> {
   id: string;

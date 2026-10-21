@@ -46,7 +46,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ name: s
   }
 
   try {
-    const results = await ACTIONS.killLongRunning(opened.ctx, parsed, auditMeta(opened, name, 'web/sessions'));
+    const results = await ACTIONS.killLongRunning(opened.ctx, parsed, auditMeta(opened, name, 'web/server'));
     // One mark for the press, not one per session.
     if (results.some((r) => r.outcome === 'terminated')) await eventFor(name, 'terminate');
     // Per-session outcomes, not a boolean: some may have been refused.

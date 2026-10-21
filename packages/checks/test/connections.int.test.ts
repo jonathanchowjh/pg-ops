@@ -46,41 +46,4 @@ describe('connections', () => {
       }
     });
   }, 120_000);
-
-  it('escalates on the boundary, in the database, not on the constant', async () => {
-    await withPostgres(async (ctx) => {
-      const r = await runCheck(ctx, connections);
-      if (!r.ok) throw new Error(r.message);
-      // An idle test database has almost all of its pool free.
-      // `connections` carries a verdict function, so this is never null in practice.
-      expect(r.verdict!.level).toBe('ok');
-
-      // Drive the verdict directly at each documented boundary.
-      const t = connections.thresholds!;
-      const warnAt = t.find((x) => x.level === 'warn')!.value;
-      const critAt = t.find((x) => x.level === 'critical')!.value;
-      const at = (pct: number) => connections.verdict!(
-        { max: 100, used: 100 - pct, reserved: 0, headroom: pct }, t,
-      ).level;
-
-      // `headroom` counts down — smaller is worse — so one percent more
-      // headroom is the safe side, the mirror of the rising checks' `>=`.
-      expect(at(warnAt + 1)).toBe('ok');
-      expect(at(warnAt)).toBe('ok');        // exactly at the line is not over it
-      expect(at(warnAt - 1)).toBe('warn');
-      expect(at(critAt + 1)).toBe('warn');
-      expect(at(critAt)).toBe('warn');
-      expect(at(critAt - 1)).toBe('critical');
-    });
-  }, 120_000);
-
-  // Pure — no container needed. Pins the over-committed case, where reserved
-  // exceeds what remains and headroom goes negative.
-  it('still escalates to critical when reserved exceeds what remains (over-committed)', () => {
-    const t = connections.thresholds!;
-    // max 100, used 95 -> only 5 slots physically remain, but 10 are
-    // reserved: headroom = 100 - 10 - 95 = -5.
-    const v = connections.verdict!({ max: 100, used: 95, reserved: 10, headroom: -5 }, t);
-    expect(v.level).toBe('critical');
-  });
 });

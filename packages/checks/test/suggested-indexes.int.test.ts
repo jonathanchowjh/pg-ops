@@ -17,7 +17,6 @@ describe('suggestedIndexes (#58, #63)', () => {
       for (let i = 0; i < 3; i++) await pool.query('SELECT * FROM orders WHERE customer_id = $1', [i]);
       const r = await runTool(ctx, TOOLS.suggestedIndexes, { minMeanMs: 0, minCalls: 1 });
       if (!r.ok) throw new Error(r.message);
-      expect(r.verdict).toBeNull();
       const idx = r.data.indexes.find((i) => i.columns.join() === 'customer_id');
       expect(idx?.queries.map((q) => q.query)).toEqual([expect.stringContaining('customer_id = $1')]);
       expect(idx?.statement).toBe('CREATE INDEX CONCURRENTLY ON "public"."orders" ("customer_id")');

@@ -15,7 +15,7 @@ vi.mock('@/lib/pools', async () => {
 
 const { runTool } = vi.hoisted(() => ({
   runTool: vi.fn(async (_ctx: unknown, _tool: unknown, input: { sql: string }) =>
-    ({ ok: true, data: { plan: { 'Node Type': 'Result' }, parameters: 0, advice: [], echo: input.sql }, verdict: null, measuredAt: 0 })),
+    ({ ok: true, data: { plan: { 'Node Type': 'Result' }, parameters: 0, advice: [], echo: input.sql }, measuredAt: 0 })),
 }));
 vi.mock('@pgops/checks', async () => {
   const actual = await vi.importActual<typeof import('@pgops/checks')>('@pgops/checks');
@@ -66,7 +66,7 @@ describe('POST /api/db/[name]/explain', () => {
   it('passes the tool envelope through unchanged', async () => {
     const r = await call('prod', { sql: 'SELECT 1' });
     expect(r.status).toBe(200);
-    expect(await r.json()).toMatchObject({ ok: true, verdict: null, data: { echo: 'SELECT 1' } });
+    expect(await r.json()).toMatchObject({ ok: true, data: { echo: 'SELECT 1' } });
     expect(runTool).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'explain' }), { sql: 'SELECT 1' });
   });
 

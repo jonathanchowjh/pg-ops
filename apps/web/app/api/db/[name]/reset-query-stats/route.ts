@@ -18,7 +18,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ name: s
   if (opened instanceof Response) return opened;
 
   try {
-    await ACTIONS.resetQueryStats(opened.ctx, auditMeta(opened, name, 'web/queries'));
+    await ACTIONS.resetQueryStats(opened.ctx, auditMeta(opened, name, 'web/server'));
   } catch (err) {
     return failed(err);
   }

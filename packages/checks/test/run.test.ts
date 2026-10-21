@@ -228,55 +228,6 @@ describe('queryWithTimeout: pool hygiene when ROLLBACK itself fails', () => {
   });
 });
 
-/**
- * `crossed` is the threshold a verdict crossed, resolved once in `runCheck`
- * so every surface can show why a number is bad.
- */
-describe('runCheck resolves the threshold a verdict crossed', () => {
-  const graded: Check<{ n: string }, number> = {
-    id: 'graded', home: 'database',
-    title: 'Graded',
-    class: 'live',
-    sql: 'SELECT 1 AS n',
-    map: (rows) => Number(rows[0]?.n ?? 0),
-    thresholds: [
-      { level: 'warn', value: 10, unit: 'count', because: 'ten is worth a look', remedy: 'Look at it.' },
-      { level: 'critical', value: 20, unit: 'count', because: 'twenty is an incident' },
-    ],
-    verdict: (d) => ({ level: d >= 20 ? 'critical' : d >= 10 ? 'warn' : 'ok' }),
-  };
-
-  const run = (n: string) => runCheck(fakeCtx(async () => ({ rows: [{ n }] })), graded);
-
-  it('hands back the threshold matching the verdict level, with its remedy', async () => {
-    const r = await run('12');
-    expect(r).toMatchObject({ ok: true, crossed: { because: 'ten is worth a look', remedy: 'Look at it.' } });
-  });
-
-  it('picks the critical threshold, not merely the first one that exists', async () => {
-    const r = await run('25');
-    if (!r.ok) throw new Error('expected ok');
-    // `thresholds[0]` would pass the warn case above and then explain a
-    // critical reading with the warn sentence.
-    expect(r.crossed?.because).toBe('twenty is an incident');
-  });
-
-  it('resolves nothing for a healthy reading', async () => {
-    const r = await run('3');
-    if (!r.ok) throw new Error('expected ok');
-    // Asserted directly, not via toMatchObject, which would not catch a
-    // threshold being resolved for a healthy reading.
-    expect(r.crossed).toBeUndefined();
-  });
-
-  it('resolves nothing for a check that does not judge', async () => {
-    const r = await runCheck(fakeCtx(async () => ({ rows: [{ n: '99' }] })), doubler);
-    if (!r.ok) throw new Error('expected ok');
-    expect(r.verdict).toBeNull();
-    expect(r.crossed).toBeUndefined();
-  });
-});
-
 /** Guard: catches a new check landing with a threshold that cannot say why it escalates or what to do about it. */
 describe('every shipped threshold carries advice', () => {
   it('has a non-empty because and remedy on every threshold in CHECKS', async () => {
@@ -295,10 +246,10 @@ describe('every shipped threshold carries advice', () => {
 describe('runTool', () => {
   const ctx: CheckContext = { target: {} as never, serverVersion: 170000 };
 
-  it('returns the data with verdict null — a tool answers, it never judges', async () => {
+  it('returns the data in the envelope a check returns', async () => {
     const tool = { id: 't', title: 'T', run: async (_c: CheckContext, n: number) => n * 2 };
     const r = await runTool(ctx, tool, 21);
-    expect(r).toMatchObject({ ok: true, data: 42, verdict: null });
+    expect(r).toMatchObject({ ok: true, data: 42 });
   });
 
   it('refuses below its version floor without running', async () => {

@@ -154,9 +154,13 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
+  // Not while the tab is hidden: each poll reads the database being
+  // diagnosed, and nobody is reading the answer. Shown again, it reads once.
   useEffect(() => {
-    const id = setInterval(() => request(), intervalMs);
-    return () => clearInterval(id);
+    const id = setInterval(() => { if (document.visibilityState !== 'hidden') request(); }, intervalMs);
+    const onShown = () => { if (document.visibilityState === 'visible') request(); };
+    document.addEventListener('visibilitychange', onShown);
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', onShown); };
   }, [intervalMs, request]);
 
   // The falling edge of `isPending` is the flight settling: a tick skipped

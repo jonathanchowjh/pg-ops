@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { CHECKS, SERIES, readHourly, readTableHours, tableFlags, type TableHour } from '@pgops/checks';
+import { SERIES, readHourly, readTableHours, tableFlags, type TableHour } from '@pgops/checks';
 import { CatalogNote, IndexRow, List, SequenceRow, Tag } from '@/components/catalog-rows';
 import { Clock, Time } from '@/components/clock';
 import { ConfirmAction } from '@/components/actions';
@@ -10,14 +10,14 @@ import { Refresh } from '@/components/refresh';
 import { redactTree } from '@/components/sql';
 import { RowsView } from '@/components/tree-view';
 import { catalogFor, scansFor } from '@/lib/catalog';
-import { readStore, runCheckFor, runSeriesFor } from '@/lib/check';
-import { CLASSES, CLASS_NAMES, DAY_MS, EVENT_NAMES, HOUR_MS, keepQuery, type Search } from '@/lib/clock';
+import { identityFor, readStore, runSeriesFor } from '@/lib/check';
+import { DAY_MS, EVENT_NAMES, HOUR_MS, keepQuery, type Search } from '@/lib/clock';
 import { actionsAllowed } from '@/lib/config';
 import { formatBytes, plural } from '@/lib/format';
 import { onColumns } from '@/lib/plot';
 import { clockFor, treeFor } from '@/lib/samples';
 import { shapesFor } from '@/lib/shapes';
-import { unseenAt } from '@/lib/tree';
+import { loadOf } from '@/lib/tree';
 
 /** A size reading stands until the capture after next. */
 const SIZE_SPAN_MS = 10 * 60_000;
@@ -64,9 +64,7 @@ export default async function TablePage({ params, searchParams }: {
   ]);
 
   const tree = treeFor(clock, { tables: [], tablesTotal: null, shapes: known.shapes, open: new Set([relation]), find: '' });
-  const strip = tree.tables.find((t) => t.name === relation)?.strip
-    ?? Array.from({ length: grid.columns }, () => [0, 0, 0, 0, 0]);
-  const load: Series[] = CLASSES.map((c, i) => ({ name: CLASS_NAMES[c], tone: c, values: strip.map((col, k) => (unseenAt(tree.seen, k) ? null : col[i] ?? 0)) }));
+  const load: Series[] = loadOf(tree.tables.find((t) => t.name === relation)?.strip, tree.seen, grid.columns);
   const hourly = (pick: (h: TableHour) => number): (number | null)[] =>
     onColumns(grid, (hours.ok ? hours.value : []).map((h) => ({ at: h.at, value: pick(h) })), HOUR_MS);
   const size = onColumns(grid, (sizes.ok ? sizes.points : []).map((p) => ({ at: p.capturedAt.getTime(), value: p.sizeBytes })), SIZE_SPAN_MS);
@@ -77,7 +75,7 @@ export default async function TablePage({ params, searchParams }: {
   const flags = table === undefined ? [] : tableFlags(table, catalog.freezeMaxAge);
   const canAct = actionsAllowed(process.env);
   // A standby is read-only: ANALYZE fails there, so it is not offered.
-  const who = table?.kind === 'table' && grid.live && canAct ? await runCheckFor(name, CHECKS.identity) : null;
+  const who = table?.kind === 'table' && grid.live && canAct ? await identityFor(name) : null;
   const standby = who !== null && who.ok && who.data.replica === true;
   const scansOf = (i: (typeof catalog.indexes)[number]): number => (scans.ok ? scans.value.get(i.name) ?? 0 : i.scans);
   /** An empty list is "none" only when it was read. */

@@ -523,7 +523,7 @@ describe('readHealth', () => {
   const T0 = Date.UTC(2026, 9, 20, 8, 0, 0);
   /** A stored minute with the few columns the clock reads, the rest null. */
   const stored = async (client: PoolClient, id: number, i: number, over: Record<string, unknown> = {}) => {
-    const cols = { server_connections: 20, max_connections: 97, deadlocks: '0', xact_commit: '100', replication_lag_bytes: '0', ...over };
+    const cols = { server_connections: 20, max_connections: 97, deadlocks: '0', xact_commit: '100', replication_lag_bytes: '0', size_bytes: '8192', ...over };
     await client.query(
       `INSERT INTO pgops.health_stats (database_id, captured_at, ${Object.keys(cols).join(', ')})
        VALUES ($1, $2, ${Object.keys(cols).map((_, k) => `$${k + 3}`).join(', ')})`,
@@ -541,7 +541,7 @@ describe('readHealth', () => {
       expect(minutes.map((m) => [m.at, m.serverConnections])).toEqual([
         [T0 + 2 * 60_000, 12], [T0 + 3 * 60_000, 13], [T0 + 4 * 60_000, 14],
       ]);
-      expect(minutes[0]).toMatchObject({ maxConnections: 97, deadlocks: 0, commits: 100, lagBytes: 0, lagSecs: null, xidAge: null, statsReset: null });
+      expect(minutes[0]).toMatchObject({ maxConnections: 97, deadlocks: 0, commits: 100, lagBytes: 0, lagSecs: null, xidAge: null, statsReset: null, sizeBytes: 8192 });
       expect(typeof minutes[0]!.commits).toBe('number');
     });
   });

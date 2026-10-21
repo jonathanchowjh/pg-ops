@@ -1,6 +1,6 @@
 // Types only: this file reaches the client bundle, and the checks package carries `pg`.
 import type { HealthMinute, LoadCell, Sample, SampleSession, SessionClass, StatementInfo, StoredEvent } from '@pgops/checks';
-import { CLASSES } from './clock';
+import { CLASSES, CLASS_NAMES } from './clock';
 import { formatBytes, formatCompact, formatDuration } from './format';
 
 /** A session shorter than this in one state is counted on its statement, never listed. */
@@ -24,6 +24,12 @@ export const unseenAt = (seen: readonly number[], col: number): boolean => (seen
 
 /** One node's load on the clock: per column, mean sessions per class, in `CLASSES` order. */
 export type Strip = number[][];
+
+/** A node's strip as a Load panel's series, one a class, with an unsampled column a gap rather than a zero. A node with no strip reads zero. */
+export function loadOf(strip: Strip | undefined, seen: readonly number[], columns: number) {
+  const s = strip ?? Array.from({ length: columns }, () => [0, 0, 0, 0, 0]);
+  return CLASSES.map((c, i) => ({ name: CLASS_NAMES[c], tone: c, values: s.map((col, k) => (unseenAt(seen, k) ? null : col[i] ?? 0)) }));
+}
 
 export interface TableFact {
   name: string;
@@ -107,6 +113,7 @@ export interface TreeInput {
   health?: readonly HealthMinute[];
 }
 
+/** `from` is when Postgres says the state began, which may be before the window: the row's "for 3h" is true, and the track clips. */
 export interface Span { cls: SessionClass; from: number; to: number; blockedBy: number | null }
 export interface SessionNode { pid: number; backendStart: string; app: string | null; spans: Span[]; inChain: boolean }
 export interface StatementNode {
@@ -328,15 +335,22 @@ function findingsOf(input: TreeInput): Finding[] {
   const ends = endsOf(input);
   const out: Finding[] = [];
   const running = new Map<string, { finding: Finding; at: number }>();
-  const touch = (id: string, at: number, make: () => Finding): Finding => {
-    const known = running.get(id);
+  // A finding goes on across a gap when it is the same one: its id carries
+  // the `since` Postgres reports, which an unbroken wait or transaction
+  // keeps. Made again, it would stand twice over the stretch before the gap.
+  const touch = (key: string, at: number, make: () => Finding): Finding => {
+    const known = running.get(key);
     if (known !== undefined && at - known.at <= GAP_MS) {
       known.at = at;
       return known.finding;
     }
     const finding = make();
+    if (known !== undefined && known.finding.id === finding.id) {
+      known.at = at;
+      return known.finding;
+    }
     out.push(finding);
-    running.set(id, { finding, at });
+    running.set(key, { finding, at });
     return finding;
   };
 
@@ -349,7 +363,9 @@ function findingsOf(input: TreeInput): Finding[] {
       const root = rootOf(s, byPid);
       // In a cycle one member stands for the root; it is not its own waiter.
       if (root === s.pid) continue;
-      chains.set(root, [...(chains.get(root) ?? []), s]);
+      const held = chains.get(root);
+      if (held === undefined) chains.set(root, [s]);
+      else held.push(s);
     }
     for (const [rootPid, waiters] of chains) {
       const root = byPid.get(rootPid);
@@ -483,21 +499,25 @@ function healthFindings(points: readonly HealthMinute[], marks: Marks, to: numbe
 
 interface Seen { s: SampleSession; at: number }
 
-/** One session's stretches on one statement. A new state, a new `since` or a gap starts a new one. */
-function spansOf(occ: readonly Seen[], input: TreeInput, ends: ReadonlyMap<number, number>): Span[] {
+/**
+ * One session's stretches on one statement. A new state or a new `since`
+ * starts a new one. A gap in the sampling does not: the same `since` says
+ * the state held through it, and the gap is hatched as not sampled.
+ */
+function spansOf(occ: readonly Seen[], ends: ReadonlyMap<number, number>): Span[] {
   const out: Span[] = [];
   let prev: Seen | undefined;
   for (const o of occ) {
     const end = ends.get(o.at)!;
     const cur = out.at(-1);
     const goesOn = prev !== undefined && cur !== undefined && cur.cls === o.s.cls
-      && o.at - prev.at <= GAP_MS && Math.abs(o.s.since - prev.s.since) < 1000;
+      && Math.abs(o.s.since - prev.s.since) < 1000;
     if (goesOn) {
       cur!.to = end;
     } else {
       // The state changed inside the last bucket: the old stretch ends where the new one began.
       if (cur !== undefined && o.s.since > cur.from && o.s.since < cur.to) cur.to = o.s.since;
-      out.push({ cls: o.s.cls, from: Math.max(o.s.since, input.from), to: end, blockedBy: o.s.blockedBy });
+      out.push({ cls: o.s.cls, from: o.s.since, to: end, blockedBy: o.s.blockedBy });
     }
     prev = o;
   }
@@ -556,7 +576,9 @@ export function buildTree(input: TreeInput): Tree {
       let by = ranBy.get(key);
       if (by === undefined) { by = new Map(); ranBy.set(key, by); }
       const id = `${s.pid}/${s.backendStart}`;
-      by.set(id, [...(by.get(id) ?? []), { s, at: sample.at }]);
+      const seen = by.get(id);
+      if (seen === undefined) by.set(id, [{ s, at: sample.at }]);
+      else seen.push({ s, at: sample.at });
     }
   }
   for (const c of input.cells) if (c.kind === 'q') place(c.key, statements.get(c.key)?.relations ?? []);
@@ -610,7 +632,7 @@ export function buildTree(input: TreeInput): Tree {
     const lasting = !sessionsShown ? [] : [...(ranBy.get(key)?.values() ?? [])]
       .map((occ): SessionNode => ({
         pid: occ[0]!.s.pid, backendStart: occ[0]!.s.backendStart, app: occ[0]!.s.app,
-        spans: spansOf(occ, input, ends), inChain: chainPids.has(occ[0]!.s.pid),
+        spans: spansOf(occ, ends), inChain: chainPids.has(occ[0]!.s.pid),
       }))
       .filter((n) => n.inChain || longest(n) >= LASTING_MS)
       // What is still there at the window's end first, so a chain running now is not

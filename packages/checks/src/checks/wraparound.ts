@@ -1,4 +1,4 @@
-import type { Check, Verdict } from '../types.js';
+import type { Check } from '../types.js';
 
 /**
  * The xid at which Postgres refuses new transactions. The `xid age` flag of
@@ -34,7 +34,7 @@ export interface WraparoundData { worst: WraparoundEntry[] }
  *
  * `current_setting('autovacuum_freeze_max_age')` is the global value; it
  * can be overridden per database and per table. That is acceptable only
- * because `pctToForcedVacuum` never reaches `verdict`.
+ * because `pctToForcedVacuum` is never judged.
  */
 const SQL = `
 SELECT datname AS database,
@@ -76,18 +76,4 @@ export const wraparound: Check<WraparoundRow, WraparoundData> = {
             + 'new transactions at 1,000,000 remaining, and freezing a large table '
             + 'takes hours, not minutes.' },
   ],
-  /**
-   * `txnsUntilShutdown` counts down, so smaller is worse and the
-   * comparisons are `<=`, not `>=`.
-   */
-  verdict: (d, t): Verdict => {
-    const worst = d.worst[0];
-    if (!worst) return { level: 'ok' };
-    const note = `${worst.database}: ${worst.txnsUntilShutdown.toLocaleString()} transactions left`;
-    const crit = t.find((x) => x.level === 'critical');
-    if (crit && worst.txnsUntilShutdown <= crit.value) return { level: 'critical', note };
-    const warn = t.find((x) => x.level === 'warn');
-    if (warn && worst.txnsUntilShutdown <= warn.value) return { level: 'warn', note };
-    return { level: 'ok' };
-  },
 };

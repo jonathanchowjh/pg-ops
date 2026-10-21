@@ -12,8 +12,9 @@ import { cn } from '@/lib/utils';
  * them has a clock: the tree is activity, these are the catalog.
  */
 
-const CELL = 'border-t px-3 py-[5px] whitespace-nowrap';
-const NUM = cn(CELL, 'text-right font-mono text-foreground tabular-nums');
+/** A cell of a `List`, and a number in one: every page's tables share them. */
+export const CELL = 'border-t px-3 py-[5px] whitespace-nowrap';
+export const NUM = cn(CELL, 'text-right font-mono text-foreground tabular-nums');
 const NAME = 'font-mono text-foreground';
 const QUIET = 'font-mono text-muted-foreground';
 

@@ -1,5 +1,4 @@
-import type { Check, Verdict } from '../types.js';
-import { escalate } from './shared.js';
+import type { Check } from '../types.js';
 
 export interface StandbyRow {
   app: string;
@@ -99,15 +98,4 @@ export const standbys: Check<StandbyRow, StandbysData> = {
             + 'by a long query on the standby, cancel that query or raise '
             + 'max_standby_streaming_delay knowingly.' },
   ],
-  verdict: (d, t): Verdict => {
-    // The worst readable standby. One whose lag cannot be read is skipped,
-    // not counted as caught up.
-    let worst: { app: string; secs: number } | null = null;
-    for (const s of d.standbys) {
-      if (s.replaySecs === null) continue;
-      if (worst === null || s.replaySecs > worst.secs) worst = { app: s.app, secs: s.replaySecs };
-    }
-    if (worst === null) return { level: 'ok' };
-    return escalate(worst.secs, t, `${worst.app} is ${Math.round(worst.secs)}s behind`);
-  },
 };

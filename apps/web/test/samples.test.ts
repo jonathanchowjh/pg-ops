@@ -17,7 +17,7 @@ vi.mock('@/lib/check', () => ({ runCheckFor: async () => { read.calls += 1; retu
 
 import { clockFor, eventFor, forget, recordFor, sampleTick, windowFor } from '@/lib/samples';
 
-const ok = (sessions: unknown[]) => ({ ok: true, data: { sessions, truncated: false, hidden: 0 }, verdict: null, measuredAt: Date.now() });
+const ok = (sessions: unknown[]) => ({ ok: true, data: { sessions, truncated: false, hidden: 0 }, measuredAt: Date.now() });
 const active = { pid: 1, backendStart: 'b1', app: 'web', cls: 'cpu', own: false, queryId: '7', query: 'SELECT 1',
   inStateSecs: 1, waitSecs: null, blockedBy: [], relations: ['public.users'] };
 const grid = (mins: number) => ({ from: Date.now() - mins * 60_000, to: Date.now(), columns: 120, raw: true });
@@ -47,6 +47,14 @@ describe('samples without a store', () => {
     await sampleTick('db');
     expect(read.calls).toBe(1);
     expect((await windowFor('db', grid(15))).samples).toHaveLength(2);
+  });
+
+  it('includes the sample that began before the window and still holds into it', async () => {
+    await recordFor('db', ok([active]) as never);
+    vi.advanceTimersByTime(20_000);
+    await recordFor('db', ok([active]) as never);
+    const w = await windowFor('db', { from: Date.now() - 15_000, to: Date.now(), columns: 2, raw: true });
+    expect(w.samples).toHaveLength(2);
   });
 
   it('forgets what is older than fifteen minutes', async () => {

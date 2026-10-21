@@ -42,7 +42,7 @@ describe('ExplainForm', () => {
   });
 
   it('posts the statement as JSON to the database it names', async () => {
-    const f = respond({ ok: true, data: { plan: PLAN, parameters: 0, advice: [] }, verdict: null, measuredAt: 0 });
+    const f = respond({ ok: true, data: { plan: PLAN, parameters: 0, advice: [] }, measuredAt: 0 });
     const { textarea, submit } = await setup();
     await type(textarea, 'SELECT * FROM orders WHERE customer_id = 42');
     await submit();
@@ -55,7 +55,7 @@ describe('ExplainForm', () => {
 
   it('renders the plan as EXPLAIN text, and the statement each suggestion hands over', async () => {
     respond({
-      ok: true, verdict: null, measuredAt: 0,
+      ok: true, measuredAt: 0,
       data: {
         plan: PLAN, parameters: 0,
         advice: [{
@@ -75,7 +75,7 @@ describe('ExplainForm', () => {
   });
 
   it('says when the plan is generic, so its estimates are not read as a bound value\'s', async () => {
-    respond({ ok: true, verdict: null, measuredAt: 0, data: { plan: PLAN, parameters: 2, advice: [] } });
+    respond({ ok: true, measuredAt: 0, data: { plan: PLAN, parameters: 2, advice: [] } });
     const { r, textarea, submit } = await setup();
     await type(textarea, 'SELECT * FROM orders WHERE customer_id = $1 AND status = $2');
     await submit();
@@ -110,7 +110,7 @@ describe('ExplainForm', () => {
 
 describe('ExplainHere', () => {
   it('asks for the plan of the statement it was given, once, and folds it away again', async () => {
-    const f = respond({ ok: true, verdict: null, measuredAt: 0, data: { plan: PLAN, parameters: 1, advice: [] } });
+    const f = respond({ ok: true, measuredAt: 0, data: { plan: PLAN, parameters: 1, advice: [] } });
     const r = await render(<ExplainHere name="prod" statement="SELECT * FROM orders WHERE customer_id = $1" />);
     const button = r.container.querySelector('button')!;
     await act(async () => { button.click(); });

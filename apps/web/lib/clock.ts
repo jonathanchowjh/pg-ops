@@ -149,10 +149,16 @@ export function labelMarks<T extends { at: number; label: string }>(
   });
 }
 
-/** The moment under a point `x` of the way across, snapped to a sample. */
+/**
+ * The moment under a point `x` of the way across, snapped to a sample, and
+ * never off the window: a live window's edges are not on a sample, and a
+ * click at its left edge must pin, not round out of it and go live.
+ */
 export function timeAt(grid: Pick<Grid, 'from' | 'to'>, x: number): number {
   const t = grid.from + Math.max(0, Math.min(1, x)) * (grid.to - grid.from);
-  return Math.round(t / BUCKET_MS) * BUCKET_MS;
+  const first = Math.ceil(grid.from / BUCKET_MS) * BUCKET_MS;
+  const last = Math.ceil(grid.to / BUCKET_MS) * BUCKET_MS - BUCKET_MS;
+  return Math.max(first, Math.min(last, Math.round(t / BUCKET_MS) * BUCKET_MS));
 }
 
 /** The column a moment falls in. */

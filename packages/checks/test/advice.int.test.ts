@@ -26,7 +26,6 @@ describe('the explain tool (#57, #64)', () => {
       await pool.query(SETUP);
       const r = await runTool(ctx, TOOLS.explain, { sql: "SELECT * FROM orders WHERE customer_id = 42 AND status = 'paid'" });
       if (!r.ok) throw new Error(r.message);
-      expect(r.verdict).toBeNull();
       expect(JSON.stringify(r.data.plan)).toContain('Seq Scan');
       expect(r.data.advice).toEqual([expect.objectContaining({
         table: 'orders', found: true, suggestion: expect.objectContaining({ columns: ['customer_id'] }),

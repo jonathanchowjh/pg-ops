@@ -15,7 +15,6 @@ describe('standbys', () => {
       const res = await runCheck(ctx, standbys);
       if (!res.ok) throw new Error(res.message);
       expect(res.data.standbys).toEqual([]);
-      expect(res.verdict).toEqual({ level: 'ok' });
     });
   }, 120_000);
 

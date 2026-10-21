@@ -1,5 +1,3 @@
-import type { Threshold, Verdict } from '../types.js';
-
 /**
  * What several checks share: the list cap, the schema filter, and the few
  * conversions and comparisons that would otherwise be written out per check.
@@ -7,7 +5,7 @@ import type { Threshold, Verdict } from '../types.js';
 
 /**
  * The cap every list check shares. A capped list carries its true total via
- * `count(*) OVER ()`, and verdicts read that total, never `rows.length`.
+ * `count(*) OVER ()`, and readers use that total, never `rows.length`.
  */
 interface ListOpts { limit?: number }
 
@@ -82,16 +80,3 @@ export function counted(n: number, singular: string, plural = `${singular}s`): s
   return `${n} ${n === 1 ? singular : plural}`;
 }
 
-/**
- * The verdict for a reading that gets worse as it grows: critical at or
- * above the critical threshold, else warn at or above the warn one. `>=`,
- * because a threshold is the value at which the condition becomes a problem.
- * A level with no threshold never fires.
- */
-export function escalate(value: number, thresholds: Threshold[], note: string): Verdict {
-  const crit = thresholds.find((t) => t.level === 'critical');
-  if (crit && value >= crit.value) return { level: 'critical', note };
-  const warn = thresholds.find((t) => t.level === 'warn');
-  if (warn && value >= warn.value) return { level: 'warn', note };
-  return { level: 'ok' };
-}

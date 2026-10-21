@@ -103,44 +103,6 @@ describe('toSequences', () => {
   });
 });
 
-describe('the sequences verdict', () => {
-  const t = () => sequences.thresholds!;
-  const data = (worstPctUsed: number | null) => ({
-    sequences: [], total: 0, truncated: false, unreadable: 0, worstPctUsed,
-  });
-
-  /** 1,932,735,283 / 2,147,483,647 is 90.00000003%; one less is 89.99999999%. */
-  it('warns one value above the threshold', () => {
-    expect(sequences.verdict!(data(1932735283 / 2147483647 * 100), t()).level).toBe('warn');
-  });
-
-  it('is ok one value below the threshold', () => {
-    expect(sequences.verdict!(data(1932735282 / 2147483647 * 100), t()).level).toBe('ok');
-  });
-
-  it('warns at exactly the threshold', () => {
-    expect(sequences.verdict!(data(90), t()).level).toBe('warn');
-  });
-
-  it('names the percentage in the note', () => {
-    expect(sequences.verdict!(data(93.132), t()).note).toContain('93.13');
-  });
-
-  /**
-   * `Verdict` has no third state, so this returns `ok`: the absence of a
-   * finding, not a claim of health. `data.unreadable` is what tells the
-   * operator about the blind spot.
-   */
-  it('is ok when there was no readable sequence to judge', () => {
-    expect(sequences.verdict!(data(null), t())).toEqual({ level: 'ok' });
-  });
-
-  /** The threshold lookup must not use a non-null assertion on `find`. */
-  it('does not escalate when it was given no warn threshold', () => {
-    expect(sequences.verdict!(data(99), [])).toEqual({ level: 'ok' });
-  });
-});
-
 describe('the sequences contract', () => {
   it('is a captured check on the sequence node', () => {
     expect(sequences.home).toBe('sequence');

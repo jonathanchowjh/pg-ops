@@ -4,7 +4,7 @@ import {
   CHECKS, type ConnectionDetailRow, type HealthMinute, type HorizonHolder, type Setting, type Slot, type Standby,
 } from '@pgops/checks';
 import { ConfirmAction, KillButton } from '@/components/actions';
-import { List, Tag } from '@/components/catalog-rows';
+import { CELL, List, NUM, Tag } from '@/components/catalog-rows';
 import { Clock, LiveOnly, Time } from '@/components/clock';
 import { NodeHead } from '@/components/node-head';
 import { Panel } from '@/components/panel';
@@ -20,8 +20,6 @@ import { cn } from '@/lib/utils';
 
 const SECTION = 'mt-5 mb-2 flex flex-wrap items-baseline gap-2.5 text-sm/5 font-semibold text-foreground';
 const NOTE = 'text-xs font-normal text-muted-foreground';
-const CELL = 'border-t px-3 py-[5px] whitespace-nowrap';
-const NUM = cn(CELL, 'text-right font-mono text-foreground tabular-nums');
 /** A transaction open this long holds vacuum back on every table; "Terminate all" takes the ones past it. */
 const LONG_SECS = 60;
 /** Recent terminations listed at the foot. */
@@ -114,6 +112,8 @@ export default async function ServerPage({ params, searchParams }: { params: Pro
 
   const api = (route: string): string => `/api/db/${encodeURIComponent(name)}/${route}`;
   const resetQueryStats = api('reset-query-stats');
+  // The newest minute that measured it: the size is the health row's, not the poll's.
+  const size = (health.ok ? health.value : []).findLast((m) => m.sizeBytes !== null)?.sizeBytes ?? null;
   const statsSince = activity?.ok && activity.data.statsResetAt !== null ? Date.parse(activity.data.statsResetAt) : null;
   const holders: HorizonHolder[] = horizon?.ok ? horizon.data.holders : [];
   // A waiter holds the horizon only because its blocker does: ending it frees nothing, so it is never offered.
@@ -130,6 +130,7 @@ export default async function ServerPage({ params, searchParams }: { params: Pro
   return (
     <>
       <NodeHead title="Server" crumb={[{ label: name, href: `/db/${name}` }]}>
+        {size === null ? null : <span className="font-mono text-xs text-body tabular-nums">{formatBytes(size)} on disk</span>}
         {statsSince === null ? null : <span className="font-mono text-xs text-body tabular-nums">statistics since <Time at={statsSince} /></span>}
         {/* The server's, not a moment's: offered on a live window, pinned or not, as Analyze is on a table. */}
         {canAct ? (

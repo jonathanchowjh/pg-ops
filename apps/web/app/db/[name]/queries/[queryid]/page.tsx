@@ -11,11 +11,11 @@ import { redactTree, safeStatement, Sql } from '@/components/sql';
 import { RowsView } from '@/components/tree-view';
 import { catalogFor } from '@/lib/catalog';
 import { runCheckFor } from '@/lib/check';
-import { CLASSES, CLASS_NAMES, keepQuery, type Search } from '@/lib/clock';
+import { keepQuery, type Search } from '@/lib/clock';
 import { actionsAllowed } from '@/lib/config';
 import { formatMillis, formatRate } from '@/lib/format';
 import { clockFor, treeFor } from '@/lib/samples';
-import { unseenAt } from '@/lib/tree';
+import { loadOf } from '@/lib/tree';
 import { shapeFor } from '@/lib/shapes';
 
 /** Every lasting session of one statement; the tree lists three and sends the reader here for the rest. */
@@ -80,8 +80,7 @@ export default async function StatementPage({ params, searchParams }: {
 
   const raw = shape?.text ?? clock.statements.get(queryid)?.text ?? (row === undefined || row.redacted ? null : row.query);
   const text = raw === null || raw === undefined ? null : safeStatement(raw);
-  const strip = node?.strip ?? Array.from({ length: grid.columns }, () => [0, 0, 0, 0, 0]);
-  const load: Series[] = CLASSES.map((c, i) => ({ name: CLASS_NAMES[c], tone: c, values: strip.map((col, k) => (unseenAt(tree.seen, k) ? null : col[i] ?? 0)) }));
+  const load: Series[] = loadOf(node?.strip, tree.seen, grid.columns);
   const on = (node?.tables ?? shape?.relations ?? []).filter((t) => t !== '');
   // No plan has placed it yet, which is not the same as a plan that names no table.
   const unplaced = node === undefined ? shape?.relations == null : node.unplaced;
@@ -114,6 +113,12 @@ export default async function StatementPage({ params, searchParams }: {
       </div>
       {shape === null && row !== undefined ? (
         <p className="pb-2 text-xs text-muted-foreground">since the statistics were reset: the store holds no window for this statement</p>
+      ) : null}
+      {shape === null && !live.ok ? (
+        <p className="pb-2 text-xs text-muted-foreground">
+          The statement statistics could not be read: {live.message}
+          {live.remedy === undefined ? null : <code className="ml-2 font-mono text-foreground">{live.remedy}</code>}
+        </p>
       ) : null}
       <ReadAlert read={read} />
       <Clock grid={grid} now={clock.now} day={clock.day} events={clock.events} keep={keepQuery('', null)} initialCursor={clock.pinAt}>

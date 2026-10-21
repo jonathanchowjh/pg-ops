@@ -256,11 +256,11 @@ export const PGHERO: Record<number, ParityEntry> = {
     check: 'tables' },
 
   // space — methods/space.rb
-  // #37 is on every health row; the Tables head sums its tables. #38 and
+  // #37 is on every health row, and Server's head states it. #38 and
   // #39 are the `tables` read's `sizeBytes`, `heapBytes` and `indexBytes`.
   37: { name: 'database_size', source: 'methods/space.rb',
     platform: 'packages/checks/src/health.ts: pg_database_size on every health row, as size_bytes; '
-      + 'the Tables head sums its tables' },
+      + 'Server\'s head states the newest' },
   38: { name: 'relation_sizes', source: 'methods/space.rb',
     check: 'tables' },
   39: { name: 'table_sizes', source: 'methods/space.rb',

@@ -52,7 +52,7 @@ export type * from './tools/suggested-indexes.js';
 
 // Values the web layer imports by name.
 export { SLOW_QUERY_DEFAULTS } from './checks/query-stats.js';
-export { CLASSES, classOf, CHAIN_THRESHOLDS, IDLE_THRESHOLDS } from './checks/sessions.js';
+export { CLASSES, CHAIN_THRESHOLDS, IDLE_THRESHOLDS } from './checks/sessions.js';
 export { XID_WRAPAROUND } from './checks/wraparound.js';
 export { MAX_STATEMENT_LENGTH, checkStatement, planStatements, relationsOf } from './tools/explain.js';
 export { indexFlags, tableFlags } from './checks/catalog.js';

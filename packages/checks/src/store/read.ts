@@ -75,6 +75,11 @@ export async function readRelationSpace(
  * row. Returns the previous capture (every shape at one instant), not each
  * shape's own last sighting, so both ends of every interval were measured at
  * the same moment.
+ *
+ * None when that capture is over fifteen minutes old, or a reset falls
+ * after it: a failed read or an outage would put hours of work in one row,
+ * and a database-scoped `pg_stat_statements_reset` moves no `stats_reset`.
+ * Either is a gap, which the load series already draws.
  */
 export async function readLastSnapshot(
   store: Pool | PoolClient,
@@ -91,7 +96,11 @@ export async function readLastSnapshot(
       WHERE s.database_id = $1
         AND s.captured_at = (SELECT max(p.captured_at)
                                FROM pgops.query_stats p
-                              WHERE p.database_id = $1 AND p.captured_at < $2)`,
+                              WHERE p.database_id = $1 AND p.captured_at < $2
+                                AND p.captured_at > $2::timestamptz - interval '15 minutes')
+        AND NOT EXISTS (SELECT 1 FROM pgops.events e
+                         WHERE e.database_id = $1 AND e.kind = 'reset'
+                           AND e.at > s.captured_at AND e.at <= $2)`,
     [databaseId, before],
   );
   return new Map(rows.map((r) => [r.query_id, counterPoint(r)]));
@@ -197,6 +206,8 @@ export interface HealthMinute {
   commits: number | null;
   rollbacks: number | null;
   statsReset: number | null;
+  /** `pg_database_size`, taken once a minute: too costly a stat of every file for the five-second poll. */
+  sizeBytes: number | null;
 }
 
 /**
@@ -211,7 +222,8 @@ export async function readHealth(store: Pool | PoolClient, name: string, from: D
             h.replication_lag_secs AS "lagSecs", h.replication_lag_bytes::float8 AS "lagBytes",
             h.wal_bytes::float8 AS "walBytes", h.xid_age::float8 AS "xidAge", h.xmin_age::float8 AS "xminAge",
             h.deadlocks::float8, h.xact_commit::float8 AS commits, h.xact_rollback::float8 AS rollbacks,
-            (extract(epoch FROM h.stats_reset) * 1000)::float8 AS "statsReset"
+            (extract(epoch FROM h.stats_reset) * 1000)::float8 AS "statsReset",
+            h.size_bytes::float8 AS "sizeBytes"
        FROM pgops.health_stats h JOIN pgops.databases d ON d.id = h.database_id
       WHERE d.name = $1
         AND h.captured_at >= coalesce((SELECT max(p.captured_at) FROM pgops.health_stats p
@@ -419,7 +431,7 @@ export async function readTableHours(
             h.index_rows::float8 AS index_rows, h.scan_rows::float8 AS scan_rows,
             h.live_rows::float8 AS live_rows, h.dead_rows::float8 AS dead_rows, h.vacuum_trigger
        FROM pgops.table_hours h JOIN pgops.databases d ON d.id = h.database_id
-      WHERE d.name = $1 AND h.relation = $2 AND h.hour >= date_trunc('hour', $3::timestamptz) AND h.hour < $4
+      WHERE d.name = $1 AND h.relation = $2 AND h.hour >= date_trunc('hour', $3::timestamptz, 'UTC') AND h.hour < $4
       ORDER BY h.hour`,
     [name, relation, from, to],
   );
@@ -441,7 +453,7 @@ export async function readWritten(store: Pool | PoolClient, name: string, from: 
     `SELECT h.relation, sum((h.inserted + h.updated + h.deleted) * GREATEST(0, extract(epoch FROM LEAST(h.hour + interval '1 hour', $3::timestamptz) - GREATEST(h.hour, $2::timestamptz)))
               / GREATEST(1, extract(epoch FROM LEAST(h.hour + interval '1 hour', now()) - h.hour)))::float8 AS written
        FROM pgops.table_hours h JOIN pgops.databases d ON d.id = h.database_id
-      WHERE d.name = $1 AND h.hour >= date_trunc('hour', $2::timestamptz) AND h.hour < $3
+      WHERE d.name = $1 AND h.hour >= date_trunc('hour', $2::timestamptz, 'UTC') AND h.hour < $3
       GROUP BY h.relation`,
     [name, from, to],
   );
@@ -458,7 +470,7 @@ export async function readIndexScans(store: Pool | PoolClient, name: string, fro
     `SELECT h.index_name, sum(h.scans * GREATEST(0, extract(epoch FROM LEAST(h.hour + interval '1 hour', $3::timestamptz) - GREATEST(h.hour, $2::timestamptz)))
               / GREATEST(1, extract(epoch FROM LEAST(h.hour + interval '1 hour', now()) - h.hour)))::float8 AS scans
        FROM pgops.index_hours h JOIN pgops.databases d ON d.id = h.database_id
-      WHERE d.name = $1 AND h.hour >= date_trunc('hour', $2::timestamptz) AND h.hour < $3
+      WHERE d.name = $1 AND h.hour >= date_trunc('hour', $2::timestamptz, 'UTC') AND h.hour < $3
       GROUP BY h.index_name`,
     [name, from, to],
   );
@@ -476,7 +488,7 @@ export async function readHourly(
   const { rows } = await store.query<{ at: number; sessions: number }>(
     `SELECT (extract(epoch FROM h.hour) * 1000)::float8 AS at,
             h.total / least(60, greatest(1, ceil(extract(epoch FROM $5::timestamptz - h.hour) / 60))) AS sessions
-       FROM (SELECT date_trunc('hour', m.minute) AS hour, sum(m.sessions)::float8 AS total
+       FROM (SELECT date_trunc('hour', m.minute, 'UTC') AS hour, sum(m.sessions)::float8 AS total
                FROM pgops.load_minutes m JOIN pgops.databases d ON d.id = m.database_id
               WHERE d.name = $1 AND m.kind = $2 AND m.key = $3 AND m.minute >= $4 AND m.minute < $5
               GROUP BY 1) h

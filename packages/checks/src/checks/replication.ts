@@ -36,7 +36,7 @@ export interface ReplicationData {
    *
    * `lagSeconds` is 0 when this standby has replayed everything it received,
    * which is also what a dead walreceiver looks like. This field tells the
-   * two apart. It has no threshold or verdict.
+   * two apart. It has no threshold.
    */
   receiving: boolean | null;
 }

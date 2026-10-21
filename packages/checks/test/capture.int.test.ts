@@ -417,6 +417,32 @@ describe('captureOnce and the load series', () => {
     });
   }, 120_000);
 
+  /**
+   * A capture that failed or an outage leaves the snapshot before old, and a
+   * reset leaves it measuring from another zero. Differenced anyway, one row
+   * would carry hours of work, or a wrong amount, and swell every share.
+   */
+  it('writes no load row over a long gap or across a reset', async () => {
+    await withPostgres(async (ctx, pool) => {
+      await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');
+      await migrate(pool);
+      const withStore = { ...ctx, store: pool };
+      await captureOnce(withStore, 'prod');
+      await pool.query("UPDATE pgops.query_stats SET captured_at = captured_at - interval '1 hour'");
+      for (let i = 0; i < 20; i += 1) await pool.query('SELECT count(*) FROM pg_class');
+      await captureOnce(withStore, 'prod');
+      expect(await loadRows(pool)).toHaveLength(0);
+
+      await pool.query(
+        `INSERT INTO pgops.events (database_id, at, kind, relation)
+         SELECT d.id, now(), 'reset', '' FROM pgops.databases d WHERE d.name = 'prod'`,
+      );
+      for (let i = 0; i < 20; i += 1) await pool.query('SELECT count(*) FROM pg_class');
+      await captureOnce(withStore, 'prod');
+      expect(await loadRows(pool)).toHaveLength(0);
+    });
+  }, 120_000);
+
   it('prunes the load series on the same retention as the snapshots', async () => {
     await withPostgres(async (ctx, pool) => {
       await pool.query('CREATE EXTENSION IF NOT EXISTS pg_stat_statements');

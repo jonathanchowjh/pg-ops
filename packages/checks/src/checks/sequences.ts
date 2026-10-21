@@ -1,4 +1,4 @@
-import type { Check, Threshold, Verdict } from '../types.js';
+import type { Check } from '../types.js';
 import { DEFAULT_LIMIT, capped, visibleSchemas, type RelationOpts } from './shared.js';
 
 export interface SequenceRow {
@@ -90,7 +90,7 @@ export function toSequences(rows: SequenceRow[]): SequenceData {
  *   comes from the privilege predicate, and the value falls back to
  *   `start_value`.
  * - `unreadable` and `worst_pct` are window aggregates, computed before the
- *   LIMIT, so the verdict does not depend on the worst row surviving the
+ *   LIMIT, so the worst does not depend on the worst row surviving the
  *   cap or on the ORDER BY.
  * - Ordered by fraction used, not `last_value`, so the cap keeps the
  *   nearest-to-full sequences.
@@ -172,17 +172,4 @@ export const sequences: Check<SequenceRow, SequenceData, RelationOpts> = {
             + 'ceiling to nine quintillion; doing it on a large table rewrites it, so '
             + 'plan for the lock rather than discovering it at exhaustion.' },
   ],
-  /**
-   * Escalates on `worstPctUsed`, not the returned page, so it is correct
-   * under a cap. `null` (no readable sequence) returns `ok` because
-   * `Verdict` has no third state; `data.unreadable` is rendered beside it.
-   */
-  verdict: (d: SequenceData, t: Threshold[]): Verdict => {
-    const warn = t.find((x) => x.level === 'warn');
-    if (d.worstPctUsed === null || !warn) return { level: 'ok' };
-    if (d.worstPctUsed >= warn.value) {
-      return { level: 'warn', note: `${d.worstPctUsed.toFixed(2)}% of a column's range used` };
-    }
-    return { level: 'ok' };
-  },
 };

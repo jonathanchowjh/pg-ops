@@ -66,6 +66,24 @@ describe('killBackend', () => {
     });
   }, 120_000);
 
+  it("refuses one of pgops's own connections, and it lives", async () => {
+    await withPostgres(async (ctx, pool) => {
+      const own = new pg.Client({ connectionString: (pool as unknown as { options: { connectionString: string } }).options.connectionString, application_name: 'pgops-store' });
+      own.on('error', () => {});
+      try {
+        await own.connect();
+        const { rows } = await own.query<{ pid: number; bs: string }>(
+          'SELECT pg_backend_pid() AS pid, backend_start::text AS bs FROM pg_stat_activity WHERE pid = pg_backend_pid()',
+        );
+        const out = await killBackend(ctx, { pid: rows[0]!.pid, backendStart: rows[0]!.bs }, { subcommand: 'sessions', reason: 'test' });
+        expect(out).toBe('session-changed');
+        expect((await own.query<{ one: number }>('SELECT 1 AS one')).rows[0]!.one).toBe(1);
+      } finally {
+        await own.end().catch(() => {});
+      }
+    });
+  }, 120_000);
+
   it('refuses when the pid has been reused by a different session', async () => {
     await withPostgres(async (ctx, pool) => {
       const { rows } = await pool.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');

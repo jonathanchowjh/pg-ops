@@ -337,7 +337,7 @@ export interface CapturedWrite {
 const TABLE_HOURS_SQL = `
 INSERT INTO pgops.table_hours AS h
   (database_id, hour, relation, inserted, updated, deleted, index_rows, scan_rows, live_rows, dead_rows, vacuum_trigger)
-SELECT $1, date_trunc('hour', $2::timestamptz), n.name,
+SELECT $1, date_trunc('hour', $2::timestamptz, 'UTC'), n.name,
        GREATEST(n.inserted - COALESCE(o.inserted, n.inserted), 0),
        GREATEST(n.updated  - COALESCE(o.updated,  n.updated),  0),
        GREATEST(n.deleted  - COALESCE(o.deleted,  n.deleted),  0),
@@ -405,7 +405,7 @@ ON CONFLICT DO NOTHING`;
 /** Scans since the capture before, for the indexes that had any. The same two guards as the tables'. */
 const INDEX_HOURS_SQL = `
 INSERT INTO pgops.index_hours AS h (database_id, hour, index_name, scans)
-SELECT $1, date_trunc('hour', $2::timestamptz), n.name, n.scans - (c.data->>'scans')::bigint
+SELECT $1, date_trunc('hour', $2::timestamptz, 'UTC'), n.name, n.scans - (c.data->>'scans')::bigint
   FROM jsonb_to_recordset($3::jsonb) AS n(name text, scans bigint)
   JOIN pgops.captured c ON c.database_id = $1 AND c.read = 'indexes' AND c.name = n.name
   JOIN pgops.captures k ON k.database_id = c.database_id AND k.read = c.read

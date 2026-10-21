@@ -209,14 +209,7 @@ export async function runCheck<Row, Data, Opts>(
     const result = check.timeoutMs === undefined
       ? await ctx.target.query(text, values as never[])
       : await queryWithTimeout(ctx, text, values as never[], check.timeoutMs);
-    const data = check.map(result.rows as Row[]);
-    const verdict = check.verdict?.(data, check.thresholds ?? []) ?? null;
-    // The threshold this verdict crossed, so every surface gets its
-    // `because` and `remedy`. `ok` crossed none.
-    const crossed = verdict === null || verdict.level === 'ok'
-      ? undefined
-      : check.thresholds?.find((t) => t.level === verdict.level);
-    return { ok: true, data, verdict, crossed, measuredAt };
+    return { ok: true, data: check.map(result.rows as Row[]), measuredAt };
   } catch (err) {
     const reason = classify(err, check.requires);
     return { ok: false, reason, message: messageOf(err), remedy: remedyFor(reason, check.requires) };
@@ -269,8 +262,8 @@ export async function runSeries<P, Opts>(
 /**
  * Run one tool. Never rejects, same contract as runCheck.
  *
- * Returns a `CheckResult` with `verdict: null`, since a tool never judges, so
- * every surface that renders a check can render a tool.
+ * Returns a `CheckResult`, so every surface that renders a check can render
+ * a tool.
  */
 export async function runTool<Input, Data>(
   ctx: CheckContext,
@@ -281,7 +274,7 @@ export async function runTool<Input, Data>(
   if (tooOld) return tooOld;
   const measuredAt = Date.now();
   try {
-    return { ok: true, data: await tool.run(ctx, input), verdict: null, measuredAt };
+    return { ok: true, data: await tool.run(ctx, input), measuredAt };
   } catch (err) {
     const reason = classify(err, tool.requires);
     return { ok: false, reason, message: messageOf(err), remedy: remedyFor(reason, tool.requires) };

@@ -22,8 +22,9 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async (_name: string, check: { id: string }) => (check.id === 'identity'
-    ? { ok: true, verdict: null, measuredAt: 0, data: { replica: state.replica } }
-    : { ok: true, verdict: null, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } })),
+    ? { ok: true, measuredAt: 0, data: { replica: state.replica } }
+    : { ok: true, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } })),
+  identityFor: vi.fn(async () => ({ ok: true, measuredAt: 0, data: { replica: state.replica } })),
   runSeriesFor: vi.fn(async () => state.sizes),
   // The hours are read first, then the rhythm.
   readStore: vi.fn(async () => {

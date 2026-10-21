@@ -119,6 +119,8 @@ WITH cfg AS (
   SELECT current_setting('autovacuum_vacuum_threshold')::float8    AS base,
          current_setting('autovacuum_vacuum_scale_factor')::float8 AS scale,
          current_setting('autovacuum_freeze_max_age')::float8      AS freeze_max_age,
+         -- 18 caps the trigger; NULL below 18, where the setting does not exist.
+         current_setting('autovacuum_vacuum_max_threshold', true)::float8 AS cap,
          (SELECT (EXTRACT(EPOCH FROM d.stats_reset) * 1000)::float8
             FROM pg_stat_database d WHERE d.datname = current_database()) AS stats_reset_ms
 ),
@@ -143,11 +145,14 @@ SELECT r.name,
        r.index_num::text AS index_bytes,
        COALESCE(s.n_live_tup, 0)::text AS live_rows,
        COALESCE(s.n_dead_tup, 0)::text AS dead_rows,
-       (COALESCE((SELECT o.option_value::float8 FROM pg_options_to_table(r.reloptions) o
-                   WHERE o.option_name = 'autovacuum_vacuum_threshold'), cfg.base)
-        + COALESCE((SELECT o.option_value::float8 FROM pg_options_to_table(r.reloptions) o
-                     WHERE o.option_name = 'autovacuum_vacuum_scale_factor'), cfg.scale)
-          * greatest(r.reltuples, 0))::text AS vacuum_trigger,
+       -- LEAST skips a NULL, so no cap, or a cap of -1, leaves the sum.
+       LEAST(COALESCE((SELECT o.option_value::float8 FROM pg_options_to_table(r.reloptions) o
+                        WHERE o.option_name = 'autovacuum_vacuum_threshold'), cfg.base)
+             + COALESCE((SELECT o.option_value::float8 FROM pg_options_to_table(r.reloptions) o
+                          WHERE o.option_name = 'autovacuum_vacuum_scale_factor'), cfg.scale)
+               * greatest(r.reltuples, 0),
+             NULLIF(COALESCE((SELECT o.option_value::float8 FROM pg_options_to_table(r.reloptions) o
+                               WHERE o.option_name = 'autovacuum_vacuum_max_threshold'), cfg.cap), -1))::text AS vacuum_trigger,
        COALESCE(s.n_tup_ins, 0)::text    AS inserted,
        COALESCE(s.n_tup_upd, 0)::text    AS updated,
        COALESCE(s.n_tup_del, 0)::text    AS deleted,
@@ -218,7 +223,6 @@ export const tables: Check<TableReadRow, TablesData, TablesOpts> = {
     ],
   }),
   map: toTables,
-  // No verdict: what a table needs is said by its flags, on its own row.
 };
 
 /** What a table's row is tagged with, most urgent first. A node shows two. */
@@ -288,7 +292,9 @@ export interface IndexReadRow {
  * `dup` is the duplicate-index comparison pgops has always made, kept
  * clause for clause because it recommends a drop: key arrays compared by
  * slice, never as text; expression and partial indexes neither covered nor
- * covering; the operator classes equal over the shared prefix; a unique
+ * covering; the operator classes, collations and orderings (DESC, NULLS
+ * FIRST) equal over the shared prefix, or the planner could not serve one
+ * with the other; a unique
  * index never the redundant one; an identical pair reported once, on the
  * higher oid. An invalid index covers nothing and is flagged as invalid,
  * not as covered.
@@ -304,6 +310,8 @@ WITH ix AS (
          (i.indexprs IS NOT NULL) AS has_exprs,
          (string_to_array(i.indkey::text, ' ')::int[])[1:i.indnkeyatts]   AS keys,
          (string_to_array(i.indclass::text, ' ')::oid[])[1:i.indnkeyatts] AS classes,
+         (string_to_array(i.indcollation::text, ' ')::oid[])[1:i.indnkeyatts] AS collations,
+         (string_to_array(i.indoption::text, ' ')::int[])[1:i.indnkeyatts] AS options,
          n.nspname || '.' || c.relname  AS name,
          tn.nspname || '.' || t.relname AS table_name,
          pg_relation_size(i.indexrelid) AS bytes
@@ -325,6 +333,8 @@ dup AS (
      AND b.indisvalid AND NOT b.has_exprs AND NOT b.partial
      AND b.keys[1:array_length(a.keys, 1)] = a.keys
      AND b.classes[1:array_length(a.classes, 1)] = a.classes
+     AND b.collations[1:array_length(a.collations, 1)] = a.collations
+     AND b.options[1:array_length(a.options, 1)] = a.options
      AND (array_length(b.keys, 1) > array_length(a.keys, 1) OR a.indexrelid > b.indexrelid)
    WHERE a.indisvalid AND NOT a.has_exprs AND NOT a.indisunique AND NOT a.partial
    ORDER BY a.indexrelid,

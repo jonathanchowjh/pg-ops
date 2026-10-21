@@ -16,7 +16,6 @@ describe('settings against a real server', () => {
       expect(result.data.autovacuum.find((s) => s.name === 'autovacuum_freeze_max_age')?.value).toBe('200000000');
       expect(result.data.autovacuum.length).toBeGreaterThan(0);
       expect(result.data.vacuum.length).toBeGreaterThan(0);
-      expect(result.verdict).toBeNull();
     });
   });
 

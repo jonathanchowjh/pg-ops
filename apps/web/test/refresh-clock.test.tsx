@@ -42,6 +42,20 @@ describe('<Refresh> under a clock', () => {
     expect(router.refresh).toHaveBeenCalledTimes(1);
   });
 
+  it('sends nothing while the tab is hidden, and reads once when it is shown', async () => {
+    const shown = (state: 'hidden' | 'visible') => {
+      Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    };
+    await mount();
+    await act(async () => { shown('hidden'); });
+    await tickOnce();
+    await tickOnce();
+    expect(router.refresh).not.toHaveBeenCalled();
+    await act(async () => { shown('visible'); });
+    expect(router.refresh).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps polling when the reader has scrolled down the tree', async () => {
     await mount();
     Object.defineProperty(window, 'scrollY', { value: 900, configurable: true });

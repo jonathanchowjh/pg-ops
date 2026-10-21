@@ -29,7 +29,7 @@ vi.mock('@/lib/check', () => ({
     const data = check.id === 'tables' ? { tables: [T('public.users')], total: 9, truncated: true, statsReset: null, freezeMaxAge: 2e8 }
       : check.id === 'indexes' ? { indexes: [], total: 0, truncated: false, statsReset: 777 }
         : { sequences: [], total: 0, truncated: false, unreadable: 0, worstPctUsed: null };
-    return { ok: true, verdict: null, measuredAt: 0, data };
+    return { ok: true, measuredAt: 0, data };
   },
 }));
 

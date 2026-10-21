@@ -25,7 +25,7 @@ export interface IdentityData {
  * database by the operator's label in `PGOPS_DATABASES`; this is the
  * server's own answer, so a mislabelled connection is visible.
  *
- * No verdict: none of these facts is a fault, including being a replica.
+ * None of these facts is a fault, including being a replica.
  *
  * SSL comes from `pg_stat_ssl`, a core view, not pgHero's `ssl_is_used()`,
  * which needs the `sslinfo` extension. Our own backend's row is readable

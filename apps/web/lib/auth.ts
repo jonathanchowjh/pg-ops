@@ -9,7 +9,8 @@
 
 /**
  * The header proxy.ts sets, after successful authentication, so the kill
- * route can name the human in the audit record.
+ * route can name the human in the audit record. Percent-encoded: a header
+ * holds bytes, and `田中` would make every authenticated request throw.
  */
 export const ACTOR_HEADER = 'x-pgops-user';
 

@@ -58,7 +58,7 @@ export function proxy(req: NextRequest) {
     });
   }
 
-  if (result.user !== null) headers.set(ACTOR_HEADER, result.user);
+  if (result.user !== null) headers.set(ACTOR_HEADER, encodeURIComponent(result.user));
   return NextResponse.next({ request: { headers } });
 }
 

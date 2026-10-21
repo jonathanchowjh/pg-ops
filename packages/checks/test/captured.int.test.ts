@@ -56,6 +56,15 @@ describe('writeCaptured', () => {
     });
   }, 120_000);
 
+  /** Found by review: a store in a half-hour zone keyed every hour at :30, and a fall-back merged two. */
+  it('keys an hour by the UTC hour, whatever zone the store runs in', async () => {
+    await withStore(async (pool, client, db) => {
+      await client.query("SET TimeZone = 'Asia/Kolkata'");
+      await writeCaptured(client, db, T(0), write('tables', [table()]), days);
+      expect((await hours(pool)).map((h) => h.at)).toEqual([HOUR]);
+    });
+  }, 120_000);
+
   // Review Focus 4.
   it('adds nothing for a reset between two captures, or a counter that went backwards', async () => {
     await withStore(async (pool, client, db) => {

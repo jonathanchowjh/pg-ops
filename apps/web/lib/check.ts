@@ -1,7 +1,8 @@
 import { connection } from 'next/server';
 import type { Pool } from 'pg';
+import { cache } from 'react';
 import {
-  messageOf, runCheck, runSeries, runTool,
+  CHECKS, messageOf, runCheck, runSeries, runTool,
   type Check, type CheckContext, type CheckResult, type FailureReason, type Series, type SeriesResult,
   type TimeRange, type Tool,
 } from '@pgops/checks';
@@ -141,8 +142,8 @@ export async function runSeriesFor<P, Opts>(
 }
 
 /**
- * The same seam, for a tool. A tool's result is a `CheckResult` with
- * `verdict: null`: the same envelope as a check, rendered the same way.
+ * The same seam, for a tool. A tool's result is a `CheckResult`: the same
+ * envelope as a check, rendered the same way.
  */
 export async function runToolFor<Input, Data>(
   name: string,
@@ -175,3 +176,10 @@ export async function readStore<T>(read: (store: Pool) => Promise<T>): Promise<S
     return { ok: false, kind: 'error', message: messageOf(err) };
   }
 }
+
+/**
+ * The server's account of itself, once a request: the layout states it on
+ * every page, and the table page asks whether it is a standby. `cache`
+ * shares one read between them, on each poll.
+ */
+export const identityFor = cache((name: string) => runCheckFor(name, CHECKS.identity));

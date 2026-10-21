@@ -91,7 +91,7 @@ Two things about the test setup catch people:
 
 ```
 packages/checks/          Everything that knows Postgres. No React, no Next, no HTTP.
-  src/types.ts            Check, Threshold, Verdict, CheckResult, Series, Tool, ActionMeta
+  src/types.ts            Check, Threshold, CheckResult, Series, Tool, ActionMeta
   src/run.ts              runCheck / runSeries / runTool: run one thing, never throw
   src/registry.ts         CHECKS, ACTIONS, SERIES, TOOLS, and the pgHero parity map
   src/checks/             One file per area: locks, sessions, catalog, wraparound…
@@ -133,9 +133,9 @@ the codebase is variations.
 1. **A check is an object**, not a class:
    [`Check<Row, Data, Opts>`](packages/checks/src/types.ts). It carries an
    `id`, a `title`, a `home`, a `class`, its `sql`, a pure `map` from rows to
-   domain data, and optionally `thresholds` and a pure `verdict`.
+   domain data, and optionally `thresholds`.
 2. **`runCheck`** ([run.ts](packages/checks/src/run.ts)) checks the
-   requirements, runs the SQL, calls `map`, calls `verdict`, and returns a
+   requirements, runs the SQL, calls `map`, and returns a
    `CheckResult`. It never throws. A failure becomes
    `{ ok: false, reason, message, remedy }`, where `reason` is one of a small
    set (`privilege`, `missing-extension`, `unreachable`…) so a page can render
@@ -151,7 +151,7 @@ the codebase is variations.
    the tree's answer, with the way to its node.
 
 A `Series` is the same idea for "how has this moved", reading the store and
-yielding points with no verdict. A `Tool` is a question the operator asks with
+yielding points. A `Tool` is a question the operator asks with
 their own input, like explain. An action is a write, and takes the audited
 path in `actions/`.
 
@@ -231,7 +231,7 @@ The tree is built in one pure function,
 
 ### Why two packages
 
-`packages/checks` contains every SQL statement, threshold, verdict, action
+`packages/checks` contains every SQL statement, threshold, action
 and redaction rule. It has no React, no HTTP and no knowledge of display. A
 test fails if it gains a second runtime dependency or imports from
 `apps/web`.
@@ -242,11 +242,12 @@ one seam, `runCheckFor`, and renders the result. This is what makes the checks
 testable against a real Postgres without a browser, and the pages testable
 without a database.
 
-### Checks, verdicts and thresholds
+### Checks and thresholds
 
-A check is one SQL query, a pure function from rows to a result, and a
-verdict function that returns `ok`, `warn` or `critical`. Thresholds are
-data, not constants in a comparison. Each carries its unit, why the number
+A check is one SQL query and a pure function from rows to a result. It
+reports and never judges: the tree judges, over the window, against the
+checks' thresholds (`MARKS` in `apps/web/lib/samples.ts`), so a finding has
+one judge. Thresholds are data, not constants in a comparison. Each carries its unit, why the number
 matters, and what action it calls for. A threshold with no single safe action
 carries no advice.
 
@@ -321,7 +322,7 @@ Each is documented at the code that implements it.
   scan in the plan, with no added dependency.
 - **pgops folds its own relations out of lists and out of nothing else.**
   Pointed at a database that is also its store, the lists hide the console's
-  own tables and say how many were hidden. Sizes, hit rates and verdicts
+  own tables and say how many were hidden. Sizes, hit rates and findings
   count them. Its own statements are marked and excluded from the statement
   ranking the same way, and the count of what was hidden is always stated.
 
@@ -424,8 +425,7 @@ puts the decision on a web page with the reasoning written beside it.
 | Word | Meaning here |
 |---|---|
 | **Check** | One question about a database, as one SQL query plus the code that turns rows into an answer. `connections`, `locks`, `wraparound` are checks. |
-| **Verdict** | A check's opinion: `ok`, `warn` or `critical`, with a short note. Some checks only report and have no verdict. |
-| **Threshold** | The number a verdict is judged against, with two sentences: `because` (why this number) and `remedy` (what to do). |
+| **Threshold** | The number a finding is judged against, with two sentences: `because` (why this number) and `remedy` (what to do). |
 | **Home** | The node a check's finding belongs to: `database`, `table`, `query`, `session`, `index`, `sequence` or `server`. |
 | **Class** | How a check runs. `live` may run on a page's five-second poll. `captured` is a catalog scan: the capture stores its rows, a table's own page asks about that table, and a button runs the bloat estimate. |
 | **Series** | A reading over time, read from the store. Query load per interval, a table's size per day. |
@@ -466,12 +466,13 @@ Read these files in this order, including the comments.
 1. [packages/checks/src/types.ts](packages/checks/src/types.ts) — the shapes.
 2. [apps/web/lib/tree.ts](apps/web/lib/tree.ts) — the model.
 3. [packages/checks/src/checks/connections.ts](packages/checks/src/checks/connections.ts)
-   — a complete check with thresholds and a verdict. Notice the comments
+   — a complete check with thresholds. Notice the comments
    explaining a `::int` cast and a `missing_ok` argument; both prevented real
    bugs.
 4. [packages/checks/test/connections.int.test.ts](packages/checks/test/connections.int.test.ts)
-   — how a check is tested: against a real Postgres for the SQL, and by
-   calling `verdict` directly at each threshold boundary for the judgement.
+   — how a check is tested: against a real Postgres for the SQL. The
+   judgement against its thresholds is tested on the tree, in
+   `apps/web/test/tree.test.ts`.
 5. [packages/checks/src/run.ts](packages/checks/src/run.ts) — how a check is
    run and why it never throws.
 6. [apps/web/lib/check.ts](apps/web/lib/check.ts) — the web wrapper.
@@ -558,10 +559,10 @@ export const tempFiles: Check<TempFilesRow, TempFilesData> = {
 };
 ```
 
-Notice what the compiler makes you say: a `home`, a `class`, a `map`. Leave
-`verdict` out, and the check reports without judging. If you did add one, you
-would add `thresholds` with a non-empty `because` on each, and a test at each
-boundary.
+Notice what the compiler makes you say: a `home`, a `class`, a `map`. A
+check reports and never judges. Were this one to become a finding, you would
+add `thresholds` with a non-empty `because` on each, a mark in `MARKS`, and a
+tree test at each boundary.
 
 **2. Register it.** In `packages/checks/src/registry.ts`, import it and add
 `tempFiles` to the `CHECKS` object. Add `export type * from
@@ -582,7 +583,6 @@ describe('tempFiles', () => {
     await withPostgres(async (ctx) => {
       const r = await runCheck(ctx, tempFiles);
       if (!r.ok) throw new Error(r.message);
-      expect(r.verdict).toBeNull();
       expect(r.data.files).toBeGreaterThanOrEqual(0);
       expect(Number.isFinite(r.data.bytes)).toBe(true);
     });

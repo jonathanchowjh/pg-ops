@@ -11,11 +11,11 @@ const ran = vi.hoisted(() => ({ ids: [] as string[] }));
 vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async (_n: string, check: { id: string }) => {
     ran.ids.push(check.id);
-    return { ok: true, verdict: null, measuredAt: 0, data: { indexes: [], total: 0, truncated: false } };
+    return { ok: true, measuredAt: 0, data: { indexes: [], total: 0, truncated: false } };
   }),
   runToolFor: vi.fn(async (_n: string, tool: { id: string }) => {
     ran.ids.push(tool.id);
-    return { ok: true, verdict: null, measuredAt: 0, data: { indexes: [], byQuery: [], examined: 0, totalShapes: 0, statsResetAt: null } };
+    return { ok: true, measuredAt: 0, data: { indexes: [], byQuery: [], examined: 0, totalShapes: 0, statsResetAt: null } };
   }),
   readStore: vi.fn(async () => ({ ok: false, kind: 'off', message: '' })),
 }));
@@ -56,6 +56,14 @@ describe('/indexes', () => {
     expect(view.container.querySelector('tbody a')!.getAttribute('href')).toBe('/db/prod/tables/public.orders');
     expect(view.text()).toContain('4 · 1 never used');
     expect(view.text()).toContain('1 duplicate · 8.8 KB to reclaim');
+  });
+
+  /** Found by review: an invalid index was listed but left out of the counts and the bytes. */
+  it('counts an invalid index with the rest it lists, and in what there is to reclaim', async () => {
+    state.indexes = [index('public.never', 5_000), index('public.half_built', 2_000, { valid: false })];
+    await mount();
+    expect(names()).toEqual(['public.never (status)', 'public.half_built (status)']);
+    expect(view.text()).toContain('0 duplicate · 1 invalid · 6.8 KB to reclaim');
   });
 
   // Review Focus 4.

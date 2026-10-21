@@ -49,7 +49,6 @@ describe('replicationLag', () => {
   });
 
   it('never escalates — pgHero has no lag threshold and neither do we', () => {
-    expect(replicationLag.verdict).toBeUndefined();
     expect(replicationLag.thresholds).toBeUndefined();
   });
 });

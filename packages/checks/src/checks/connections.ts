@@ -1,4 +1,4 @@
-import type { Check, Verdict } from '../types.js';
+import type { Check } from '../types.js';
 import { anyClient } from './shared.js';
 
 export interface ConnectionsRow {
@@ -68,19 +68,6 @@ export const connections: Check<ConnectionsRow, ConnectionsData> = {
             + 'idle_in_transaction_session_timeout on the application role so it does '
             + 'not recur.' },
   ],
-  /**
-   * A level with no threshold in `t` never fires; there is no hard-coded
-   * fallback.
-   */
-  verdict: (d, t): Verdict => {
-    const pct = d.max > 0 ? (d.headroom / d.max) * 100 : 100;
-    const note = `${d.headroom} connections left`;
-    const crit = t.find((x) => x.level === 'critical');
-    if (crit && pct < crit.value) return { level: 'critical', note };
-    const warn = t.find((x) => x.level === 'warn');
-    if (warn && pct < warn.value) return { level: 'warn', note };
-    return { level: 'ok' };
-  },
 };
 
 export interface ConnectionDetailOpts { limit?: number }

@@ -50,16 +50,16 @@ export function usePinned(): boolean | null {
   return clock === null ? null : !clock.live;
 }
 
+/** Its children on a live window with no cursor, and nothing otherwise: a pinned page offers no Terminate. */
+export function LiveOnly({ children }: { children: ReactNode }) {
+  return useClock().live ? <>{children}</> : null;
+}
+
 /**
  * A moment as a clock time in the reader's zone, dated when it is not
  * within twelve hours. Under a clock it follows the Local/UTC control;
  * outside one, in a page head, it is local.
  */
-/** Its children on a live window with no cursor, and nothing otherwise: a pinned page shows no action. */
-export function LiveOnly({ children }: { children: ReactNode }) {
-  return useClock().live ? <>{children}</> : null;
-}
-
 export function Time({ at }: { at: number | null }) {
   const clock = useContext(ClockContext);
   if (at === null) return <span className="text-muted-foreground">—</span>;

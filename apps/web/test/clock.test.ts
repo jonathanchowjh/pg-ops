@@ -55,7 +55,16 @@ describe('moving on the clock', () => {
   it('reads a point across the window as a moment, snapped to a sample', () => {
     expect(timeAt(g, 0.5) % 15_000).toBe(0);
     expect(Math.abs(timeAt(g, 0.5) - (NOW - 7.5 * MIN))).toBeLessThanOrEqual(7_500);
-    expect(timeAt(g, -3)).toBeLessThanOrEqual(g.from + 7_500);
+    expect(timeAt(g, -3)).toBeGreaterThanOrEqual(g.from);
+    expect(timeAt(g, -3)).toBeLessThan(g.from + 15_000);
+  });
+
+  /** Found by review: a live window's edge is off a sample, and rounding it left the window, so the click went live. */
+  it('never reads a moment outside the window, at either edge of a live one', () => {
+    const live = gridFor({ win: '900' }, NOW + 3_000);
+    expect(timeAt(live, 0)).toBeGreaterThanOrEqual(live.from);
+    expect(timeAt(live, 0) % 15_000).toBe(0);
+    expect(timeAt(live, 1)).toBeLessThan(live.to);
   });
 
   it('finds the column a moment is in', () => {

@@ -88,7 +88,6 @@ describe('sequences against a real server', () => {
       expect(r.data.sequences[0]!.name).toContain('small_col_seq');
       expect(r.data.sequences[0]!.pctUsed!).toBeGreaterThan(90);
       expect(r.data.total).toBeGreaterThanOrEqual(2);
-      expect(r.verdict?.level).toBe('warn');
     });
   });
 
@@ -225,7 +224,6 @@ describe('sequences against a real server', () => {
       const r = await runCheck(ctx, sequences, {});
       expect(r.ok).toBe(true);
       if (!r.ok) return;
-      expect(r.verdict).toEqual({ level: 'ok' });
     });
   });
 

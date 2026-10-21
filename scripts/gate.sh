@@ -31,6 +31,16 @@ set -euo pipefail
 
 versions=${PGOPS_HOOK_PG_VERSIONS:-17}
 
+# THE COMMIT IS READ BEFORE THE TESTS, and the tree must be clean. The run
+# takes fifteen minutes in a checkout other sessions may commit to: a sha
+# read at the end would bless a commit nobody tested, and a dirty tree tests
+# work no commit holds.
+sha=$(git rev-parse HEAD)
+if [ -n "$(git status --porcelain)" ]; then
+  echo "gate: refusing — the tree has changes no commit holds. Commit or stash them, then gate." >&2
+  exit 1
+fi
+
 # Unquoted on purpose: this is the word split that turns '14 16 17 18' into
 # four runs.
 # shellcheck disable=SC2086
@@ -57,7 +67,10 @@ echo "gate: image smoke test"
 # verification, it must never be committed, and it must survive the branch
 # switches that a gitignored worktree file would survive too but that a
 # tracked one would not.
-sha=$(git rev-parse HEAD)
+if [ "$(git rev-parse HEAD)" != "$sha" ] || [ -n "$(git status --porcelain)" ]; then
+  echo "gate: refusing — HEAD or the tree moved during the run, so $sha is not what was tested. Gate again." >&2
+  exit 1
+fi
 receipt="$(git rev-parse --git-dir)/pgops-gate-receipt"
 printf '%s\n' "$sha" >> "$receipt"
 # Bounded, because this file is append-only and nothing else prunes it. Fifty

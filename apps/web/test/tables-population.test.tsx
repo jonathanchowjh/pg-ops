@@ -9,7 +9,7 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn(), replace: 
 vi.mock('@/lib/pools', async (orig) => ({ ...(await orig<typeof import('@/lib/pools')>()), storePool: () => null }));
 const ran = vi.hoisted(() => ({ ids: [] as string[] }));
 vi.mock('@/lib/check', () => ({
-  runCheckFor: vi.fn(async (_n: string, check: { id: string }) => { ran.ids.push(check.id); return { ok: true, verdict: null, measuredAt: 0, data: {} }; }),
+  runCheckFor: vi.fn(async (_n: string, check: { id: string }) => { ran.ids.push(check.id); return { ok: true, measuredAt: 0, data: {} }; }),
   readStore: vi.fn(async () => ({ ok: false, kind: 'off', message: '' })),
 }));
 const state = vi.hoisted(() => ({

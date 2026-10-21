@@ -225,6 +225,20 @@ describe('the package boundary', () => {
     expect(gate).toMatch(/pgops-gate-receipt/);
   });
 
+  /**
+   * Fifteen minutes in a checkout other sessions commit to: a sha read after
+   * the tests blesses whatever HEAD became, and a dirty tree tests work no
+   * commit holds.
+   */
+  it('reads the sha before the tests, and refuses a tree that is dirty or moved', () => {
+    const gate = readFileSync(new URL('../../../scripts/gate.sh', import.meta.url), 'utf8');
+    const read = gate.indexOf('sha=$(git rev-parse HEAD)');
+    expect(read).toBeGreaterThan(-1);
+    expect(read).toBeLessThan(gate.indexOf('npm run test:int'));
+    expect(gate.match(/git status --porcelain/g)).toHaveLength(2);
+    expect(gate).toMatch(/"\$\(git rev-parse HEAD\)" != "\$sha"/);
+  });
+
   /** Catches `outDir` drifting from the paths package.json advertises. */
   it('points main/types/exports at the directory tsconfig actually emits to', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));

@@ -232,7 +232,8 @@ export async function windowFor(
   const r = RINGS.get(name);
   return {
     // `<=`: on a live window `to` is now, and so is the sample the page just took.
-    samples: r?.samples.filter((s) => s.at >= grid.from && s.at <= grid.to) ?? [],
+    // From a bucket before: that sample still holds when the window begins.
+    samples: r?.samples.filter((s) => s.at > grid.from - BUCKET_MS && s.at <= grid.to) ?? [],
     cells: [], day: [], coverage: null,
     // readEvents' rule, so a console with no store draws the same marks.
     events: r?.events.filter((e) => e.at >= grid.from && e.at <= grid.to
@@ -255,7 +256,8 @@ async function fromStore(
   const to = new Date(grid.to);
   const dayTo = dayEnd(Date.now());
   const [samples, cells, coverage, day, events] = await Promise.all([
-    grid.raw ? readSamples(store, name, from, to) : Promise.resolve([]),
+    // A bucket early: the sample that began before the window holds into its first columns.
+    grid.raw ? readSamples(store, name, new Date(grid.from - BUCKET_MS), to) : Promise.resolve([]),
     grid.raw ? Promise.resolve([]) : readLoad(store, name, from, to, grid.columns, ['d', 't', 'q']),
     grid.raw ? Promise.resolve(null) : readCoverage(store, name, from, to, grid.columns),
     readLoad(store, name, new Date(dayTo - DAY_MS), new Date(dayTo), DAY_COLUMNS, ['d']),
@@ -295,18 +297,22 @@ interface ClockRead {
  * `sessions: false` is a page with no session rows: it reads the strip and
  * the events and no samples. `relation` narrows the events to one table's.
  */
+/** The window the URL asks for. With no store the clock holds fifteen minutes, so that is the window it opens on. */
+export function asked(sp: Search): Search {
+  return sp.win === undefined && kept() === 'memory' ? { ...sp, win: String(MEMORY_MS / 1000) } : sp;
+}
+
 export async function clockFor(
   name: string, sp: Search, opts: { sessions?: boolean; relation?: string } = {},
 ): Promise<ClockRead> {
-  // With no store the clock holds fifteen minutes, so that is the window it opens on.
-  const asked = sp.win === undefined && kept() === 'memory' ? { ...sp, win: String(MEMORY_MS / 1000) } : sp;
+  const wanted = asked(sp);
   const sessions = opts.sessions ?? true;
-  const read = sessions && gridFor(asked, Date.now()).live ? await runCheckFor(name, CHECKS.sessions, {}) : null;
+  const read = sessions && gridFor(wanted, Date.now()).live ? await runCheckFor(name, CHECKS.sessions, {}) : null;
   // The window ends one millisecond after the read, and the live cursor is the
   // window's last millisecond: so live is this read, not the sample before it.
   const readAt = Date.now();
   const now = readAt + 1;
-  const grid = gridFor(asked, now);
+  const grid = gridFor(wanted, now);
   const made = read === null ? null : await recordFor(name, read, readAt);
   const stored = await windowFor(name, sessions ? grid : { ...grid, raw: false, columns: 1 }, opts.relation);
 
@@ -368,7 +374,7 @@ export function liveMinute(
     maxConnections: connections?.ok ? connections.data.max - connections.data.reserved : null,
     lagSecs: lag?.ok && lag.data.inRecovery === true ? lag.data.lagSeconds : null,
     lagBytes: null, walBytes: null, xidAge: worst?.xactAge ?? null, xminAge: null,
-    deadlocks: null, commits: null, rollbacks: null, statsReset: null,
+    deadlocks: null, commits: null, rollbacks: null, statsReset: null, sizeBytes: null,
   };
 }
 

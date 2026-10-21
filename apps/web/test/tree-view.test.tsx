@@ -142,7 +142,7 @@ describe('the answer', () => {
   });
 
   it('states a server finding with its figure and the way to Server, and no action', async () => {
-    const minute = { connections: null, lagSecs: null, lagBytes: null, walBytes: null, xidAge: null, xminAge: null, deadlocks: null, commits: null, rollbacks: null, statsReset: null };
+    const minute = { connections: null, lagSecs: null, lagBytes: null, walBytes: null, xidAge: null, xminAge: null, deadlocks: null, commits: null, rollbacks: null, statsReset: null, sizeBytes: null };
     await mount(tree({ samples: [], health: [{ ...minute, at: NOW - 61_000, serverConnections: 88, maxConnections: 100 }, { ...minute, at: NOW - 1, serverConnections: 85, maxConnections: 100 }] }));
     // One stretch at one level, noting its worst minute.
     expect(answer()!.textContent).toContain('connections 88 of 100');
@@ -281,6 +281,19 @@ describe('the rows', () => {
     expect(grid.contains(document.activeElement)).toBe(false);
   });
 
+  /** Found by review: the prevented press left the find box focused, and its caret took the arrows. */
+  it('takes the arrows from the find box when a row is clicked', async () => {
+    await mount(tree());
+    const find = document.body.appendChild(document.createElement('input'));
+    try {
+      find.focus();
+      expect(await press(rowsOf()[1]!)).toBe(true);
+      expect(document.activeElement).not.toBe(find);
+    } finally {
+      find.remove();
+    }
+  });
+
   /** Guard: the router is a mock, so nothing rerenders between presses; each assertion is on the URL asked for. */
   it('leaves the cursor keys to the page when no row has focus, and the caret to a box the reader types in', async () => {
     await mount(tree());
@@ -353,7 +366,7 @@ describe('what the page could not see', () => {
       samples: [], tables: [], tablesTotal: 0,
       health: [{
         at: NOW - 1, connections: null, serverConnections: 85, maxConnections: 100, lagSecs: null, lagBytes: null, walBytes: null,
-        xidAge: null, xminAge: null, deadlocks: null, commits: null, rollbacks: null, statsReset: null,
+        xidAge: null, xminAge: null, deadlocks: null, commits: null, rollbacks: null, statsReset: null, sizeBytes: null,
       }],
     }));
     expect(view.text()).toContain('connections 85 of 100');

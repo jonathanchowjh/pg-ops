@@ -6,8 +6,7 @@ import { ConfigError } from '@/lib/config';
 import { ConfigErrorPage } from '@/components/config-error';
 import { Sidebar } from '@/components/sidebar';
 import { identityLine } from '@/lib/format';
-import { runCheckFor } from '@/lib/check';
-import { CHECKS } from '@pgops/checks';
+import { identityFor } from '@/lib/check';
 
 export default async function DbLayout({
   children,
@@ -35,8 +34,8 @@ export default async function DbLayout({
   if (!names.includes(name)) notFound();
 
   // In the layout so identity is on every page under /db/<name>, including
-  // the one with the terminate button. `runCheckFor` never rejects.
-  const who = await runCheckFor(name, CHECKS.identity);
+  // the one with the terminate button. It never rejects.
+  const who = await identityFor(name);
 
   // The sidebar is the place; the page under it says which node and when.
   return (

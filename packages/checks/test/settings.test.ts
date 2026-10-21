@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { settings, settingNames, toSettings } from '../src/checks/settings.js';
+import { settings, settingNames, showMs, toSettings } from '../src/checks/settings.js';
 
 describe('settingNames', () => {
   /**
@@ -81,8 +81,29 @@ describe('toSettings', () => {
     expect(d.main[0]!.value).toBe('try');
   });
 
+  /**
+   * pgops sets its own timeouts on its connection. Reporting those as the
+   * server's would hide a server with no timeout at all, the case Server tags.
+   */
+  it("reports the server's timeout, not the one pgops set on its own connection", () => {
+    const d = toSettings([
+      { name: 'statement_timeout', value: '10s', reset_ms: '0' },
+      { name: 'lock_timeout', value: '1s', reset_ms: '30000' },
+      { name: 'deadlock_timeout', value: '1s', reset_ms: null },
+    ]);
+    expect(d.main).toEqual([
+      { name: 'statement_timeout', value: '0' },
+      { name: 'lock_timeout', value: '30s' },
+      { name: 'deadlock_timeout', value: '1s' },
+    ]);
+  });
+
+  it('prints milliseconds as SHOW does', () => {
+    expect([0, 1500, 1000, 90_000, 120_000, 7_200_000, 86_400_000].map(showMs))
+      .toEqual(['0', '1500ms', '1s', '90s', '2min', '2h', '1d']);
+  });
+
   it('ships no verdict: advice that does not know the machine is a guess', () => {
-    expect(settings.verdict).toBeUndefined();
     expect(settings.thresholds).toBeUndefined();
   });
 

@@ -142,7 +142,6 @@ describe('queryStats shape', () => {
   });
 
   it('has no verdict/thresholds — a listing check, same as sessions.ts\'s own `sessions`', () => {
-    expect(queryStats.verdict).toBeUndefined();
     expect(queryStats.thresholds).toBeUndefined();
   });
 });

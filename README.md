@@ -149,7 +149,7 @@ requirement.
 | `/db/<name>/server` | What the connection sees of the server, on the clock: connections against the limit, replication lag, WAL, transactions, transaction ID age; who holds the connections; the transactions open longest, with Terminate; the settings the pages depend on; recent terminations. Reset statistics. | Every 5 s |
 
 Every page but Explain reads one clock: a window of up to 24 hours on a strip
-you drag. A click pins a moment, and a pinned page has no actions. Arrows step
+you drag. A click pins a moment, and a pinned page offers no Terminate. Arrows step
 a sample, `[` and `]` hop events, Esc returns to live, and in the tree arrows
 walk and fold the rows. Times are clock times, never "ago". Under a database's
 name, one line states its database, user, version, SSL and replica role.

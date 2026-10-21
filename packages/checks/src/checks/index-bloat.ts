@@ -52,8 +52,10 @@ export function toIndexBloat(rows: IndexBloatRow[]): IndexBloatData {
 }
 
 /**
- * pgHero's `index_bloat_bytes` default. Both the threshold's value and the
- * query's default floor.
+ * pgHero's `index_bloat_bytes` default (lib/pghero/database.rb:68), 100
+ * megabytes, adopted for parity: a floor on what is worth reporting, not a
+ * level a reading climbs to. The figure is an estimate from column
+ * statistics, so an operator confirms it before rebuilding.
  */
 const INDEX_BLOAT_FLOOR_BYTES = 100 * 1024 * 1024;
 
@@ -181,15 +183,4 @@ export const indexBloat: Check<IndexBloatRow, IndexBloatData, IndexBloatOpts> = 
     values: [o.minBytes ?? INDEX_BLOAT_FLOOR_BYTES, o.limit ?? DEFAULT_LIMIT],
   }),
   map: toIndexBloat,
-  thresholds: [
-    { level: 'warn', value: INDEX_BLOAT_FLOOR_BYTES, unit: 'bytes',
-      because: "pgHero's index_bloat_bytes default (lib/pghero/database.rb:68) is "
-             + '100 megabytes; adopted for parity. It is a floor on what is worth '
-             + 'reporting, not a level a reading climbs to',
-      remedy: 'The figure is an estimate from column statistics, not a measurement, '
-            + 'so confirm it before acting. Rebuilding the index concurrently '
-            + 'reclaims the space; on a table that is still churning it will bloat '
-            + 'again, which is a vacuum question rather than an index one.' },
-  ],
-  // No verdict: it runs only when an operator navigates to it.
 };

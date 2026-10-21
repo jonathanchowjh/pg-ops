@@ -99,6 +99,11 @@ describe('openAction', () => {
     expect((r as ActionRequest).actor).toMatch(/^alice@/);
   });
 
+  it('records an actor whose name proxy.ts encoded', async () => {
+    const r = await openAction(post({ reason: 'x' }, { [ACTOR_HEADER]: encodeURIComponent('田中') }), 'prod');
+    expect((r as ActionRequest).actor).toMatch(/^田中@/);
+  });
+
   /** Without this, writeAudit would fall back to the container's OS user and id. */
   it('records anonymous when no actor header is present', async () => {
     const r = await openAction(post({ reason: 'x' }), 'prod');

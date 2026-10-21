@@ -77,10 +77,16 @@ export async function openAction(
     // client-supplied copy first, so it is either a real authenticated
     // username or absent. Absent means auth is not configured, recorded as
     // "anonymous".
-    actor: `${req.headers.get(ACTOR_HEADER) ?? 'anonymous'}@${host}`,
+    actor: `${actorOf(req.headers.get(ACTOR_HEADER))}@${host}`,
     reason: reason.trim(),
     body,
   };
+}
+
+/** The header as proxy.ts encoded it. Only proxy.ts sets it, so a malformed one is not expected; it is kept as sent. */
+function actorOf(header: string | null): string {
+  if (header === null) return 'anonymous';
+  try { return decodeURIComponent(header); } catch { return header; }
 }
 
 /**

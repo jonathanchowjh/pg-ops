@@ -426,12 +426,13 @@ function onTreeKey(e: KeyboardEvent<HTMLDivElement>): void {
 /**
  * A click in the tree is for the clock: it pins, or drags a window. A row it
  * focused would keep the arrows, and a pinned page could not step, so the
- * click focuses nothing and lets go of the row the keys had. A row's own
- * controls take focus as usual.
+ * click focuses nothing and lets go of whatever the keys had: a row, or the
+ * find box, which the prevented default would otherwise leave focused. A
+ * row's own controls take focus as usual.
  */
 function onTreeMouseDown(e: MouseEvent<HTMLDivElement>): void {
   if ((e.target as HTMLElement).closest('button, a, input, textarea, select') !== null) return;
   e.preventDefault();
   const held = document.activeElement;
-  if (held instanceof HTMLElement && e.currentTarget.contains(held)) held.blur();
+  if (held instanceof HTMLElement) held.blur();
 }

@@ -9,7 +9,7 @@ import { DAY_MS, downSince, gridFor, type Search } from '@/lib/clock';
 import { ConfigError } from '@/lib/config';
 import { plural } from '@/lib/format';
 import { databaseNames } from '@/lib/pools';
-import { MEMORY_MS, dayColumns, dayEnd, fleetRowFor, kept, type FleetRow } from '@/lib/samples';
+import { asked, dayColumns, dayEnd, fleetRowFor, type FleetRow } from '@/lib/samples';
 
 export const metadata: Metadata = { title: 'Fleet' };
 
@@ -30,10 +30,8 @@ export default async function Fleet({ searchParams }: { searchParams: Promise<Se
     if (!(err instanceof ConfigError)) throw err;
     return <ConfigErrorPage message={err.message} />;
   }
-  // With no store the clock holds fifteen minutes, so that is the window it opens on.
-  const asked = sp.win === undefined && kept() === 'memory' ? { ...sp, win: String(MEMORY_MS / 1000) } : sp;
   const now = Date.now();
-  const grid = gridFor(asked, now);
+  const grid = gridFor(asked(sp), now);
   const read = await Promise.all(names.map((name) => fleetRowFor(name, grid)));
 
   // Rows keep the operator's configured order, which they know by position.

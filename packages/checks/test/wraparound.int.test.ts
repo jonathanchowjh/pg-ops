@@ -13,38 +13,8 @@ describe('wraparound', () => {
       const worst = r.data.worst[0]!;
       expect(worst.txnsUntilShutdown).toBe(HARD_LIMIT - worst.xactAge);
       expect(worst.txnsUntilShutdown).toBeGreaterThan(2_000_000_000);
-      expect(r.verdict!.level).toBe('ok');
     });
   }, 120_000);
-
-  it('does NOT escalate at the forced-autovacuum trigger — that is routine (A1)', () => {
-    const t = wraparound.thresholds!;
-    // 180M transactions of age is 90% of the default autovacuum_freeze_max_age
-    // but 8.38% of the real horizon.
-    const at180M = wraparound.verdict!(
-      { worst: [{ database: 'app', xactAge: 180_000_000,
-                  txnsUntilShutdown: HARD_LIMIT - 180_000_000,
-                  pctToForcedVacuum: 90 }] }, t);
-    expect(at180M.level).toBe('ok');
-  });
-
-  it('escalates on transactions remaining, at the documented boundary', () => {
-    const t = wraparound.thresholds!;
-    const warn = t.find((x) => x.level === 'warn')!.value;
-    const crit = t.find((x) => x.level === 'critical')!.value;
-    const at = (remaining: number) => wraparound.verdict!(
-      { worst: [{ database: 'app', xactAge: HARD_LIMIT - remaining,
-                  txnsUntilShutdown: remaining, pctToForcedVacuum: 0 }] }, t).level;
-
-    // `txnsUntilShutdown` counts down, so the safe side of each boundary is
-    // one transaction more.
-    expect(at(warn + 1)).toBe('ok');
-    expect(at(warn)).toBe('warn');
-    expect(at(warn - 1)).toBe('warn');
-    expect(at(crit + 1)).toBe('warn');
-    expect(at(crit)).toBe('critical');
-    expect(at(crit - 1)).toBe('critical');
-  });
 
   it('every threshold carries a justification', () => {
     for (const t of wraparound.thresholds!) expect(t.because.length).toBeGreaterThan(20);

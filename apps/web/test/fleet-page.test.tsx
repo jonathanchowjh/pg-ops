@@ -23,7 +23,7 @@ const session = (pid: number, over = {}) => ({
   queryId: '42', query: 'UPDATE users SET n = $1', inStateSecs: 90, queryAgeSecs: 90, xactAgeSecs: 90,
   blockedBy: [], relations: ['public.users'], wanted: null, waitSecs: null, ...over,
 });
-const read = (sessions: unknown[]) => ({ ok: true, verdict: null, measuredAt: 0, data: { sessions, truncated: false, hidden: 0 } }) as unknown as CheckResult<SessionsData>;
+const read = (sessions: unknown[]) => ({ ok: true, measuredAt: 0, data: { sessions, truncated: false, hidden: 0 } }) as unknown as CheckResult<SessionsData>;
 
 let view: Rendered;
 const mount = async (sp: Record<string, string> = {}) => {

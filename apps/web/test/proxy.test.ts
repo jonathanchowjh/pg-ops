@@ -3,7 +3,8 @@ import { NextRequest } from 'next/server';
 import { ACTION_PATH, proxy } from '@/proxy';
 import { ACTOR_HEADER } from '@/lib/auth';
 
-const basic = (u: string, p: string) => `Basic ${btoa(`${u}:${p}`)}`;
+/** UTF-8, as RFC 7617 has it and as browsers send a name past Latin-1. */
+const basic = (u: string, p: string) => `Basic ${Buffer.from(`${u}:${p}`).toString('base64')}`;
 
 function request(headers: Record<string, string>): NextRequest {
   return new NextRequest('http://localhost/', { headers });
@@ -48,6 +49,16 @@ describe('proxy', () => {
     const res = proxy(req);
 
     expect(forwarded(res, ACTOR_HEADER)).toBe('alice');
+  });
+
+  /** Found by review: a header holds bytes, so a name past Latin-1 threw on every request. */
+  it('forwards a username outside Latin-1, encoded', () => {
+    process.env.PGOPS_USERNAME = '田中';
+    process.env.PGOPS_PASSWORD = 'hunter2';
+
+    const res = proxy(request({ authorization: basic('田中', 'hunter2') }));
+
+    expect(forwarded(res, ACTOR_HEADER)).toBe(encodeURIComponent('田中'));
   });
 
   /**

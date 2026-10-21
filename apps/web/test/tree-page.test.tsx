@@ -22,13 +22,13 @@ vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async (_name: string, check: { id: string }) => {
     state.run.push(check.id);
     if (check.id === 'sessions') {
-      return state.fail ?? { ok: true, verdict: null, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } };
+      return state.fail ?? { ok: true, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } };
     }
     const data = check.id === 'wraparound'
       ? { worst: [{ database: 'prod', xactAge: state.xidAge, txnsUntilShutdown: 2_147_483_647 - state.xidAge, pctToForcedVacuum: 0 }] }
       : check.id === 'connections' ? { max: 100, used: state.used, reserved: 3, headroom: 97 - state.used }
         : { inRecovery: false, lagSeconds: null, standbys: 0, receiving: null };
-    return { ok: true, verdict: { level: 'ok' }, measuredAt: 0, data };
+    return { ok: true, measuredAt: 0, data };
   }),
 }));
 

@@ -41,6 +41,13 @@ describe('tables', () => {
       expect(tableFlags(orders, r.data.freezeMaxAge)).toContain('not validated');
       // Its own storage parameters, not the server's 50 + 0.2 × rows.
       expect(by.get('public.tuned')!.vacuumTrigger).toBe(10);
+      // 18 caps the trigger; a table's own cap stands in for the server's.
+      if (ctx.serverVersion >= 180_000) {
+        await pool.query('ALTER TABLE tuned SET (autovacuum_vacuum_threshold = 1000, autovacuum_vacuum_max_threshold = 5)');
+        const capped = await runCheck(ctx, tables, {});
+        if (!capped.ok) throw new Error(capped.message);
+        expect(capped.data.tables.find((t) => t.name === 'public.tuned')!.vacuumTrigger).toBe(5);
+      }
       // age(0) is 2147483647: a parent with no storage must not top every list.
       expect(by.get('public.events')!.xidAge).toBeNull();
       expect(r.data.freezeMaxAge).toBe(200_000_000);
@@ -193,6 +200,9 @@ describe('the edge cases the old checks paid for', () => {
     'CREATE INDEX ix_c5_c6   ON w (c5, c6)',
     'CREATE UNIQUE INDEX ix_uniq_c7 ON w (c7)',
     'CREATE INDEX ix_plain_c7 ON w (c7)',
+    'CREATE INDEX ix_c8_desc ON w (c8 DESC NULLS LAST)',
+    'CREATE INDEX ix_c8_c9   ON w (c8, c9)',
+    'CREATE INDEX ix_d_c     ON w (d COLLATE "C")',
   ];
 
   it('recommends a drop only where every clause of the comparison holds', async () => {
@@ -215,6 +225,9 @@ describe('the edge cases the old checks paid for', () => {
       // A unique index is never the one to drop, and can be the one that covers.
       expect(pairs.some((p) => p.startsWith('ix_uniq_c5<='))).toBe(false);
       expect(pairs).toContain('ix_plain_c7<=ix_uniq_c7');
+      // An ordering or a collation the other index lacks is one the planner cannot get from it.
+      expect(pairs.some((p) => p.startsWith('ix_c8_desc<='))).toBe(false);
+      expect(pairs.some((p) => p.startsWith('ix_d_c<='))).toBe(false);
     });
   }, 120_000);
 
