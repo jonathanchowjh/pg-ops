@@ -106,8 +106,7 @@ export async function contextFor(name: string): Promise<CheckContext> {
   }
   const serverVersion = found.serverVersion;
 
-  // `store` is undefined, not null, when unset: CheckContext types it as
-  // optional, and runSeries tests presence rather than nullness.
+  // `store` is undefined, not null, when unset: CheckContext types it as optional.
   const store = storePool(process.env) ?? undefined;
   return { target, store, serverVersion };
 }

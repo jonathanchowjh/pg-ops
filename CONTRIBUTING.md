@@ -91,14 +91,15 @@ Two things about the test setup catch people:
 
 ```
 packages/checks/          Everything that knows Postgres. No React, no Next, no HTTP.
-  src/types.ts            Check, Threshold, CheckResult, Series, Tool, ActionMeta
-  src/run.ts              runCheck / runSeries / runTool: run one thing, never throw
-  src/registry.ts         CHECKS, ACTIONS, SERIES, TOOLS, and the pgHero parity map
+  src/types.ts            Check, Threshold, CheckResult, Tool, ActionMeta
+  src/run.ts              runCheck / runTool: run one thing, never throw
+  src/registry.ts         CHECKS, ACTIONS, TOOLS, and the pgHero parity map
   src/checks/             One file per area: locks, sessions, catalog, wraparound…
   src/checks/shared.ts    What the checks share: list cap, schema filter, threshold comparison
-  src/actions/            kill, analyze, stats resets: the only writes, all through audited()
-  src/series/             "How has this moved": reads over the store
+  src/actions.ts          kill, analyze, stats resets: the only writes, all through audited()
+  src/audit.ts            The audit record every action writes, to stdout and a file
   src/store/              The pgops schema: migrations, read, write, advisory lock
+  src/deltas.ts           Cumulative counters differenced into intervals, a reset or an eviction a gap
   src/tools/              explain and index advice: questions the operator asks
   src/capture.ts          The five-minute capture tick
   src/health.ts           The one-minute health sample
@@ -132,8 +133,8 @@ the codebase is variations.
 
 1. **A check is an object**, not a class:
    [`Check<Row, Data, Opts>`](packages/checks/src/types.ts). It carries an
-   `id`, a `title`, a `home`, a `class`, its `sql`, a pure `map` from rows to
-   domain data, and optionally `thresholds`.
+   `id`, a `home`, a `class`, its `sql`, a pure `map` from rows to domain
+   data, and optionally `thresholds`.
 2. **`runCheck`** ([run.ts](packages/checks/src/run.ts)) checks the
    requirements, runs the SQL, calls `map`, and returns a
    `CheckResult`. It never throws. A failure becomes
@@ -150,10 +151,8 @@ the codebase is variations.
    sessions, a line for anything else. A finding past its mark is a line in
    the tree's answer, with the way to its node.
 
-A `Series` is the same idea for "how has this moved", reading the store and
-yielding points. A `Tool` is a question the operator asks with
-their own input, like explain. An action is a write, and takes the audited
-path in `actions/`.
+A `Tool` is a question the operator asks with their own input, like explain.
+An action is a write, and takes the audited path in `actions.ts`.
 
 ## The rules the tests enforce
 
@@ -173,7 +172,7 @@ of two ways the project tried.
 | Every page is dynamic; nothing opts back into static rendering | `guards.test.ts`, and the image smoke test end to end |
 | Only pages of live reads and the fleet render `<Refresh>`; a captured read never runs on a poll | `guards.test.ts` |
 | No page or component constructs a `Pool` or renders a query outside `<Sql>` | `guards.test.ts` |
-| DDL appears only under `store/migrations/` | `guards.test.ts` |
+| DDL appears only in `store/migrate.ts` | `guards.test.ts` |
 | A statistics reset is named in exactly one file, and never on the capture path | `guards.test.ts` |
 | Operator SQL is prepared as a named statement in exactly one file | `guards.test.ts` |
 | Every threshold is tested one unit either side of its line | Each check's `*.int.test.ts` |
@@ -227,7 +226,7 @@ offers nothing on it, because killing a waiter frees nothing.
 
 The tree is built in one pure function,
 [apps/web/lib/tree.ts](apps/web/lib/tree.ts), with its tests beside it, and
-`coverage.test.ts` fails if a check's home draws it nowhere.
+`guards.test.ts` fails if a check's home draws it nowhere.
 
 ### Why two packages
 
@@ -247,9 +246,8 @@ without a database.
 A check is one SQL query and a pure function from rows to a result. It
 reports and never judges: the tree judges, over the window, against the
 checks' thresholds (`MARKS` in `apps/web/lib/samples.ts`), so a finding has
-one judge. Thresholds are data, not constants in a comparison. Each carries its unit, why the number
-matters, and what action it calls for. A threshold with no single safe action
-carries no advice.
+one judge. Thresholds are data, not constants in a comparison. Each carries the sentence that
+justifies the number.
 
 A check that cannot run returns a failure with the reason: a missing
 extension, an insufficient privilege, a server version below what it needs.
@@ -342,7 +340,7 @@ Each is documented at the code that implements it.
   answers to: a Postgres behaviour, a hazard, an invariant. It does not
   restate the code, tell the history of a change, or cite a plan or review
   that is not in the repository. History belongs in the commit message.
-- **Light OOP.** Checks, series, tools and actions are plain objects and
+- **Light OOP.** Checks, tools and actions are plain objects and
   functions, not classes. A class earns its place only when several functions
   keep passing the same values around. No inheritance beyond subclassing
   `Error`, no dependency injection; if a test needs a seam, override the
@@ -425,15 +423,14 @@ puts the decision on a web page with the reasoning written beside it.
 | Word | Meaning here |
 |---|---|
 | **Check** | One question about a database, as one SQL query plus the code that turns rows into an answer. `connections`, `locks`, `wraparound` are checks. |
-| **Threshold** | The number a finding is judged against, with two sentences: `because` (why this number) and `remedy` (what to do). |
+| **Threshold** | The number a finding is judged against, with one sentence, `because`: why this number. |
 | **Home** | The node a check's finding belongs to: `database`, `table`, `query`, `session`, `index`, `sequence` or `server`. |
 | **Class** | How a check runs. `live` may run on a page's five-second poll. `captured` is a catalog scan: the capture stores its rows, a table's own page asks about that table, and a button runs the bloat estimate. |
-| **Series** | A reading over time, read from the store. Query load per interval, a table's size per day. |
 | **Tool** | A question the operator asks with their own input. Explain is a tool. |
 | **Action** | A write: terminate a session, reset statistics, analyze a table. Off by default, gated, confirmed, audited. |
 | **Store** | A `pgops` schema in a database you nominate with `PGOPS_STORE_URL`. History lives there. Without it there is no history and no DDL anywhere. |
 | **Capture** | The tick that writes query statistics and relation sizes to the store, every five minutes. |
-| **Registry** | `registry.ts`: the list of every check, action, series and tool, and the map from each pgHero capability to what pgops does about it. |
+| **Registry** | `registry.ts`: the list of every check, action and tool, and the map from each pgHero capability to what pgops does about it. |
 | **Parity** | The claim that pgops answers every question pgHero answers. Checked by a test, not asserted. |
 | **Guard** | A test that scans source files for a rule, rather than running code. "No page renders `<Refresh>` unless it is an incident page" is a guard. |
 | **Tier** | Where an action sits on the safety ladder. Tier 0 is a read. Tier 1 needs the flag and a reason. Tier 2 also needs the database name typed back. Tier 3 does not exist. |
@@ -549,7 +546,6 @@ WHERE datname = current_database()`;
 export const tempFiles: Check<TempFilesRow, TempFilesData> = {
   id: 'tempFiles',
   home: 'server',
-  title: 'Temporary files',
   class: 'live',
   sql: SQL,
   map: (rows) => ({
@@ -594,7 +590,7 @@ describe('tempFiles', () => {
 `npm run test:int -- temp-files` to run only this file.
 
 **4. Render it.** The check is live, so it may go on a page that polls. Its
-home is `server`, so it belongs on `/server`; `apps/web/test/coverage.test.ts`
+home is `server`, so it belongs on `/server`; `apps/web/test/guards.test.ts`
 fails until some page of its home names it. In
 `apps/web/app/db/[name]/server/page.tsx`, add it to the page's `Promise.all`
 under `live ?`, and render it as a section with the others:

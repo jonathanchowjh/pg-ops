@@ -12,7 +12,6 @@ function fakeCtx(impl: () => Promise<{ rows: unknown[] }>): CheckContext {
 
 const doubler: Check<{ n: string }, number> = {
   id: 'doubler', home: 'database',
-  title: 'Doubler',
   class: 'live',
   sql: 'SELECT 1 AS n',
   map: (rows) => Number(rows[0]?.n ?? 0) * 2,
@@ -45,7 +44,7 @@ describe('runCheck', () => {
     // `mock.calls[0]` as the empty tuple, which cannot be indexed.
     const impl = vi.fn(async (..._args: unknown[]) => ({ rows: [] }));
     await runCheck(fakeCtx(impl), {
-      id: 'x', title: 'x', home: 'database', class: 'live', sql: 'SELECT 1', map: () => ({}),
+      id: 'x', home: 'database', class: 'live', sql: 'SELECT 1', map: () => ({}),
     } as never);
     expect(impl.mock.calls[0]?.[0]).toBe('SELECT 1\n/* pgops */');
   });
@@ -53,7 +52,7 @@ describe('runCheck', () => {
   it('marks a parameterised statement too, leaving its values alone', async () => {
     const impl = vi.fn(async (..._args: unknown[]) => ({ rows: [] }));
     await runCheck(fakeCtx(impl), {
-      id: 'x', title: 'x', home: 'database', class: 'live',
+      id: 'x', home: 'database', class: 'live',
       sql: (o: { n: number }) => ({ text: 'SELECT $1', values: [o.n] }), map: () => ({}),
     } as never, { n: 7 });
     expect(impl.mock.calls[0]?.[0]).toBe('SELECT $1\n/* pgops */');
@@ -228,15 +227,14 @@ describe('queryWithTimeout: pool hygiene when ROLLBACK itself fails', () => {
   });
 });
 
-/** Guard: catches a new check landing with a threshold that cannot say why it escalates or what to do about it. */
-describe('every shipped threshold carries advice', () => {
-  it('has a non-empty because and remedy on every threshold in CHECKS', async () => {
+/** Guard: catches a new check landing with a threshold that cannot say why it escalates. */
+describe('every shipped threshold says why', () => {
+  it('has a non-empty because on every threshold in CHECKS', async () => {
     const { CHECKS } = await import('../src/registry.js');
     const missing: string[] = [];
     for (const [id, check] of Object.entries(CHECKS)) {
       for (const t of check.thresholds ?? []) {
         if (!t.because?.trim()) missing.push(`${id}/${t.level}: because`);
-        if (!t.remedy?.trim()) missing.push(`${id}/${t.level}: remedy`);
       }
     }
     expect(missing).toEqual([]);
@@ -247,7 +245,7 @@ describe('runTool', () => {
   const ctx: CheckContext = { target: {} as never, serverVersion: 170000 };
 
   it('returns the data in the envelope a check returns', async () => {
-    const tool = { id: 't', title: 'T', run: async (_c: CheckContext, n: number) => n * 2 };
+    const tool = { id: 't', run: async (_c: CheckContext, n: number) => n * 2 };
     const r = await runTool(ctx, tool, 21);
     expect(r).toMatchObject({ ok: true, data: 42 });
   });
@@ -255,7 +253,7 @@ describe('runTool', () => {
   it('refuses below its version floor without running', async () => {
     let ran = false;
     const tool = {
-      id: 't', title: 'T', requires: [{ kind: 'version' as const, min: 180000 }],
+      id: 't', requires: [{ kind: 'version' as const, min: 180000 }],
       run: async () => { ran = true; },
     };
     const r = await runTool(ctx, tool, undefined);
@@ -265,7 +263,7 @@ describe('runTool', () => {
 
   it('classifies a missing extension and hands back the remedy', async () => {
     const tool = {
-      id: 't', title: 'T', requires: [{ kind: 'extension' as const, name: 'pg_stat_statements' }],
+      id: 't', requires: [{ kind: 'extension' as const, name: 'pg_stat_statements' }],
       run: async () => { throw Object.assign(new Error('relation does not exist'), { code: '42P01' }); },
     };
     const r = await runTool(ctx, tool, undefined);
@@ -276,7 +274,7 @@ describe('runTool', () => {
   });
 
   it('never rejects, even on a thrown non-Error', async () => {
-    const tool = { id: 't', title: 'T', run: async () => { throw 'boom'; } };
+    const tool = { id: 't', run: async () => { throw 'boom'; } };
     await expect(runTool(ctx, tool, undefined))
       .resolves.toMatchObject({ ok: false, reason: 'error', message: 'boom' });
   });

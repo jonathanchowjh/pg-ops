@@ -210,7 +210,6 @@ export function toTables(rows: TableReadRow[]): TablesData {
 
 export const tables: Check<TableReadRow, TablesData, TablesOpts> = {
   id: 'tables',
-  title: 'Tables',
   home: 'table',
   class: 'captured',
   timeoutMs: 10_000,
@@ -376,7 +375,6 @@ export function toIndexes(rows: IndexReadRow[]): IndexesData {
 
 export const indexes: Check<IndexReadRow, IndexesData, IndexesOpts> = {
   id: 'indexes',
-  title: 'Indexes',
   home: 'index',
   class: 'captured',
   timeoutMs: 10_000,

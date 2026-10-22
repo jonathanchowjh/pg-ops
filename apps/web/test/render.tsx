@@ -5,7 +5,7 @@ import type { ReactElement } from 'react';
 /**
  * A local stand-in for @testing-library/react, kept deliberately: it is small,
  * has no dependency behind it, and every test in this app is written against
- * it. test/scaffold.test.ts keeps that package uninstalled.
+ * it. guards.test.ts ("the web manifest") keeps that package uninstalled.
  */
 export interface Rendered {
   container: HTMLElement;

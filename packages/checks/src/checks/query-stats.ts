@@ -171,7 +171,6 @@ const SQL = (o: QueryStatsOpts) => ({
 export const queryStats: Check<QueryStatRow, QueryStatsData, QueryStatsOpts> = {
   id: 'queryStats',
   home: 'query',
-  title: 'Query statistics',
   class: 'live',
   sql: SQL,
   requires: [

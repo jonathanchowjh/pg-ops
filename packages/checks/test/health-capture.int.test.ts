@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { describe, expect, inject, it } from 'vitest';
 import { captureHealth } from '../src/health.js';
-import { migrate } from '../src/store/schema.js';
+import { migrate } from '../src/store/migrate.js';
 import { awaitPublished, withPostgres } from './harness.js';
 
 const { Pool } = pg;

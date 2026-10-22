@@ -2,7 +2,7 @@ import type pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { indexFlags, indexes, tableFlags, tables } from '../src/checks/catalog.js';
 import { runCheck } from '../src/run.js';
-import { migrate } from '../src/store/schema.js';
+import { migrate } from '../src/store/migrate.js';
 import { awaitPublished, seed, withPostgres } from './harness.js';
 
 const SETUP = [

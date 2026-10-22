@@ -1,5 +1,5 @@
 /**
- * Patterns that look like credentials. Callers: `actions/audit.ts`, over the
+ * Patterns that look like credentials. Callers: `audit.ts`, over the
  * serialised audit record, and apps/web's `Sql` component, over every query
  * the console renders.
  *

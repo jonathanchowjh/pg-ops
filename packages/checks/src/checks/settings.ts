@@ -93,7 +93,6 @@ export function toSettings(rows: SettingRow[]): SettingsData {
 
 export const settings: Check<SettingRow, SettingsData> = {
   id: 'settings',
-  title: 'Settings',
   /** `server`: a server's settings are listed on its Server page. */
   home: 'server',
   class: 'live',

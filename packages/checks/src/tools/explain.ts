@@ -194,7 +194,6 @@ export interface Explanation { plan: PlanNode; parameters: number; advice: Index
  */
 export const explain: Tool<{ sql: string }, Explanation> = {
   id: 'explain',
-  title: 'Explain',
   run: async (ctx, { sql }) => {
     const planned = (await planStatements(ctx, [checkStatement(sql)]))[0]!;
     if (!planned.ok) throw Object.assign(new Error(planned.message), { code: planned.code });

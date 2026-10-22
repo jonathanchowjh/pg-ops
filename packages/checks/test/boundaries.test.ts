@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CHECKS } from '../src/registry.js';
+import { MIGRATIONS } from '../src/store/migrate.js';
 
 const SRC = new URL('../src/', import.meta.url).pathname;
 
@@ -269,12 +270,11 @@ describe('the package boundary', () => {
  */
 describe('the store migrations', () => {
   it('are not called additive while one of them drops a table', () => {
-    const dir = join(SRC, 'store', 'migrations');
-    const drops = readdirSync(dir).filter((f) => /\bDROP TABLE\b/.test(readFileSync(join(dir, f), 'utf8')));
-    expect(drops).toEqual(['008-drop-check-results.ts']);
-    const schema = readFileSync(join(SRC, 'store', 'schema.ts'), 'utf8');
-    expect(schema.replace(/\n\s*\/\/ ?/g, ' ')).not.toMatch(/migrations are additive/);
-    expect(schema).toContain('008 drops pgops.check_results');
+    const drops = MIGRATIONS.map((sql, i) => [i + 1, sql] as const).filter(([, sql]) => /\bDROP TABLE\b/.test(sql)).map(([v]) => v);
+    expect(drops).toEqual([8]);
+    const runner = readFileSync(join(SRC, 'store', 'migrate.ts'), 'utf8');
+    expect(runner.replace(/\n\s*\/\/ ?/g, ' ')).not.toMatch(/migrations are additive/);
+    expect(runner).toContain('008 drops pgops.check_results');
   });
 });
 

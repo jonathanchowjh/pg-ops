@@ -71,6 +71,15 @@ describe('shapesFor', () => {
     expect(pg.read).toHaveBeenCalledTimes(2);
   });
 
+  it('makes one read for every poll that arrives while the first is in flight', async () => {
+    let release!: (v: { shapes: never[]; allMs: null }) => void;
+    pg.read.mockReturnValue(new Promise((r) => { release = r; }));
+    const polls = [shapesFor('db', grid), shapesFor('db', grid), shapesFor('db', grid)];
+    release({ shapes: [], allMs: null });
+    await Promise.all(polls);
+    expect(pg.read).toHaveBeenCalledTimes(1);
+  });
+
   it('reaches back far enough for two captures when the window is shorter than that', async () => {
     pg.read.mockResolvedValue({ shapes: [], allMs: null });
     await shapesFor('db', { from: T0 - 120_000, to: T0, live: true, winSecs: 120 });

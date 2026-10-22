@@ -1,6 +1,6 @@
 /**
  * The pgHero parity registry: every public pgHero capability (audited against
- * pgHero 4.0.1), mapped to the check, action, series, tool or job that
+ * pgHero 4.0.1), mapped to the check, action or tool that
  * answers it, or declined with a reason.
  *
  * pgHero methods folded into another entry rather than given their own:
@@ -30,13 +30,9 @@
  *  - #5 `total_connections` is the `connections` check's `used`, which
  *    counts client backends only; pgHero counts every backend.
  */
-import { killBackend, killLongRunning } from './actions/kill.js';
-import { resetQueryStats, resetStats } from './actions/stats.js';
-import { analyzeTables } from './actions/analyze.js';
-import { captureOnce } from './capture.js';
+import { analyzeTables, killBackend, killLongRunning, resetQueryStats, resetStats } from './actions.js';
 import { indexes, tables } from './checks/catalog.js';
 import { connectionDetail, connections } from './checks/connections.js';
-import { databaseActivity } from './checks/database-activity.js';
 import { identity } from './checks/identity.js';
 import { horizon } from './checks/horizon.js';
 import { indexBloat } from './checks/index-bloat.js';
@@ -48,14 +44,12 @@ import { settings } from './checks/settings.js';
 import { slots } from './checks/slots.js';
 import { standbys } from './checks/standbys.js';
 import { wraparound } from './checks/wraparound.js';
-import { relationSpace } from './series/space.js';
 import { explain } from './tools/explain.js';
 import { suggestedIndexes } from './tools/suggested-indexes.js';
 
 export const CHECKS = {
   connectionDetail,
   connections,
-  databaseActivity,
   horizon,
   identity,
   indexBloat,
@@ -81,26 +75,9 @@ export const ACTIONS = {
   analyzeTables, kill: killBackend, killLongRunning, resetQueryStats, resetStats,
 } as const;
 
-/** The over-time readers; see `Series` in types.ts. */
-export const SERIES = {
-  relationSpace,
-} as const;
-type SeriesId = keyof typeof SERIES;
-
 /** Questions the operator asks; see `Tool` in types.ts. */
 export const TOOLS = { explain, suggestedIndexes } as const;
 type ToolId = keyof typeof TOOLS;
-
-/**
- * Scheduled work that is neither a check nor an action. Both entries point
- * at one function: pgops captures query and space stats in one pass because
- * they share a transaction and a lock.
- */
-export const JOBS = {
-  captureQueryStats: captureOnce,
-  captureSpaceStats: captureOnce,
-} as const;
-type JobId = keyof typeof JOBS;
 
 type ActionId = keyof typeof ACTIONS;
 
@@ -120,9 +97,7 @@ type ParityEntry = {
 } & (
   | { check: CheckId }
   | { action: ActionId }
-  | { series: SeriesId }
   | { tool: ToolId }
-  | { job: JobId }
   | { platform: string }
   | { declined: string }
 );
@@ -210,7 +185,7 @@ export const PGHERO: Record<number, ParityEntry> = {
   20: { name: 'reset_query_stats', source: 'methods/query_stats.rb',
     action: 'resetQueryStats' },
   21: { name: 'capture_query_stats', source: 'methods/query_stats.rb',
-    job: 'captureQueryStats' },
+    platform: 'packages/checks/src/capture.ts: captureOnce, every five minutes, query and space statistics in one pass' },
 
   // indexes — methods/indexes.rb
   // Each a column of a captured read. Per index, the `indexes` read: its hit
@@ -238,10 +213,9 @@ export const PGHERO: Record<number, ParityEntry> = {
     check: 'indexes' },
   31: { name: 'reset_stats', source: 'methods/indexes.rb',
     action: 'resetStats' },
-  // `statsResetAt` on the database's own counters; the captured reads carry
-  // the same moment as `statsReset`.
+  // `statsReset` on the `tables` read, from `pg_stat_database`.
   32: { name: 'last_stats_reset_time', source: 'methods/indexes.rb',
-    check: 'databaseActivity' },
+    check: 'tables' },
 
   // tables — methods/tables.rb
   // Columns of the `tables` read: `hitRate`, and `seqScans` with `idxScans`
@@ -266,11 +240,11 @@ export const PGHERO: Record<number, ParityEntry> = {
   39: { name: 'table_sizes', source: 'methods/space.rb',
     check: 'tables' },
   40: { name: 'space_growth', source: 'methods/space.rb',
-    platform: 'apps/web/app/db/[name]/tables/[relation]: the size panel on the clock, from relationSpace' },
+    platform: 'apps/web/app/db/[name]/tables/[relation]: the size panel on the clock, from readRelationSpace' },
   41: { name: 'relation_space_stats', source: 'methods/space.rb',
-    series: 'relationSpace' },
+    platform: 'packages/checks/src/store/read.ts: readRelationSpace, the size panel on the table page' },
   42: { name: 'capture_space_stats', source: 'methods/space.rb',
-    job: 'captureSpaceStats' },
+    platform: 'packages/checks/src/capture.ts: captureOnce, every five minutes, query and space statistics in one pass' },
 
   // maintenance — methods/maintenance.rb
   // #43 is the `tables` read's rows, dead rows and last vacuum and analyze,

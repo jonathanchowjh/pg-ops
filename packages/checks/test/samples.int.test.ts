@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { migrate } from '../src/store/schema.js';
+import { migrate } from '../src/store/migrate.js';
 import { bucketFilled, readCoverage, readEvents, readLoad, readSamples, readStatements } from '../src/store/read.js';
 import { recordEvent, recordSample } from '../src/store/write.js';
 import type { Sample, SampleSession } from '../src/samples.js';

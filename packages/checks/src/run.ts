@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 import type {
-  Check, CheckContext, CheckResult, FailureReason, Requirement, Series, SeriesResult, SqlQuery, TimeRange, Tool,
+  Check, CheckContext, CheckResult, FailureReason, Requirement, SqlQuery, Tool,
 } from './types.js';
 
 /** Postgres SQLSTATEs we can turn into an actionable remedy. */
@@ -25,9 +25,6 @@ function remedyFor(reason: FailureReason, requires: Requirement[] = []): string 
   if (reason === 'privilege') {
     const role = requires.find((r) => r.kind === 'role');
     return role ? grantRemedy(role.name) : undefined;
-  }
-  if (reason === 'missing-store') {
-    return 'Set PGOPS_STORE_URL to a Postgres database pgops may create its own schema in.';
   }
   return undefined;
 }
@@ -213,49 +210,6 @@ export async function runCheck<Row, Data, Opts>(
   } catch (err) {
     const reason = classify(err, check.requires);
     return { ok: false, reason, message: messageOf(err), remedy: remedyFor(reason, check.requires) };
-  }
-}
-
-/**
- * Run one series. Never rejects, same contract as runCheck, and the same two
- * overloads for arity.
- *
- * The store check comes first and has its own reason: `missing-store` renders
- * as "set this environment variable", where `error` would read as the
- * database being unwell.
- */
-export async function runSeries<P>(
-  ctx: CheckContext,
-  series: Series<P, void>,
-  range: TimeRange,
-): Promise<SeriesResult<P>>;
-export async function runSeries<P, Opts>(
-  ctx: CheckContext,
-  series: Series<P, Opts>,
-  range: TimeRange,
-  opts: Opts,
-): Promise<SeriesResult<P>>;
-export async function runSeries<P, Opts>(
-  ctx: CheckContext,
-  series: Series<P, Opts>,
-  range: TimeRange,
-  opts?: Opts,
-): Promise<SeriesResult<P>> {
-  if (!ctx.store) {
-    return {
-      ok: false,
-      reason: 'missing-store',
-      message: `${series.id} needs the pgops store, which is not configured.`,
-      remedy: remedyFor('missing-store'),
-    };
-  }
-  const tooOld = belowFloor(ctx, series);
-  if (tooOld) return tooOld;
-  const readAt = Date.now();
-  try {
-    return { ok: true, points: await series.read(ctx, range, opts as Opts), readAt };
-  } catch (err) {
-    return { ok: false, reason: 'error', message: messageOf(err) };
   }
 }
 

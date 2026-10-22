@@ -12,8 +12,6 @@ export interface TickState {
   startedAt: number | null;
 }
 
-type TickDecision = { act: 'skip' } | { act: 'refresh' };
-
 /**
  * How far the reader may scroll before the poll holds. Not zero: a resting
  * trackpad reports one or two pixels of travel that nobody intended.
@@ -34,38 +32,11 @@ export function shouldHold(scrollY: number): boolean {
 }
 
 /**
- * The poll's three properties:
- *
- *  1. A tick that lands while one is in flight is skipped, not queued — so the
- *     tool cannot add load to the database it is diagnosing.
- *  2. Freshness is stamped at request start, not at response. A 5s fetch reads
- *     "updated 5s ago" the moment it lands, which is true.
- *  3. An operator-requested refresh is re-armed into a single slot, so the
- *     refresh fired after an action cannot be swallowed by one that started
- *     before it.
+ * When a refresh settles, a tick that was skipped during it fires exactly one
+ * follow-up and the flag clears. N requests during one flight collapse to a
+ * single re-arm, because `requested` is a flag and not a counter.
  */
-export function nextTick(state: TickState, _now: number): TickDecision {
-  if (state.inFlight) return { act: 'skip' };
-  return { act: 'refresh' };
-}
-
-/**
- * The state transition for a tick, beside `nextTick`'s decision. Skipping
- * records the missed tick (property 3's first half) and starting stamps
- * `startedAt` at the beginning of the work (property 2).
- */
-export function onTick(state: TickState, now: number): TickState {
-  if (state.inFlight) return { ...state, requested: true };
-  return { inFlight: true, requested: false, startedAt: now };
-}
-
-/**
- * Property 3's second half: when a refresh settles, a tick that was skipped
- * during it fires exactly one follow-up, and the flag clears. N requests
- * during one flight collapse to a single re-arm, because `requested` is a
- * flag and not a counter.
- */
-export function onSettle(state: TickState, _now: number): { state: TickState; act: 'refresh' | 'idle' } {
+export function onSettle(state: TickState): { state: TickState; act: 'refresh' | 'idle' } {
   if (state.requested) {
     return { state: { ...state, inFlight: false, requested: false }, act: 'refresh' };
   }
@@ -77,6 +48,13 @@ export function onSettle(state: TickState, _now: number): { state: TickState; ac
  * together, with `inFlight` supplied by the caller rather than tracked here.
  * That makes the loop the component runs the same loop refresh.test.ts
  * drives, which holds peak concurrency at 1 under a slow server render.
+ *
+ * A tick that lands mid-flight is skipped, not queued, so the tool cannot add
+ * load to the database it is diagnosing; it is remembered, so `onSettle`
+ * re-arms one follow-up and a refresh requested after an action cannot be
+ * swallowed by one that started before it. Freshness is stamped at request
+ * start, not at response: a 5s fetch reads "updated 5s ago" the moment it
+ * lands, which is true.
  */
 export function tick(
   state: TickState,
@@ -88,15 +66,15 @@ export function tick(
   // here would fire a refresh — and move the page — the moment the reader
   // scrolled back to the top.
   if (holding) return { state, act: 'hold' };
-  const before: TickState = { ...state, inFlight };
-  return { state: onTick(before, now), act: nextTick(before, now).act };
+  if (inFlight) return { state: { ...state, inFlight: true, requested: true }, act: 'skip' };
+  return { state: { inFlight: true, requested: false, startedAt: now }, act: 'refresh' };
 }
 
 /**
  * The freshness readout, the poll, and the Refresh button. The button goes
  * through the same `tick` the interval does rather than calling
  * `router.refresh()` directly, so a manual press cannot add the concurrent
- * load property 1 forbids.
+ * load a skipped tick exists to prevent.
  */
 export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
   const router = useRouter();
@@ -132,7 +110,7 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
   }, []);
 
   // One path for the interval and the operator. Both go through `tick`, so
-  // both obey property 1 and both record property 3's re-arm on a collision.
+  // both skip a collision and both record its re-arm.
   const request = useCallback((force = false) => {
     const hold = pinnedNow.current === null ? shouldHold(scrollY.current) : pinnedNow.current;
     const t = tick(state.current, Date.now(), pending.current, !force && hold);
@@ -164,12 +142,12 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
   }, [intervalMs, request]);
 
   // The falling edge of `isPending` is the flight settling: a tick skipped
-  // during the flight fires exactly one follow-up (property 3).
+  // during the flight fires exactly one follow-up.
   useEffect(() => {
     const was = pending.current;
     pending.current = isPending;
     if (!was || isPending) return;
-    const settled = onSettle({ ...state.current, inFlight: false }, Date.now());
+    const settled = onSettle({ ...state.current, inFlight: false });
     state.current = settled.state;
     if (settled.act !== 'refresh') return;
     setStartedAt(Date.now());
@@ -177,7 +155,7 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
     startTransition(() => { router.refresh(); });
   }, [isPending, router]);
 
-  // Age is measured from request start, not arrival (property 2), so it keeps
+  // Age is measured from request start, not arrival, so it keeps
   // climbing during a flight.
   const age = startedAt === null ? null : Math.max(0, Math.round((now - startedAt) / 1000));
 
@@ -187,7 +165,7 @@ export function Refresh({ intervalMs = 5_000 }: { intervalMs?: number }) {
       // Forces through a hold.
       onClick={() => request(true)}
       // Not disabled while pending: a press during a flight re-arms one
-      // follow-up (property 3) rather than being dropped.
+      // follow-up rather than being dropped.
       className="rounded border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
     >
       Refresh

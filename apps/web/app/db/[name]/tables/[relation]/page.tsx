@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { SERIES, readHourly, readTableHours, tableFlags, type TableHour } from '@pgops/checks';
+import { readHourly, readRelationSpace, readTableHours, tableFlags, type TableHour } from '@pgops/checks';
 import { CatalogNote, IndexRow, List, SequenceRow, Tag } from '@/components/catalog-rows';
 import { Clock, Time } from '@/components/clock';
 import { ConfirmAction } from '@/components/actions';
@@ -10,7 +10,7 @@ import { Refresh } from '@/components/refresh';
 import { redactTree } from '@/components/sql';
 import { RowsView } from '@/components/tree-view';
 import { catalogFor, scansFor } from '@/lib/catalog';
-import { identityFor, readStore, runSeriesFor } from '@/lib/check';
+import { identityFor, readStore } from '@/lib/check';
 import { DAY_MS, EVENT_NAMES, HOUR_MS, keepQuery, type Search } from '@/lib/clock';
 import { actionsAllowed } from '@/lib/config';
 import { formatBytes, plural } from '@/lib/format';
@@ -58,7 +58,7 @@ export default async function TablePage({ params, searchParams }: {
   const [known, hours, sizes, rhythm, scans] = await Promise.all([
     shapesFor(name, grid),
     readStore((store) => readTableHours(store, name, relation, new Date(grid.from), to)),
-    runSeriesFor(name, SERIES.relationSpace, { from: new Date(grid.from - SIZE_SPAN_MS), to }, { databaseName: name, relation, maxPoints: 500 }),
+    readStore((store) => readRelationSpace(store, name, relation, new Date(grid.from - SIZE_SPAN_MS), to, { maxPoints: 500 })),
     readStore((store) => readHourly(store, name, 't', relation, new Date(grid.to - 8 * DAY_MS), to)),
     scansFor(name, grid),
   ]);
@@ -67,7 +67,7 @@ export default async function TablePage({ params, searchParams }: {
   const load: Series[] = loadOf(tree.tables.find((t) => t.name === relation)?.strip, tree.seen, grid.columns);
   const hourly = (pick: (h: TableHour) => number): (number | null)[] =>
     onColumns(grid, (hours.ok ? hours.value : []).map((h) => ({ at: h.at, value: pick(h) })), HOUR_MS);
-  const size = onColumns(grid, (sizes.ok ? sizes.points : []).map((p) => ({ at: p.capturedAt.getTime(), value: p.sizeBytes })), SIZE_SPAN_MS);
+  const size = onColumns(grid, (sizes.ok ? sizes.value : []).map((p) => ({ at: p.capturedAt.getTime(), value: p.sizeBytes })), SIZE_SPAN_MS);
   const events = clock.stored.events.filter((e) => e.at >= grid.from && e.at <= grid.to);
   const marks = (vacuums: boolean) => events
     .filter((e) => (e.kind === 'vacuum') === vacuums && EVENT_NAMES[e.kind] !== undefined)

@@ -61,7 +61,6 @@ const num = (s: string | null) => (s == null ? null : Number(s));
 export const standbys: Check<StandbyRow, StandbysData> = {
   id: 'standbys',
   home: 'server',
-  title: 'Standbys',
   class: 'live',
   sql: SQL,
   /**
@@ -84,18 +83,11 @@ export const standbys: Check<StandbyRow, StandbysData> = {
   }),
   /** Unlike `replicationLag`, which follows pgHero and has no threshold. */
   thresholds: [
-    { level: 'warn', value: 30, unit: 'seconds',
+    { level: 'warn', value: 30,
       because: 'reads routed to this standby are answering with data half a minute old, '
-             + 'and a failover to it would lose that much',
-      remedy: 'Work out which half is starved: replay lag climbing while flush lag stays near '
-            + 'zero is the standby applying slowly, both climbing together is the link between '
-            + 'them. Replay is single-threaded and waits on its own IO and on conflicting '
-            + 'queries.' },
-    { level: 'critical', value: 300, unit: 'seconds',
+             + 'and a failover to it would lose that much' },
+    { level: 'critical', value: 300,
       because: 'five minutes behind is past most applications\' tolerance for stale reads, and '
-             + 'means a failover now would lose five minutes of commits',
-      remedy: 'Take the standby out of the read pool until it catches up. If replay is blocked '
-            + 'by a long query on the standby, cancel that query or raise '
-            + 'max_standby_streaming_delay knowingly.' },
+             + 'means a failover now would lose five minutes of commits' },
   ],
 };

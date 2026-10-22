@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 /**
  * The pages under a database, as the sidebar lists them.
  *
- * `polls` is declared, not inferred: pages.test.ts reads each page off disk
+ * `polls` is declared, not inferred: guards.test.ts ("the sidebar's pages") reads each page off disk
  * and fails if one polls while saying it does not, or the reverse. Both
  * mistakes are silent otherwise: an incident page that stops updating, or a
  * catalog scan on a five-second timer.

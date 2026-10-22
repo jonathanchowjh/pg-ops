@@ -182,6 +182,12 @@ describe('the rows', () => {
     expect(view.container.querySelectorAll('[data-tie]')).toHaveLength(2);
   });
 
+  it('lays the ties overlay over exactly the rows, 34 px each', async () => {
+    await mount(tree());
+    const overlay = view.container.querySelector('[data-tie]')!.parentElement!;
+    expect(overlay.style.height).toBe(`${rowsOf().length * 34}px`);
+  });
+
   it('puts Terminate on the root\'s row and never on a waiter\'s', async () => {
     await mount(tree());
     expect(terminates(view.container.querySelector('#pid-1')!)).toHaveLength(1);

@@ -65,7 +65,6 @@ export function groupSuggestions(byQuery: readonly QueryAdvice[]): SuggestedInde
  */
 export const suggestedIndexes: Tool<SuggestedIndexOpts, SuggestedIndexes> = {
   id: 'suggestedIndexes',
-  title: 'Suggested indexes',
   requires: [{ kind: 'extension', name: 'pg_stat_statements' }],
   run: async (ctx, opts) => {
     const o = { ...SUGGESTION_DEFAULTS, ...opts };

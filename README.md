@@ -198,7 +198,7 @@ rule, or Identity-Aware Proxy.
 ## Parity with pgHero
 
 pgHero is the benchmark. [registry.ts](packages/checks/src/registry.ts) maps
-each of pgHero 4.0.1's 65 capabilities onto a shipped check, action, series
+each of pgHero 4.0.1's 65 capabilities onto a shipped check, action
 or tool, naming its pgHero source file. A test reads this README and fails if
 these numbers drift from what the registry computes.
 

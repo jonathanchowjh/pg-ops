@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { guardClient } from '../run.js';
 import { chainEvents, type EventKind, type Sample, type StatementInfo } from '../samples.js';
-import type { CounterPoint } from '../series/query-stats.js';
+import type { CounterPoint } from '../deltas.js';
 
 /**
  * A fixed key for the migration lock. Arbitrary, but it must never change:

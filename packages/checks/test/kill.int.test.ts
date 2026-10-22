@@ -2,8 +2,8 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import pg from 'pg';
-import { killBackend, killLongRunning } from '../src/actions/kill.js';
-import { defaultAuditPath } from '../src/actions/audit.js';
+import { killBackend, killLongRunning } from '../src/actions.js';
+import { defaultAuditPath } from '../src/audit.js';
 import { withPostgres } from './harness.js';
 
 /**

@@ -1,21 +1,15 @@
 import type { Pool } from 'pg';
 
 /**
- * A threshold is data, not a constant in a comparison: a number, its unit,
- * and the reason it matters. The tree judges against it, over time
+ * A threshold is data, not a constant in a comparison: a number and the
+ * reason it matters. The tree judges against it, over time
  * (apps/web/lib/samples.ts, MARKS); a check reports and never judges.
  */
 export interface Threshold {
   level: 'warn' | 'critical';
   value: number;
-  unit: 'seconds' | 'transactions' | 'bytes' | 'percent' | 'count';
   /** The sentence justifying this number. Must not be empty. */
   because: string;
-  /**
-   * What the operator should do once this threshold is crossed. Optional: a
-   * threshold with no single safe action must not invent one.
-   */
-  remedy?: string;
 }
 
 export type Requirement =
@@ -31,7 +25,6 @@ export const HOMES: readonly Home[] = ['database', 'table', 'query', 'session', 
 
 export interface Check<Row, Data, Opts = void> {
   id: string;
-  title: string;
   /**
    * The node this check's finding belongs to: its one placement. Required,
    * so a check cannot be built with no page to render on.
@@ -81,20 +74,6 @@ export interface CheckContext {
   serverVersion: number;
 }
 
-export interface TimeRange { from: Date; to: Date }
-
-/**
- * A check answers "what is true now" with one reading. A series answers
- * "how has this moved" with many points. They share
- * pools, requirements and the failure envelope, and nothing else.
- */
-export interface Series<Point, Opts = void> {
-  id: string;
-  title: string;
-  read: (ctx: CheckContext, range: TimeRange, opts: Opts) => Promise<Point[]>;
-  requires?: Requirement[];
-}
-
 /**
  * A tool answers a question the operator asks ("how would this statement
  * run?"), where a check answers one pgops asks of every database on every
@@ -103,14 +82,9 @@ export interface Series<Point, Opts = void> {
  */
 export interface Tool<Input, Data> {
   id: string;
-  title: string;
   run: (ctx: CheckContext, input: Input) => Promise<Data>;
   requires?: Requirement[];
 }
-
-export type SeriesResult<P> =
-  | { ok: true; points: P[]; readAt: number }
-  | { ok: false; reason: FailureReason; message: string; remedy?: string };
 
 /** What every action records about who did it and why. */
 export interface ActionMeta {

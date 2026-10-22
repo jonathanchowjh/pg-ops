@@ -1,14 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CheckContext } from '../src/types.js';
 
-const written: unknown[] = [];
-vi.mock('../src/actions/audit.js', () => ({
-  writeAudit: vi.fn(async (record: unknown) => {
-    written.push(record);
-  }),
+const written: Record<string, unknown>[] = [];
+vi.mock('node:fs/promises', () => ({
+  mkdir: async () => undefined,
+  appendFile: async (_path: string, line: string) => {
+    written.push(JSON.parse(line) as Record<string, unknown>);
+  },
 }));
+vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
-import { killBackend } from '../src/actions/kill.js';
+import { killBackend } from '../src/actions.js';
 
 function fakeCtx(): CheckContext {
   return {
@@ -35,7 +37,7 @@ describe('killBackend — the audited actor', () => {
     expect(written[0]).toMatchObject({ user: 'alice@console.internal', action: 'kill' });
   });
 
-  it('leaves `user` for writeAudit to derive when no actor is given', async () => {
+  it('derives `user` in writeAudit when no actor is given', async () => {
     written.length = 0;
     await killBackend(
       fakeCtx(),
@@ -43,11 +45,11 @@ describe('killBackend — the audited actor', () => {
       { subcommand: 'sessions', reason: 'test' },
     );
     expect(written).toHaveLength(1);
-    expect(written[0]).not.toHaveProperty('user');
+    expect(written[0]?.user).toMatch(/@/);
   });
 
   /** `'' ?? currentActor()` keeps the empty string, which would record `user: ''`. */
-  it('leaves `user` for writeAudit to derive when actor is the empty string', async () => {
+  it('derives `user` in writeAudit when actor is the empty string', async () => {
     written.length = 0;
     await killBackend(
       fakeCtx(),
@@ -55,6 +57,6 @@ describe('killBackend — the audited actor', () => {
       { subcommand: 'sessions', reason: 'test', actor: '' },
     );
     expect(written).toHaveLength(1);
-    expect(written[0]).not.toHaveProperty('user');
+    expect(written[0]?.user).toMatch(/@/);
   });
 });

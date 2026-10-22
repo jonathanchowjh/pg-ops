@@ -74,9 +74,3 @@ export function capped(rows: readonly { total: number }[]): { total: number; tru
   const total = rows[0]?.total ?? 0;
   return { total, truncated: total > rows.length };
 }
-
-/** "1 unused index", "3 unused indexes". */
-export function counted(n: number, singular: string, plural = `${singular}s`): string {
-  return `${n} ${n === 1 ? singular : plural}`;
-}
-

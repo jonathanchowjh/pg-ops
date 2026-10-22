@@ -8,8 +8,9 @@ import { eventFor } from '@/lib/samples';
  *
  * pg_stat_reset() clears table, index and function statistics for this
  * database — everything the `tables` and `indexes` reads count.
- * `databaseActivity` reports it afterwards, and any captured interval
- * spanning it is dropped.
+ * The next health minute carries the new reset time, which the Server
+ * head shows; the catalog has it from the next capture. Any captured
+ * interval spanning it is dropped.
  */
 export async function POST(req: Request, { params }: { params: Promise<{ name: string }> }) {
   await connection();

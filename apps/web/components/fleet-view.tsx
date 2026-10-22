@@ -1,8 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { Axis, ClockLines, Track, useClock } from '@/components/clock';
-import { ClassKey, StripSvg, Unseen, reading } from '@/components/tree-rows';
+import { Track, useClock } from '@/components/clock';
+import { Frame } from '@/components/frame';
+import { END, GO, ROW, StripSvg, TAG, Unseen, reading } from '@/components/tree-rows';
 import { clockTime, columnAt, downSince, fractionAt } from '@/lib/clock';
 import { readingAt } from '@/lib/rows';
 import type { FleetRow } from '@/lib/samples';
@@ -14,10 +15,6 @@ const TAG_NAMES: Record<'chain' | 'idle' | HealthKind, string> = {
   chain: 'lock chain', idle: 'idle in transaction', connections: 'connections', replication: 'replication',
   xid: 'transaction ID age', deadlock: 'deadlock',
 };
-const ROW = 'grid h-[34px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t';
-const GO = 'group -mx-2.5 flex min-w-0 flex-1 items-center gap-[7px] self-stretch px-2.5 hover:bg-muted hover:text-foreground';
-const TAG = 'flex-none rounded-[3px] px-1.5 text-[11px]/4 text-warning-ink shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--warning-ink)_35%,transparent)] max-md:hidden';
-const END = 'ml-auto flex flex-none items-center gap-2 font-mono text-xs text-foreground tabular-nums';
 
 /**
  * The fleet: one row per database on the clock. Each row is the database's
@@ -28,23 +25,15 @@ const END = 'ml-auto flex flex-none items-center gap-2 font-mono text-xs text-fo
  */
 export function FleetView({ rows }: { rows: readonly FleetRow[] }) {
   const clock = useClock();
-  const first = rows[0]?.tree;
+  // The page shows no fleet with no database in it.
+  const first = rows[0]!.tree;
   const scale = roundUp(Math.max(0, ...rows.map((r) => Math.max(0, ...r.tree.band.map((c) => c.reduce((a, b) => a + b, 0))))) * 1.02);
   return (
-    <div
+    <Frame
       role="table"
-      aria-label="Every database"
-      className="relative mb-4 overflow-hidden rounded-md border bg-card select-none [--lab:max(240px,40%)] max-md:[--lab:max(132px,42%)]"
-    >
-      {/* No band stands above these rows, so this row is their key. */}
-      <div className="grid min-h-[26px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center text-xs text-muted-foreground">
-        <div className="flex items-center px-2.5">
-          <span suppressHydrationWarning className="max-md:hidden">at {clockTime(clock.at, clock.offset(clock.at))}</span>
-          <span className="ml-auto">sessions not idle</span>
-        </div>
-        <ClassKey />
-      </div>
-      {rows.map(({ name, tree, transitions }) => {
+      label="Every database"
+      keyEnd="sessions not idle"
+      rows={rows.map(({ name, tree, transitions }) => {
         const col = columnAt(tree, clock.at);
         const unseen = unseenAt(tree.seen, col);
         const down = downSince(transitions, clock.at);
@@ -76,13 +65,9 @@ export function FleetView({ rows }: { rows: readonly FleetRow[] }) {
           </div>
         );
       })}
-      {first === undefined ? null : (
-        <div className="grid grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t">
-          <div className="px-2.5 text-right text-xs text-muted-foreground">each row 0 – {scale} · sampled every 15 s</div>
-          <Axis grid={first} offset={clock.offset} className="border-l" />
-        </div>
-      )}
-      <ClockLines className="right-0 left-(--lab)" />
-    </div>
+      rowCount={rows.length}
+      foot={`each row 0 – ${scale} · sampled every 15 s`}
+      grid={first}
+    />
   );
 }

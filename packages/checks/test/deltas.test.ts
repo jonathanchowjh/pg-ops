@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deltas, type CounterPoint } from '../src/series/query-stats.js';
-import { relationSpace } from '../src/series/space.js';
-import { runSeries } from '../src/run.js';
-import type { CheckContext } from '../src/types.js';
+import { deltas, type CounterPoint } from '../src/deltas.js';
 
 const at = (min: number) => new Date(Date.UTC(2026, 0, 1, 0, min));
 
@@ -59,24 +56,6 @@ describe('deltas', () => {
   it('sorts by capturedAt before differencing', () => {
     const out = deltas([point(5, 130), point(0, 100)]);
     expect(out[0]!.calls).toBe(30);
-  });
-});
-
-/**
- * `npm run typecheck:test`, not vitest, is what checks this: the body never
- * runs. If the call below ever compiles, the `@ts-expect-error` becomes an
- * unused directive and tsc fails on that line.
- */
-describe('runSeries’ arity is part of its type (I4)', () => {
-  it('rejects an options-bearing series called without its options, at compile time', () => {
-    const neverCalled = async (ctx: CheckContext): Promise<void> => {
-      const range = { from: new Date(0), to: new Date() };
-      // @ts-expect-error — relationSpace declares its options.
-      await runSeries(ctx, relationSpace, range);
-      // ...and supplying them still does.
-      await runSeries(ctx, relationSpace, range, { databaseName: 'prod', relation: 'public.t' });
-    };
-    expect(typeof neverCalled).toBe('function');
   });
 });
 

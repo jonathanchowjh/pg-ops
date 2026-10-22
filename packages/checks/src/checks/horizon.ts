@@ -69,7 +69,6 @@ LIMIT 10`;
 export const horizon: Check<HorizonRow, HorizonData> = {
   id: 'horizon',
   home: 'server',
-  title: 'Oldest snapshot',
   class: 'live',
   sql: SQL,
   map: (rows) => ({

@@ -7,14 +7,14 @@ import { withPostgres } from './harness.js';
 const { Pool } = pg;
 
 const slow: Check<{ ok: number }, number> = {
-  id: 'slow', home: 'database', title: 'Slow', class: 'captured',
+  id: 'slow', home: 'database', class: 'captured',
   timeoutMs: 250,
   sql: 'SELECT 1 AS ok FROM pg_sleep(3)',
   map: (rows) => rows.length,
 };
 
 const fast: Check<{ ok: number }, number> = {
-  id: 'fast', home: 'database', title: 'Fast', class: 'captured',
+  id: 'fast', home: 'database', class: 'captured',
   timeoutMs: 5_000,
   sql: 'SELECT 1 AS ok',
   map: (rows) => rows.length,
@@ -71,7 +71,7 @@ describe('timeoutMs', () => {
       try {
         const marker = 'timeout-kill-marker';
         const doomed: Check<{ ok: number }, number> = {
-          id: 'doomed', home: 'database', title: 'Doomed', class: 'captured',
+          id: 'doomed', home: 'database', class: 'captured',
           // Generous: a short timeout would race the kill below.
           timeoutMs: 30_000,
           sql: `SELECT 1 AS ok FROM pg_sleep(5) /* ${marker} */`,

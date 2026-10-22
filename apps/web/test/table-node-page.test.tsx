@@ -13,10 +13,9 @@ const state = vi.hoisted(() => ({
   sessions: [] as unknown[],
   catalog: null as unknown,
   hours: { ok: false, kind: 'off', message: 'History is off.' } as unknown,
-  /** What the store reads after the hours answer, in order: the rhythm. */
+  /** What the store reads after the hours answer, in order: the sizes, then the rhythm. */
   later: [] as unknown[],
   read: 0,
-  sizes: { ok: false, reason: 'missing-store', message: 'no store' } as unknown,
   scans: { ok: false, kind: 'off', message: 'History is off.' } as unknown,
   asked: [] as (string | undefined)[],
 }));
@@ -25,8 +24,7 @@ vi.mock('@/lib/check', () => ({
     ? { ok: true, measuredAt: 0, data: { replica: state.replica } }
     : { ok: true, measuredAt: 0, data: { sessions: state.sessions, truncated: false, hidden: 0 } })),
   identityFor: vi.fn(async () => ({ ok: true, measuredAt: 0, data: { replica: state.replica } })),
-  runSeriesFor: vi.fn(async () => state.sizes),
-  // The hours are read first, then the rhythm.
+  // The hours are read first, then the sizes, then the rhythm.
   readStore: vi.fn(async () => {
     const r = state.later.length > 0 && state.read > 0 ? state.later.shift() : state.hours;
     state.read += 1;
@@ -79,7 +77,7 @@ beforeEach(() => {
   forget();
   Object.assign(state, {
     sessions: [], catalog: catalog(), hours: { ok: false, kind: 'off', message: 'History is off.' }, later: [], read: 0,
-    sizes: { ok: false, reason: 'missing-store', message: 'no store' }, scans: { ok: false, kind: 'off', message: 'History is off.' }, asked: [],
+    scans: { ok: false, kind: 'off', message: 'History is off.' }, asked: [],
   });
   nav.notFound.mockClear();
   vi.stubEnv('PGOPS_ALLOW_ACTIONS', 'true');
@@ -156,11 +154,23 @@ describe('/tables/[relation]', () => {
 
   it('says so in one line when its size or its rhythm could not be read, rather than leaving a gap', async () => {
     state.hours = { ok: true, value: [] };
-    state.sizes = { ok: false, reason: 'error', message: 'store timeout' };
-    state.later = [{ ok: false, kind: 'error', message: 'store timeout' }];
+    // Two messages, so a size and a rhythm read swapped in the page's Promise.all fail here.
+    state.later = [{ ok: false, kind: 'error', message: 'sizes timed out' }, { ok: false, kind: 'error', message: 'rhythm timed out' }];
     await show();
-    expect(view.text()).toContain('Its size could not be read: store timeout');
-    expect(view.text()).toContain('Its rhythm could not be read: store timeout');
+    const said = [...view.container.querySelectorAll('p')].map((p) => p.textContent);
+    expect(said).toContain('Its size could not be read: sizes timed out');
+    expect(said).toContain('Its rhythm could not be read: rhythm timed out');
+  });
+
+  it('draws "nothing kept" for a size the store holds no capture of', async () => {
+    state.hours = { ok: true, value: [] };
+    state.later = [{ ok: true, value: [] }, { ok: true, value: [] }];
+    await show();
+    // Empty hours leave the other panels empty too, so look at the Size panel alone.
+    const panel = [...view.container.querySelectorAll('section')].find((x) => x.querySelector('h3')?.textContent?.startsWith('Size'));
+    expect(panel).toBeDefined();
+    expect(panel!.textContent).toContain('nothing kept for this window');
+    expect(view.text()).not.toContain('Its size could not be read');
   });
 
   it('says the store could not be read when it falls back to scans since the reset', async () => {

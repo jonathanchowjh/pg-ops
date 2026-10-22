@@ -1,9 +1,6 @@
 import { Pool, type PoolClient } from 'pg';
 import { describe, expect, it } from 'vitest';
-import { CURRENT_VERSION, migrate } from '../src/store/schema.js';
-import { SQL as M003 } from '../src/store/migrations/003-check-results.js';
-import { SQL as M007 } from '../src/store/migrations/007-captured.js';
-import { SQL as M008 } from '../src/store/migrations/008-drop-check-results.js';
+import { CURRENT_VERSION, MIGRATIONS, migrate } from '../src/store/migrate.js';
 import { releaseCaptureLock, tryCaptureLock, withAdvisoryLock } from '../src/store/lock.js';
 import {
   HEALTH_COLUMNS, HEALTH_LOCK_NS, RETENTION, healthIsFresh, insertHealth, insertQueryLoad, insertQueryStats, insertSpaceStats, prune,
@@ -130,7 +127,7 @@ describe('migrate, forward from an older store', () => {
       const before = await shape();
       expect(before.filter((d) => / PRIMARY KEY /.test(d))).toHaveLength(4);
 
-      await pool.query(M007);
+      await pool.query(MIGRATIONS[6]!);
       expect(await shape()).toEqual(before);
       const { rows } = await pool.query<{ n: string }>('SELECT count(*)::text AS n FROM pgops.events');
       expect(rows[0]!.n).toBe('1');
@@ -141,7 +138,7 @@ describe('migrate, forward from an older store', () => {
     await withPostgres(async (_ctx, pool) => {
       await migrate(pool);
       // Rewind to a version-7 store in use: the table as 003 made it, a row in it.
-      await pool.query(M003);
+      await pool.query(MIGRATIONS[2]!);
       await pool.query('UPDATE pgops.schema_version SET version = 7');
       await pool.query("INSERT INTO pgops.databases (name) VALUES ('prod')");
       await pool.query(
@@ -157,7 +154,7 @@ describe('migrate, forward from an older store', () => {
       const { rows } = await pool.query<{ n: string }>('SELECT count(*)::text AS n FROM pgops.databases');
       expect(rows[0]!.n).toBe('1');
 
-      await pool.query(M008);
+      await pool.query(MIGRATIONS[7]!);
       expect(await present()).toBeNull();
     });
   });

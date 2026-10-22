@@ -113,7 +113,6 @@ describe('the sequences contract', () => {
   it("adopts pgHero's 90 percent, measured against the column type", () => {
     const warn = sequences.thresholds!.find((x) => x.level === 'warn')!;
     expect(warn.value).toBe(90);
-    expect(warn.unit).toBe('percent');
     expect(warn.because).toContain('sequence_danger');
     expect(warn.because).toContain('column type');
   });

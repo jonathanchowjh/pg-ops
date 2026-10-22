@@ -1,5 +1,5 @@
 import type { PoolClient, Pool } from 'pg';
-import type { CounterPoint } from '../series/query-stats.js';
+import type { CounterPoint } from '../deltas.js';
 import type { SessionClass } from '../checks/sessions.js';
 import { BUCKET_MS, type EventKind, type LoadCell, type Sample, type StatementInfo, type StoredEvent } from '../samples.js';
 import { BUCKET, type CapturedRead } from './write.js';

@@ -56,7 +56,6 @@ function formatVersion(num: string | undefined): string | null {
 export const identity: Check<IdentityRow, IdentityData> = {
   id: 'identity',
   home: 'server',
-  title: 'Connection identity',
   class: 'live',
   sql: SQL,
   map: (rows) => {

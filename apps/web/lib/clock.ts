@@ -6,7 +6,7 @@
  *
  * `BUCKET_MS` and `CLASSES` are copies of the checks package's, which a
  * client component cannot import without pulling `pg` into the browser.
- * classes.test.ts holds each pair equal.
+ * guards.test.ts ("the class list") holds each pair equal.
  */
 
 export const BUCKET_MS = 15_000;

@@ -1,17 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { nextTick, onSettle, onTick, shouldHold, tick, type TickState } from '../components/refresh.js';
+import { onSettle, shouldHold, tick, type TickState } from '../components/refresh.js';
 
-describe('nextTick', () => {
-  /**
-   * Skipped, not queued: a queue would let a slow database accumulate
-   * refreshes and then receive a burst of them.
-   */
-  it('skips a tick that lands while one is already in flight', () => {
-    expect(nextTick({ inFlight: true, requested: false, startedAt: 1000 }, 2000)).toEqual({ act: 'skip' });
+describe('tick — the decision and the state transition', () => {
+  const idle: TickState = { inFlight: false, requested: false, startedAt: null };
+
+  /** Skipped, not queued: a queue would let a slow database accumulate refreshes and then receive a burst of them. */
+  it('skips a tick that lands while one is already in flight, remembers it, and leaves startedAt alone', () => {
+    const busy = { inFlight: true, requested: false, startedAt: 1000 };
+    expect(tick(busy, 2000, true)).toEqual({ state: { ...busy, requested: true }, act: 'skip' });
+    expect(tick(busy, 9999, true).state.startedAt).toBe(1000);
   });
 
-  it('refreshes when nothing is in flight', () => {
-    expect(nextTick({ inFlight: false, requested: false, startedAt: null }, 2000)).toEqual({ act: 'refresh' });
+  it('refreshes when nothing is in flight, stamping startedAt at the START of the refresh', () => {
+    expect(tick(idle, 2000, false)).toEqual({ state: { inFlight: true, requested: false, startedAt: 2000 }, act: 'refresh' });
   });
 
   /**
@@ -20,37 +21,21 @@ describe('nextTick', () => {
    * and would show pre-action data.
    */
   it('refreshes once the in-flight one lands when a refresh was requested during it', () => {
-    expect(nextTick({ inFlight: false, requested: true, startedAt: null }, 2000)).toEqual({ act: 'refresh' });
+    expect(tick({ inFlight: false, requested: true, startedAt: null }, 2000, false))
+      .toEqual({ state: { inFlight: true, requested: false, startedAt: 2000 }, act: 'refresh' });
   });
 
   it('collapses several requests during one in-flight refresh into a single re-arm', () => {
-    let s = { inFlight: true, requested: false, startedAt: 1000 };
-    s = { ...s, requested: true };
-    s = { ...s, requested: true };
+    let s: TickState = { inFlight: true, requested: false, startedAt: 1000 };
+    s = tick(s, 1100, true).state;
+    s = tick(s, 1200, true).state;
     expect(s.requested).toBe(true);
-    expect(nextTick(s, 1500)).toEqual({ act: 'skip' });
-    expect(nextTick({ ...s, inFlight: false }, 1600)).toEqual({ act: 'refresh' });
+    expect(tick(s, 1500, true).act).toBe('skip');
+    expect(tick({ ...s, inFlight: false }, 1600, false).act).toBe('refresh');
   });
 });
 
-describe('onTick and onSettle — the state transitions', () => {
-  const idle = { inFlight: false, requested: false, startedAt: null };
-
-  /** On the state rather than the decision: a tick that lands mid-flight is remembered, not dropped. */
-  it('remembers a tick that arrived while one was in flight', () => {
-    const busy = { inFlight: true, requested: false, startedAt: 1000 };
-    expect(onTick(busy, 2000).requested).toBe(true);
-  });
-
-  it('stamps startedAt at the START of the refresh it begins', () => {
-    expect(onTick(idle, 2000)).toMatchObject({ inFlight: true, startedAt: 2000 });
-  });
-
-  it('does not move startedAt when it skips', () => {
-    const busy = { inFlight: true, requested: false, startedAt: 1000 };
-    expect(onTick(busy, 9999).startedAt).toBe(1000);
-  });
-
+describe('onSettle', () => {
   /**
    * A refresh that settles with a request pending fires exactly one
    * follow-up and clears the flag, so N requests during one flight collapse
@@ -58,16 +43,16 @@ describe('onTick and onSettle — the state transitions', () => {
    */
   it('fires exactly one follow-up when a request arrived during the flight', () => {
     const pending = { inFlight: true, requested: true, startedAt: 1000 };
-    const settled = onSettle(pending, 3000);
+    const settled = onSettle(pending);
     expect(settled.act).toBe('refresh');
     expect(settled.state.requested).toBe(false);
     // and the follow-up does not itself re-arm
-    expect(onSettle(settled.state, 4000).act).toBe('idle');
+    expect(onSettle(settled.state).act).toBe('idle');
   });
 
   it('goes idle when nothing was requested during the flight', () => {
     const quiet = { inFlight: true, requested: false, startedAt: 1000 };
-    expect(onSettle(quiet, 3000).act).toBe('idle');
+    expect(onSettle(quiet).act).toBe('idle');
   });
 });
 
@@ -165,7 +150,7 @@ describe('tick — the loop the component actually runs', () => {
     expect(during.state.requested).toBe(true);
     expect(during.state.startedAt).toBe(1000);
 
-    expect(onSettle({ ...during.state, inFlight: false }, 2000).act).toBe('refresh');
+    expect(onSettle({ ...during.state, inFlight: false }).act).toBe('refresh');
   });
 
   /**

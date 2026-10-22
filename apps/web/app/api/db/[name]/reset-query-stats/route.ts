@@ -8,7 +8,7 @@ import { eventFor } from '@/lib/samples';
  *
  * Scoped to this database inside the action — pg_stat_statements is shared
  * across the cluster and the unscoped reset wipes every database's
- * statements. See actions/stats.ts.
+ * statements. See actions.ts.
  */
 export async function POST(req: Request, { params }: { params: Promise<{ name: string }> }) {
   await connection();

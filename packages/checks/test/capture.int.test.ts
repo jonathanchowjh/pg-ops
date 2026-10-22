@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { describe, expect, inject, it } from 'vitest';
 import { captureOnce } from '../src/capture.js';
-import { migrate } from '../src/store/schema.js';
+import { migrate } from '../src/store/migrate.js';
 import { withPostgres } from './harness.js';
 
 describe('captureOnce', () => {

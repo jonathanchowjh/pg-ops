@@ -44,7 +44,6 @@ SELECT current_setting('max_connections')::int AS max_connections,
 export const connections: Check<ConnectionsRow, ConnectionsData> = {
   id: 'connections',
   home: 'server',
-  title: 'Connection headroom',
   class: 'live',
   sql: SQL,
   map: (rows) => {
@@ -55,18 +54,12 @@ export const connections: Check<ConnectionsRow, ConnectionsData> = {
     return { max, used, reserved, headroom: max - reserved - used };
   },
   thresholds: [
-    { level: 'warn', value: 20, unit: 'percent',
+    { level: 'warn', value: 20,
       because: 'below a fifth of the pool free, a normal traffic spike can exhaust it '
-             + 'before anyone reacts',
-      remedy: 'Find what is holding connections open — Sessions groups them by state — '
-            + 'and put a pooler in front before the next spike rather than during it.' },
-    { level: 'critical', value: 10, unit: 'percent',
+             + 'before anyone reacts' },
+    { level: 'critical', value: 10,
       because: 'below a tenth, connection refusals are minutes away and the fix '
-             + '(pgbouncer, or killing idle-in-transaction) takes longer than that',
-      remedy: 'Reclaim headroom now by terminating idle-in-transaction sessions; a pooler '
-            + 'cannot be deployed in the time left. Set '
-            + 'idle_in_transaction_session_timeout on the application role so it does '
-            + 'not recur.' },
+             + '(pgbouncer, or killing idle-in-transaction) takes longer than that' },
   ],
 };
 
@@ -155,7 +148,6 @@ LIMIT $1`;
 export const connectionDetail: Check<ConnectionDetailRow, ConnectionDetailData, ConnectionDetailOpts> = {
   id: 'connectionDetail',
   home: 'server',
-  title: 'Connections',
   class: 'live',
   sql: (o) => ({ text: DETAIL_SQL, values: [o.limit ?? 500] }),
   map: (rows) => {

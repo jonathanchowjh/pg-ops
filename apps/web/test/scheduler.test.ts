@@ -129,6 +129,21 @@ describe('startScheduler', () => {
     await startScheduler(deps);
     expect(migrate).toHaveBeenCalledTimes(1);
   });
+
+  it('does not run a second capture beside one still in flight across a stop and a start', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const capture = vi.fn().mockImplementation(() => new Promise((r) => { release = () => r({ ok: true }); }));
+    const deps = { store: {} as never, names: () => ['prod'], capture, migrate: vi.fn().mockResolvedValue(1) };
+    await startScheduler(deps);
+    await vi.advanceTimersByTimeAsync(0);
+    stopScheduler();
+    await startScheduler(deps);
+    await vi.advanceTimersByTimeAsync(CAPTURE_INTERVAL_MS);
+    expect(capture).toHaveBeenCalledTimes(1);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+  });
 });
 
 describe('the health tick', () => {

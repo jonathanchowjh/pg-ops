@@ -2,20 +2,19 @@
 
 import type { ReactNode } from 'react';
 import Link from 'next/link';
-import { Track } from '@/components/clock';
+import { Track, useClock } from '@/components/clock';
 import { EntityLink } from '@/components/entity-link';
 import { KillButton } from '@/components/actions';
-import { CLASS_NAMES, CLASS_STATES, CLASSES, clockTime, fractionAt } from '@/lib/clock';
+import { CLASS_NAMES, CLASS_STATES, CLASSES, clockTime, columnAt, fractionAt } from '@/lib/clock';
 import { formatBytes, formatCount, formatDuration, formatMillis, formatRate } from '@/lib/format';
-import { readingAt, stripPaths, type Tie } from '@/lib/rows';
-import { unseenAt, type SessionNode, type Span, type StatementNode, type Strip, type TableFact, type TableNode } from '@/lib/tree';
+import { readingAt, stripPaths } from '@/lib/rows';
+import {
+  findingsAt, unseenAt, type SessionNode, type Span, type StatementNode, type Strip, type TableFact, type TableNode, type Tree,
+} from '@/lib/tree';
 import { cn } from '@/lib/utils';
 
 /** A readout's number: right-aligned in a fixed width, so a column of them lines up. */
 export const NUM = 'mr-1.5 inline-block min-w-10 text-right font-mono';
-
-/** A row is exactly this tall: the ties are drawn from row numbers. */
-export const ROW_PX = 34;
 
 /** What every row reads the same: where it is, when, and whether there is anything to act on. */
 export interface RowContext {
@@ -36,6 +35,14 @@ export interface RowContext {
   offset: (t: number) => number;
 }
 
+export function contextOf(database: string, tree: Tree, clock: ReturnType<typeof useClock>, actions: boolean): RowContext {
+  return {
+    database, from: tree.from, to: tree.to, scale: tree.scale,
+    at: clock.at, col: columnAt(tree, clock.at), canAct: actions && clock.live, offset: clock.offset,
+    blocked: new Set(findingsAt(tree, clock.at).filter((r) => r.finding.kind === 'chain').map((r) => r.finding.table)), seen: tree.seen,
+  };
+}
+
 export const CLASS_FILL: Record<(typeof CLASSES)[number], string> = {
   cpu: 'fill-class-cpu', io: 'fill-class-io', idle: 'fill-class-idle', other: 'fill-class-other', lock: 'fill-class-lock',
 };
@@ -43,30 +50,17 @@ export const CLASS_BG: Record<(typeof CLASSES)[number], string> = {
   cpu: 'bg-class-cpu', io: 'bg-class-io', idle: 'bg-class-idle', other: 'bg-class-other', lock: 'bg-class-lock',
 };
 
-const ROW = 'grid h-[34px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset';
+export const ROW = 'grid h-[34px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset';
 const LABEL = 'flex min-w-0 items-center gap-[7px] self-stretch px-2.5 whitespace-nowrap';
 const LEVEL = ['', 'pl-[30px] max-md:pl-4', 'pl-12 max-md:pl-6'] as const;
 /** The label cell as the row's one link. */
-const GO = 'group -mx-2.5 flex min-w-0 flex-1 items-center gap-[7px] self-stretch px-2.5 hover:bg-muted hover:text-foreground';
+export const GO = 'group -mx-2.5 flex min-w-0 flex-1 items-center gap-[7px] self-stretch px-2.5 hover:bg-muted hover:text-foreground';
 const CHEVRON = 'ml-1.5 text-[15px] text-muted-foreground opacity-0 group-hover:opacity-100 max-md:hidden';
-const END = 'ml-auto flex flex-none items-center gap-2 font-mono text-xs text-foreground tabular-nums';
+export const END = 'ml-auto flex flex-none items-center gap-2 font-mono text-xs text-foreground tabular-nums';
 const QUIET = 'text-muted-foreground';
-const TAG = 'flex-none rounded-[3px] px-1.5 text-[11px]/4 text-warning-ink shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--warning-ink)_35%,transparent)] max-md:hidden';
+export const TAG = 'flex-none rounded-[3px] px-1.5 text-[11px]/4 text-warning-ink shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--warning-ink)_35%,transparent)] max-md:hidden';
 const CARET = 'w-3.5 flex-none p-0 text-[11px] text-muted-foreground';
 const TRACK = 'h-[34px] border-l py-[3px]';
-
-/** The five classes, as the key of rows with no band above them to be one. Sits in a header row's time cell. */
-export function ClassKey() {
-  return (
-    <div className="flex flex-wrap items-center gap-x-3 self-stretch border-l px-2.5">
-      {CLASSES.map((c) => (
-        <span key={c} className="flex items-center gap-1.5">
-          <i aria-hidden className={cn('size-2 rounded-xs', CLASS_BG[c])} />{CLASS_NAMES[c]}
-        </span>
-      ))}
-    </div>
-  );
-}
 
 /** The stretches nobody sampled, hatched over a strip or a panel. */
 export function Unseen({ seen }: { seen: readonly number[] }) {
@@ -332,27 +326,3 @@ export function QuietTableRow({ fact, ctx }: { fact: TableFact; ctx: RowContext 
   );
 }
 
-/** A waiter tied to the session it waits on, at the moment the wait began. Drawn over the time column. */
-export function Ties({ ties }: { ties: readonly Tie[] }): ReactNode {
-  return ties.map((t) => {
-    const up = t.to < t.from;
-    const y1 = t.from * ROW_PX + ROW_PX / 2;
-    const y2 = t.to * ROW_PX + ROW_PX / 2 + (up ? 7 : -7);
-    return (
-      <div
-        key={`${t.from}-${t.to}`}
-        data-tie
-        aria-hidden
-        className="pointer-events-none absolute w-0"
-        style={{ left: `${t.at * 100}%`, top: Math.min(y1, y2), height: Math.abs(y1 - y2) }}
-      >
-        <i className="absolute inset-y-0 -left-px w-[1.5px] bg-foreground" />
-        <i className={cn('absolute -left-[3px] size-1.5 rounded-full bg-foreground', up ? '-bottom-[3px]' : '-top-[3px]')} />
-        <i className={cn(
-          'absolute -left-1 size-0 border-x-4 border-x-transparent',
-          up ? 'top-0 border-b-[6px] border-b-foreground' : 'bottom-0 border-t-[6px] border-t-foreground',
-        )} />
-      </div>
-    );
-  });
-}

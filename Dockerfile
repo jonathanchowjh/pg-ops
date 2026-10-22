@@ -46,7 +46,7 @@ ENV PORT=8080
 # address, and Docker sets HOSTNAME to the container ID unless told otherwise
 # — which binds the server to one interface instead of all of them.
 #
-# The same variable is read by packages/checks/src/actions/audit.ts to name
+# The same variable is read by packages/checks/src/audit.ts to name
 # the host in every audit record, so with this set, `currentActor()` would
 # produce `node@0.0.0.0`: a record naming neither the operator nor a
 # resolvable machine. That is why the kill route always passes an explicit

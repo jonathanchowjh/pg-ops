@@ -28,7 +28,7 @@ export interface Console {
  *
  * Resolved, not spelled out as a path: npm may nest `next` under this
  * workspace or hoist it to the repo root. `next` publishes no `exports`
- * field, so the subpath resolves directly. harness.test.ts checks the result.
+ * field, so the subpath resolves directly. guards.test.ts ("the integration harness") checks the result.
  */
 export const NEXT_BIN = createRequire(import.meta.url).resolve('next/dist/bin/next');
 const WEB_DIR = fileURLToPath(new URL('..', import.meta.url));

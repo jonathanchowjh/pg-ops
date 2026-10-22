@@ -42,39 +42,39 @@ export interface SchedulerDeps {
   place?: (name: string) => Promise<unknown>;
 }
 
-let timer: ReturnType<typeof setInterval> | null = null;
+type Job = 'capture' | 'health' | 'sample' | 'place';
+
+const TIMERS: ReturnType<typeof setInterval>[] = [];
+/**
+ * Passes in flight. Not reset by `stopScheduler`: a pass already running
+ * clears its own entry in `finally`, and zeroing it here would let a scheduler
+ * restarted mid-pass run a second one concurrently with the first.
+ */
+const RUNNING = new Set<Job>();
 let starting = false;
-let running = false;
-let healthTimer: ReturnType<typeof setInterval> | null = null;
-/** Separate from `running`: a slow five-minute capture must not cost the health charts their minutes. */
-let healthRunning = false;
-let sampleTimer: ReturnType<typeof setInterval> | null = null;
-/** Separate again: a sample must land every fifteen seconds whatever the capture is doing. */
-let sampling = false;
-let placeTimer: ReturnType<typeof setInterval> | null = null;
-let placing = false;
-/** The last failure logged per database, so an outage is one line and not one a minute. */
-const HEALTH_FAILED = new Map<string, string>();
-/** The parts last logged as unreadable per database, for the same reason. */
-const HEALTH_PARTIAL = new Map<string, string>();
 /**
  * Bumped by every `stopScheduler`. A start that is mid-`migrate` when a stop
  * arrives compares this on the far side of the await and abandons rather than
  * arming a timer after the stop.
  */
 let generation = 0;
+/** The last failure logged per database, so an outage is one line and not one a minute. */
+const HEALTH_FAILED = new Map<string, string>();
+/** The parts last logged as unreadable per database, for the same reason. */
+const HEALTH_PARTIAL = new Map<string, string>();
 
 /**
- * Start the capture timer. Returns whether it started.
+ * Arm the timers `deps` can run: capture, health and placement with a store,
+ * sampling with a sampler. Returns whether any was armed.
  *
  * Dependencies are passed in rather than imported so this is testable with no
  * database and no Next server.
  */
 export async function startScheduler(deps: SchedulerDeps): Promise<boolean> {
-  // `timer` is written only after the await below, so on its own it would
-  // let two overlapping calls both pass this guard and arm two timers, the
-  // first handle lost. `starting` is set synchronously, before any await.
-  if (timer !== null || sampleTimer !== null || starting) return true;
+  // TIMERS is filled only after the await below, so on its own it would let
+  // two overlapping calls both pass this guard and arm twice, the first
+  // handles lost. `starting` is set synchronously, before any await.
+  if (TIMERS.length > 0 || starting) return true;
   // No store and no sampler: nothing to run, and no DDL.
   if (deps.store === null && deps.sample === undefined) return false;
   starting = true;
@@ -103,110 +103,91 @@ export async function startScheduler(deps: SchedulerDeps): Promise<boolean> {
     starting = false;
     return false;
   }
+  // Every pass is async from its first line: a `names()` that throws rejects the pass, not `arm`.
+  const { health, place, sample } = deps;
   if (history) {
-    timer = setInterval(() => { void tick(deps); }, CAPTURE_INTERVAL_MS);
-    // Do not hold the process open for the sake of the timer.
-    timer.unref?.();
-    // Capture once now, not in five minutes: a deployment that restarts more
-    // often than the capture interval would otherwise record nothing. Not
-    // awaited: `register()` must not block the server coming up on a capture,
-    // and `tick` swallows everything by contract.
-    void tick(deps);
-    if (deps.health) {
-      healthTimer = setInterval(() => { void healthTick(deps); }, HEALTH_INTERVAL_MS);
-      healthTimer.unref?.();
-      void healthTick(deps);
-    }
-    if (deps.place) {
-      placeTimer = setInterval(() => { void placePass(deps); }, PLACE_INTERVAL_MS);
-      placeTimer.unref?.();
-      void placePass(deps);
-    }
+    arm('capture', CAPTURE_INTERVAL_MS, () => capturePass(deps));
+    if (health) arm('health', HEALTH_INTERVAL_MS, () => healthPass(deps, health));
+    if (place) arm('place', PLACE_INTERVAL_MS, async () => eachAtMost(deps.names(), PASS_WIDTH, place));
   }
-  if (deps.sample) {
-    sampleTimer = setInterval(() => { void samplePass(deps); }, SAMPLE_INTERVAL_MS);
-    sampleTimer.unref?.();
-    void samplePass(deps);
-  }
+  if (sample) arm('sample', SAMPLE_INTERVAL_MS, async () => eachAtMost(deps.names(), PASS_WIDTH, sample));
   starting = false;
-  return history || deps.sample !== undefined;
+  return history || sample !== undefined;
 }
 
 export function stopScheduler(): void {
   generation += 1;
-  if (timer !== null) clearInterval(timer);
-  timer = null;
-  if (healthTimer !== null) clearInterval(healthTimer);
-  healthTimer = null;
-  if (sampleTimer !== null) clearInterval(sampleTimer);
-  sampleTimer = null;
-  if (placeTimer !== null) clearInterval(placeTimer);
-  placeTimer = null;
+  for (const timer of TIMERS) clearInterval(timer);
+  TIMERS.length = 0;
   HEALTH_FAILED.clear();
   HEALTH_PARTIAL.clear();
   starting = false;
-  // `running` is deliberately not reset here. A tick already in flight clears
-  // it in its own `finally`; zeroing it here would let a scheduler restarted
-  // mid-tick run a second capture concurrently with the first.
 }
 
 /**
- * One pass over every configured database, in series.
+ * Arm one interval, and fire it once now: a deployment that restarts more
+ * often than the interval would otherwise record nothing. Not awaited:
+ * `register()` must not block the server coming up on a pass.
  *
- * Serial, not parallel: a diagnostic tool must not be the reason connections
- * run out. Skipped, not queued, when the previous tick is still in flight:
- * the tool must never add load to the database it is diagnosing.
- *
- * Every error is swallowed. This runs on a timer with no caller to reject to,
- * and an unhandled rejection in that position terminates the Node process.
+ * Skipped, not queued, while the last pass is in flight: the tool must never
+ * add load to the database it is diagnosing. Each job has its own flag, so a
+ * slow capture costs the health charts nothing. Every error is swallowed: a
+ * timer has no caller to reject to, and an unhandled rejection there ends the
+ * Node process.
  */
-async function tick(deps: SchedulerDeps): Promise<void> {
-  if (running) return;
-  running = true;
-  try {
-    for (const name of deps.names()) {
-      try {
-        const outcome = await deps.capture(name);
-        // captureOnce reports a query-stats half it could not read without
-        // throwing — space stats still landed, so the pass is not a failure.
-        // This is that report's only reader.
-        const err = (outcome as { queryStatsError?: string } | null)?.queryStatsError;
-        if (err !== undefined) {
-          console.warn(
-            '[pgops] %s: relation sizes captured, query statistics NOT: %s', name, err,
-          );
-        }
-      } catch (err) {
-        console.error('[pgops] capture failed for %s: %s', name, messageOf(err));
-      }
+function arm(name: Job, everyMs: number, pass: () => Promise<void>): void {
+  const once = async (): Promise<void> => {
+    if (RUNNING.has(name)) return;
+    RUNNING.add(name);
+    try {
+      await pass().catch(() => {});
+    } finally {
+      RUNNING.delete(name);
     }
-  } finally {
-    running = false;
-  }
+  };
+  const timer = setInterval(() => { void once(); }, everyMs);
+  // Do not hold the process open for the sake of the timer.
+  timer.unref?.();
+  TIMERS.push(timer);
+  void once();
 }
 
 /**
- * One health pass over every configured database, in series.
- *
- * The same three rules as `tick`: serial so pgops is never many connections
- * wide, skipped rather than queued when the previous pass is still running,
- * and every error swallowed because a timer has no caller to reject to.
- *
- * What differs is the logging. This runs 1,440 times a day, so a database
- * that is down would write 1,440 identical lines; it logs the failure when
- * it starts or changes, and the recovery once.
+ * Serial, not parallel (width 1): a diagnostic tool must not be the reason
+ * connections run out.
  */
-async function healthTick(deps: SchedulerDeps): Promise<void> {
-  if (healthRunning || !deps.health) return;
-  healthRunning = true;
+async function capturePass(deps: SchedulerDeps): Promise<void> {
+  await eachAtMost(deps.names(), 1, async (name) => {
+    try {
+      const outcome = await deps.capture(name);
+      // captureOnce reports a query-stats half it could not read without
+      // throwing — space stats still landed, so the pass is not a failure.
+      // This is that report's only reader.
+      const err = (outcome as { queryStatsError?: string } | null)?.queryStatsError;
+      if (err !== undefined) {
+        console.warn(
+          '[pgops] %s: relation sizes captured, query statistics NOT: %s', name, err,
+        );
+      }
+    } catch (err) {
+      console.error('[pgops] capture failed for %s: %s', name, messageOf(err));
+    }
+  });
+}
+
+/**
+ * Serial like capture. What differs is the logging: this runs 1,440 times a
+ * day, so a database that is down would write 1,440 identical lines; it logs
+ * the failure when it starts or changes, and the recovery once.
+ */
+async function healthPass(deps: SchedulerDeps, health: (name: string) => Promise<unknown>): Promise<void> {
   const started = Date.now();
-  let count = 0;
+  const names = deps.names();
   try {
-    for (const name of deps.names()) {
-      count += 1;
+    await eachAtMost(names, 1, async (name) => {
       let failure: string | null = null;
       try {
-        const outcome = (await deps.health(name)) as
+        const outcome = (await health(name)) as
           { ok?: unknown; message?: string; missing?: string[] } | null;
         if (outcome?.ok === false) failure = outcome.message ?? 'failed';
         // A row with a part missing still lands, so it is not a failure; this
@@ -235,40 +216,12 @@ async function healthTick(deps: SchedulerDeps): Promise<void> {
       }
       if (failure === null) HEALTH_FAILED.delete(name);
       else HEALTH_FAILED.set(name, failure);
-    }
+    });
   } finally {
     const took = Date.now() - started;
     if (took > HEALTH_SLOW_PASS_MS) {
-      console.warn('[pgops] health pass took %ds across %d databases', Math.round(took / 1000), count);
+      console.warn('[pgops] health pass took %ds across %d databases', Math.round(took / 1000), names.length);
     }
-    healthRunning = false;
-  }
-}
-
-/**
- * One sample pass over every configured database, in series, skipped while
- * the last is running. `deps.sample` never rejects; the catch is a backstop.
- * `samplePass`, not `sampleTick`: that is the function lib/samples.ts hands
- * in as `deps.sample`.
- */
-async function samplePass(deps: SchedulerDeps): Promise<void> {
-  if (sampling || !deps.sample) return;
-  sampling = true;
-  try {
-    await eachAtMost(deps.names(), PASS_WIDTH, deps.sample);
-  } finally {
-    sampling = false;
-  }
-}
-
-/** One placement pass over every configured database, skipped while the last is running. */
-async function placePass(deps: SchedulerDeps): Promise<void> {
-  if (placing || !deps.place) return;
-  placing = true;
-  try {
-    await eachAtMost(deps.names(), PASS_WIDTH, deps.place);
-  } finally {
-    placing = false;
   }
 }
 

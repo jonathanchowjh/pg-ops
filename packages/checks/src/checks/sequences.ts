@@ -157,19 +157,14 @@ LIMIT $1`;
 
 export const sequences: Check<SequenceRow, SequenceData, RelationOpts> = {
   id: 'sequences',
-  title: 'Sequence exhaustion',
   home: 'sequence',
   class: 'captured',
   timeoutMs: 10_000,
   sql: (o) => ({ text: SEQUENCES_SQL, values: [o.limit ?? DEFAULT_LIMIT, o.relation ?? null] }),
   map: toSequences,
   thresholds: [
-    { level: 'warn', value: 90, unit: 'percent',
+    { level: 'warn', value: 90,
       because: "pgHero's sequence_danger(threshold: 0.9); adopted for parity, and "
-             + 'measured against the column type rather than the sequence maximum',
-      remedy: 'The column overflows before the sequence does, so widening the column '
-            + 'is the fix and cycling the sequence is not. A bigint column takes the '
-            + 'ceiling to nine quintillion; doing it on a large table rewrites it, so '
-            + 'plan for the lock rather than discovering it at exhaustion.' },
+             + 'measured against the column type rather than the sequence maximum' },
   ],
 };

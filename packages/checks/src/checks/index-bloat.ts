@@ -174,7 +174,6 @@ LIMIT $2`;
  */
 export const indexBloat: Check<IndexBloatRow, IndexBloatData, IndexBloatOpts> = {
   id: 'indexBloat',
-  title: 'Index bloat',
   home: 'index',
   class: 'captured',
   timeoutMs: 30_000,

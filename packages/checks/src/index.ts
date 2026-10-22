@@ -1,31 +1,29 @@
 export * from './types.js';
 // By name, not `export *`: run.ts also holds package-internal helpers.
-export { runCheck, runSeries, runTool, OWN_SQL_MARKER, ownSql, grantRemedy, messageOf } from './run.js';
+export { runCheck, runTool, OWN_SQL_MARKER, ownSql, grantRemedy, messageOf } from './run.js';
 export * from './registry.js';
-export type * from './checks/database-activity.js';
 export { redactSecrets } from './redact.js';
 export { captureOnce } from './capture.js';
 export { captureHealth } from './health.js';
 export type { HealthOutcome } from './health.js';
 export type { StoredShape, WindowStats } from './store/read.js';
 export { readWindowStats } from './store/read.js';
-export { deltas } from './series/query-stats.js';
-export { migrate } from './store/schema.js';
+export { deltas } from './deltas.js';
+export { migrate } from './store/migrate.js';
 export { BUCKET_MS, chainEvents, lockTables, sampleOf } from './samples.js';
 export { recordEvent, recordSample } from './store/write.js';
 export type { EventKind, LoadCell, Sample, SampleSession, StatementInfo, StoredEvent } from './samples.js';
-export { bucketFilled, readCoverage, readEvents, readHealth, readLoad, readSamples, readStatements } from './store/read.js';
-export type { HealthMinute } from './store/read.js';
+export { bucketFilled, readCoverage, readEvents, readHealth, readLoad, readRelationSpace, readSamples, readStatements } from './store/read.js';
+export type { HealthMinute, StoredSize } from './store/read.js';
 export { readCaptured, readHourly, readIndexScans, readTableHours, readWritten } from './store/read.js';
 export type { Captured, TableHour } from './store/read.js';
 export type { CapturedRead } from './store/write.js';
-export type * from './series/query-stats.js';
-export type * from './series/space.js';
+export type * from './deltas.js';
 
 /**
  * The per-check, action and tool domain types. `export type *` carries the
- * interfaces only: the objects themselves are reached through CHECKS, SERIES,
- * ACTIONS and TOOLS, so there is one way to get one. Values a consumer needs
+ * interfaces only: the objects themselves are reached through CHECKS, ACTIONS
+ * and TOOLS, so there is one way to get one. Values a consumer needs
  * are exported by name below.
  */
 export type * from './checks/catalog.js';
@@ -43,9 +41,7 @@ export type * from './checks/sessions.js';
 export type * from './checks/settings.js';
 export type * from './checks/slots.js';
 export type * from './checks/wraparound.js';
-export type * from './actions/kill.js';
-export type * from './actions/stats.js';
-export type * from './actions/analyze.js';
+export type * from './actions.js';
 export type * from './tools/explain.js';
 export type * from './tools/advice.js';
 export type * from './tools/suggested-indexes.js';

@@ -206,7 +206,6 @@ const num = (s: string | null): number | null => (s == null ? null : Number(s));
 export const sessions: Check<SessionRow, SessionsData, SessionOpts> = {
   id: 'sessions',
   home: 'session',
-  title: 'Sessions',
   class: 'live',
   /** Under the 5-second poll: a read that cannot answer in time says so, rather than stalling the page and the sampler. */
   timeoutMs: 4_000,
@@ -243,21 +242,20 @@ export const sessions: Check<SessionRow, SessionsData, SessionOpts> = {
 
 /** The lock chain's two marks, moved here with the rows they judge. Wording from locks.ts. */
 export const CHAIN_THRESHOLDS: Threshold[] = [
-  { level: 'warn', value: 1, unit: 'count',
+  { level: 'warn', value: 1,
     because: 'any session waiting on a lock is a query not completing; it is worth '
            + 'seeing even when brief' },
-  { level: 'critical', value: 60, unit: 'seconds',
+  { level: 'critical', value: 60,
     because: 'a minute of blocking outlives most application timeouts, so the waiters '
-           + 'are already being retried and the pile-up is compounding',
-    remedy: 'Terminate the root blocker, not a waiter.' },
+           + 'are already being retried and the pile-up is compounding' },
 ];
 
 /** Idle in transaction: the two marks the tree's finding is judged by. */
 export const IDLE_THRESHOLDS: Threshold[] = [
-  { level: 'warn', value: 60, unit: 'seconds',
+  { level: 'warn', value: 60,
     because: 'a transaction idle for a minute is holding row locks and pinning the '
            + 'xmin horizon for no reason; almost always an application bug' },
-  { level: 'critical', value: 300, unit: 'seconds',
+  { level: 'critical', value: 300,
     because: 'five minutes of idle-in-transaction blocks autovacuum from reclaiming '
            + 'anything newer, so bloat starts accumulating on top of the locking' },
 ];

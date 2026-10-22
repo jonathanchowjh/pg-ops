@@ -4,7 +4,7 @@ import { captureOnce } from '../src/capture.js';
 import type { IndexRead, TableRead } from '../src/checks/catalog.js';
 import type { SequenceEntry } from '../src/checks/sequences.js';
 import { readCaptured, readEvents, readHourly, readIndexScans, readTableHours, readWritten } from '../src/store/read.js';
-import { migrate } from '../src/store/schema.js';
+import { migrate } from '../src/store/migrate.js';
 import { RETENTION, prune, upsertDatabase, writeCaptured, type CapturedWrite } from '../src/store/write.js';
 import { withPostgres } from './harness.js';
 

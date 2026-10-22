@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  ACTIONS, CHECKS, JOBS, PGHERO, SERIES, TOOLS,
+  ACTIONS, CHECKS, PGHERO, TOOLS,
 } from '../src/registry.js';
 import { HOMES } from '../src/types.js';
 
@@ -11,18 +11,16 @@ describe('the pgHero parity registry', () => {
     expect(missing).toEqual([]);
   });
 
-  it('puts every entry in exactly one of check / action / series / job / tool / platform / declined', () => {
+  it('puts every entry in exactly one of check / action / tool / platform / declined', () => {
     for (const [id, e] of Object.entries(PGHERO)) {
-      const states = ['check', 'action', 'series', 'job', 'tool', 'platform', 'declined']
+      const states = ['check', 'action', 'tool', 'platform', 'declined']
         .filter((k) => k in e);
       expect(states, `capability ${id}`).toHaveLength(1);
     }
   });
 
-  it('never names a series, a job or a tool that does not exist', () => {
+  it('never names a tool that does not exist', () => {
     for (const [id, e] of Object.entries(PGHERO)) {
-      if ('series' in e) expect(SERIES, `capability ${id}`).toHaveProperty(e.series);
-      if ('job' in e) expect(JOBS, `capability ${id}`).toHaveProperty(e.job);
       if ('tool' in e) expect(TOOLS, `capability ${id}`).toHaveProperty(e.tool);
     }
   });

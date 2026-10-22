@@ -31,45 +31,51 @@ export interface Catalog {
   indexesTotal: number | null;
   /** When it was read, by the capture or by this process. Null: never. */
   at: number | null;
-  /** The moment an index's scans count from. */
+  /** The moment an index's scans count from; the Server head's "statistics since" when no health minute has one. */
   statsReset: number | null;
   freezeMaxAge: number | null;
   /** Each read that failed. Its rows, if any, are the read before. */
   failed: { read: CapturedRead; message: string }[];
 }
 
+/** `at` is null while the read is in flight. */
+export interface Kept<T> { at: number | null; value: Promise<T> }
+
 /**
  * On `globalThis` for the reason lib/samples.ts keeps its rings there. A
  * request has nowhere else to remember, and a catalog scan on a five-second
- * poll is what this file exists to prevent.
+ * poll is what this file exists to prevent. The key names the entry's shape,
+ * so a hot reload does not meet an entry of an old one.
  */
-const KEY = Symbol.for('pgops.catalog');
-/** `at` is null while the read is in flight. */
-interface Entry { at: number | null; catalog: Promise<Catalog> }
-const SHARED = globalThis as { [KEY]?: Map<string, Entry> };
+const KEY = Symbol.for('pgops.catalog.kept');
+const SHARED = globalThis as { [KEY]?: Map<string, Kept<Catalog>> };
 const SEEN = (SHARED[KEY] ??= new Map());
 
 /** For tests. */
 export function forgetCatalog(): void { SEEN.clear(); }
 
 /**
- * A read that fails is dated too, or a scan that times out would start again
- * on every poll. A read in flight is shared: during a slow scan every poll
- * would otherwise start its own and hold a connection, and the pool would
- * empty at the moment the tree is needed.
+ * The value under `key`, read again once a minute. A read in flight is
+ * shared: during a slow scan every poll would otherwise start its own and
+ * hold a connection, and the pool would empty at the moment the tree is
+ * needed. A read that rejects is forgotten, so the next poll asks again.
+ * `read` receives the last value, which shapes.ts builds on. Past `KEPT`
+ * entries the oldest goes.
  */
-async function remembered(key: string, read: (last: Catalog | undefined) => Promise<Catalog>): Promise<Catalog> {
-  const known = SEEN.get(key);
-  if (known !== undefined && (known.at === null || Date.now() - known.at < FRESH_MS)) return known.catalog;
-  const entry: Entry = { at: null, catalog: (async () => read(known === undefined ? undefined : await known.catalog))() };
-  SEEN.delete(key);
-  SEEN.set(key, entry);
-  if (SEEN.size > KEPT) SEEN.delete(SEEN.keys().next().value!);
-  entry.catalog.then(
+export function remembered<T>(
+  seen: Map<string, Kept<T>>, key: string, read: (last: T | undefined) => Promise<T>,
+): Promise<T> {
+  const known = seen.get(key);
+  if (known !== undefined && (known.at === null || Date.now() - known.at < FRESH_MS)) return known.value;
+  const entry: Kept<T> = { at: null, value: (async () => read(known === undefined ? undefined : await known.value))() };
+  seen.delete(key);
+  seen.set(key, entry);
+  if (seen.size > KEPT) seen.delete(seen.keys().next().value!);
+  entry.value.then(
     () => { entry.at = Date.now(); },
-    () => { if (SEEN.get(key) === entry) SEEN.delete(key); },
+    () => { if (seen.get(key) === entry) seen.delete(key); },
   );
-  return entry.catalog;
+  return entry.value;
 }
 
 const sorted = (c: Catalog): Catalog => ({
@@ -129,7 +135,7 @@ async function fromDatabase(name: string, relation: string | undefined, last: Ca
  * table past the capture's cap must not read as missing. Never rejects.
  */
 export function catalogFor(name: string, relation?: string): Promise<Catalog> {
-  return remembered(relation === undefined ? `${name}\n` : `${name}\nr:${relation}`, async (last) =>
+  return remembered(SEEN, relation === undefined ? `${name}\n` : `${name}\nr:${relation}`, async (last) =>
     sorted((relation === undefined ? await fromStore(name) : null) ?? await fromDatabase(name, relation, last)));
 }
 
@@ -142,7 +148,7 @@ const factOf = (t: TableRead, freezeMaxAge: number | null): TableFact =>
  */
 export async function tablesFor(name: string, find: string): Promise<{ facts: TableFact[]; total: number | null }> {
   const search = find.trim();
-  const c = search === '' ? await catalogFor(name) : await remembered(`${name}\ns:${search}`, async (last) => {
+  const c = search === '' ? await catalogFor(name) : await remembered<Catalog>(SEEN, `${name}\ns:${search}`, async (last) => {
     const t = await runCheckFor(name, CHECKS.tables, { limit: SEARCH_ROWS, search });
     return {
       tables: t.ok ? t.data.tables : last?.tables ?? [], indexes: [], sequences: [],

@@ -82,10 +82,9 @@ export default async function ServerPage({ params, searchParams }: { params: Pro
   const { grid } = clock;
   const live = grid.live;
   const canAct = live && actionsAllowed(process.env);
-  const [health, catalog, activity, lag, xid, connections, horizon, detail, standbys, slots, settings] = await Promise.all([
+  const [health, catalog, lag, xid, connections, horizon, detail, standbys, slots, settings] = await Promise.all([
     healthFor(name, grid),
     catalogFor(name),
-    live ? runCheckFor(name, CHECKS.databaseActivity) : null,
     live ? runCheckFor(name, CHECKS.replicationLag) : null,
     live ? runCheckFor(name, CHECKS.wraparound) : null,
     live ? runCheckFor(name, CHECKS.connections) : null,
@@ -114,7 +113,8 @@ export default async function ServerPage({ params, searchParams }: { params: Pro
   const resetQueryStats = api('reset-query-stats');
   // The newest minute that measured it: the size is the health row's, not the poll's.
   const size = (health.ok ? health.value : []).findLast((m) => m.sizeBytes !== null)?.sizeBytes ?? null;
-  const statsSince = activity?.ok && activity.data.statsResetAt !== null ? Date.parse(activity.data.statsResetAt) : null;
+  // The minute's too: the catalog is the last capture, minutes old right after Reset statistics.
+  const statsSince = (health.ok ? health.value : []).findLast((m) => m.statsReset !== null)?.statsReset ?? catalog.statsReset;
   const holders: HorizonHolder[] = horizon?.ok ? horizon.data.holders : [];
   // A waiter holds the horizon only because its blocker does: ending it frees nothing, so it is never offered.
   const endable = (h: HorizonHolder): boolean => h.kind === 'backend' && h.backendStart !== null && !h.waiting;

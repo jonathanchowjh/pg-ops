@@ -5,7 +5,7 @@ import {
 } from 'testcontainers';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { captureHealth } from '../src/health.js';
-import { migrate } from '../src/store/schema.js';
+import { migrate } from '../src/store/migrate.js';
 import { IMAGE } from './global-setup.js';
 import { withPostgres } from './harness.js';
 

@@ -140,7 +140,7 @@ describe('transaction control is marked as pgops\'s own', () => {
   it('on every statement a timed check sends', async () => {
     const { pool, sent } = fakePool(() => undefined);
     const check: Check<unknown, number> = {
-      id: 'probe', title: 'Probe', home: 'database', class: 'live', timeoutMs: 1_000,
+      id: 'probe', home: 'database', class: 'live', timeoutMs: 1_000,
       sql: 'SELECT 1', map: (rows) => rows.length,
     };
     const res = await runCheck({ target: pool, serverVersion: 170000 }, check);
@@ -156,7 +156,7 @@ describe('transaction control is marked as pgops\'s own', () => {
     const lockTimeout = async (timeoutMs: number): Promise<string | undefined> => {
       const { pool, sent } = fakePool(() => undefined);
       const check: Check<unknown, number> = {
-        id: 'probe', title: 'Probe', home: 'database', class: 'live', timeoutMs, sql: 'SELECT 1', map: (rows) => rows.length,
+        id: 'probe', home: 'database', class: 'live', timeoutMs, sql: 'SELECT 1', map: (rows) => rows.length,
       };
       await runCheck({ target: pool, serverVersion: 170000 }, check);
       return sent.find((s) => s.startsWith('SET LOCAL lock_timeout'))?.split('\n')[0];

@@ -2,9 +2,9 @@ import { connection } from 'next/server';
 import type { Pool } from 'pg';
 import { cache } from 'react';
 import {
-  CHECKS, messageOf, runCheck, runSeries, runTool,
-  type Check, type CheckContext, type CheckResult, type FailureReason, type Series, type SeriesResult,
-  type TimeRange, type Tool,
+  CHECKS, messageOf, runCheck, runTool,
+  type Check, type CheckContext, type CheckResult, type FailureReason,
+  type Tool,
 } from '@pgops/checks';
 // Extensionless, not './pools.js': Next's webpack/Turbopack resolvers do not
 // map a literal ".js" specifier onto a sibling ".ts" file, unlike tsc and
@@ -118,27 +118,6 @@ export async function runCheckFor<Row, Data, Opts>(
   return withContext(name, (ctx) => (opts === undefined
     ? runCheck(ctx, check as Check<Row, Data, void>)
     : runCheck(ctx, check, opts)));
-}
-
-/** The same seam, for a series. */
-export async function runSeriesFor<P>(
-  name: string,
-  series: Series<P, void>,
-  range: TimeRange,
-): Promise<SeriesResult<P>>;
-export async function runSeriesFor<P, Opts>(
-  name: string,
-  series: Series<P, Opts>,
-  range: TimeRange,
-  opts: Opts,
-): Promise<SeriesResult<P>>;
-export async function runSeriesFor<P, Opts>(
-  name: string,
-  series: Series<P, Opts>,
-  range: TimeRange,
-  opts?: Opts,
-): Promise<SeriesResult<P>> {
-  return withContext(name, (ctx) => runSeries(ctx, series, range, opts as Opts));
 }
 
 /**

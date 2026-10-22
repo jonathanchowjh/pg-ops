@@ -3,7 +3,7 @@ import { indexes, tables, type TableRead } from './checks/catalog.js';
 import { sequences } from './checks/sequences.js';
 import { statementShape } from './redact.js';
 import { messageOf, ownSql, runCheck } from './run.js';
-import { deltas, type CounterPoint } from './series/query-stats.js';
+import { deltas, type CounterPoint } from './deltas.js';
 import { withCaptureLock } from './store/lock.js';
 import { readLastSnapshot } from './store/read.js';
 import {

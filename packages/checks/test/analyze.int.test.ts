@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { analyzeTables } from '../src/actions/analyze.js';
-import { defaultAuditPath } from '../src/actions/audit.js';
+import { analyzeTables } from '../src/actions.js';
+import { defaultAuditPath } from '../src/audit.js';
 import { awaitPublished, withPostgres } from './harness.js';
 
 describe('analyzeTables', () => {

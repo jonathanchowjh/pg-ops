@@ -15,13 +15,13 @@ const state = vi.hoisted(() => ({
   fail: {} as Record<string, string>,
   health: { ok: false, kind: 'off', message: 'History is off.' } as unknown,
   run: [] as string[],
+  statsReset: null as number | null,
 }));
 vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async (_name: string, check: { id: string }) => {
     state.run.push(check.id);
     if (check.id in state.fail) return { ok: false, reason: 'privilege', message: state.fail[check.id] };
     const data: Record<string, unknown> = {
-      databaseActivity: { statsResetAt: '2026-10-20T07:00:00Z' },
       replicationLag: { inRecovery: state.standby, lagSeconds: state.standby ? 3 : null, standbys: 0, receiving: state.standby ? true : null },
       wraparound: { worst: [{ database: 'prod', xactAge: 1000, txnsUntilShutdown: 2_147_482_647, pctToForcedVacuum: 0 }] },
       connections: { max: 100, used: 12, reserved: 3, headroom: 85 },
@@ -40,7 +40,7 @@ vi.mock('@/lib/check', () => ({
 }));
 vi.mock('@/lib/catalog', async (orig) => ({
   ...(await orig<typeof import('@/lib/catalog')>()),
-  catalogFor: async () => ({ tables: [], indexes: [], sequences: [], tablesTotal: 0, indexesTotal: 0, at: null, statsReset: null, freezeMaxAge: 2e8, failed: [] }),
+  catalogFor: async () => ({ tables: [], indexes: [], sequences: [], tablesTotal: 0, indexesTotal: 0, at: null, statsReset: state.statsReset, freezeMaxAge: 2e8, failed: [] }),
 }));
 
 import { forget } from '@/lib/samples';
@@ -71,7 +71,7 @@ const rows = (heading: string) => {
 
 beforeEach(() => {
   forget();
-  Object.assign(state, { standby: false, holders: [], rows: [], standbys: [], fail: {}, health: { ok: false, kind: 'off', message: 'History is off.' }, run: [] });
+  Object.assign(state, { standby: false, holders: [], rows: [], standbys: [], fail: {}, health: { ok: false, kind: 'off', message: 'History is off.' }, run: [], statsReset: Date.UTC(2026, 9, 20, 7, 0, 0) });
   vi.stubEnv('PGOPS_ALLOW_ACTIONS', 'true');
 });
 afterEach(() => { view.unmount(); vi.unstubAllEnvs(); });
@@ -105,6 +105,22 @@ describe('the Server page', () => {
     state.health = { ok: true, value: [minute({ sizeBytes: 2048 }), minute({ at: NOW - 30_000, sizeBytes: null })] };
     await mount();
     expect(view.container.querySelector('h1')!.parentElement!.textContent).toContain('2 KB on disk');
+  });
+
+  /** Found by review: the catalog is the last capture, so right after Reset statistics it named the old reset for minutes. */
+  it('dates "statistics since" from the newest minute that read a reset, not the catalog', async () => {
+    const older = Date.UTC(2026, 9, 21, 7, 0, 0);
+    const newer = Date.UTC(2026, 9, 22, 7, 0, 0);
+    state.health = { ok: true, value: [minute({ at: NOW - 120_000, statsReset: older }), minute({ statsReset: newer }), minute({ at: NOW - 30_000 })] };
+    await mount();
+    const since = [...view.container.querySelectorAll('span')].find((s) => s.textContent?.startsWith('statistics since'))!;
+    expect(since.querySelector('time')!.getAttribute('datetime')).toBe(new Date(newer).toISOString());
+  });
+
+  it('omits "statistics since" when the catalog could not be read', async () => {
+    state.statsReset = null;
+    await mount();
+    expect(view.text()).not.toContain('statistics since');
   });
 
   it('groups who holds the connections by application and state, and skips the background processes', async () => {

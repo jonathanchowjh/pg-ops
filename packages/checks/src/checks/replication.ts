@@ -63,7 +63,6 @@ SELECT pg_is_in_recovery() AS in_recovery,
 export const replicationLag: Check<ReplicationRow, ReplicationData> = {
   id: 'replicationLag',
   home: 'server',
-  title: 'Replication',
   class: 'live',
   sql: SQL,
   map: (rows) => {

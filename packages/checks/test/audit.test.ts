@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { writeAudit } from '../src/actions/audit.js';
+import { writeAudit } from '../src/audit.js';
 
 describe('writeAudit', () => {
   let dir: string;

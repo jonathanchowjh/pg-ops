@@ -4,7 +4,7 @@ import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { captureOnce, queryLoadRow } from '../src/capture.js';
-import type { CounterPoint } from '../src/series/query-stats.js';
+import type { CounterPoint } from '../src/deltas.js';
 import type { QueryStatsSnapshot } from '../src/store/write.js';
 import type { CheckContext } from '../src/types.js';
 
@@ -26,7 +26,7 @@ describe('the pgops marker on every catalog read that bypasses runCheck', () => 
   /**
    * Whole files exempt from the sweep. A whole-file entry covers every call
    * in the file, not just the ones its reason names, so keep this short:
-   * `actions/analyze.ts` and `run.ts` are deliberately not here and have
+   * `actions.ts` and `run.ts` are deliberately not here and have
    * their own tests below.
    */
   const ALLOWLIST: ReadonlyArray<{ file: string; reason: string }> = [
@@ -91,7 +91,7 @@ describe('the pgops marker on every catalog read that bypasses runCheck', () => 
     // they are pinned here. TABLES_SQL is the file's one ctx.target.query
     // call and is covered by the sweep; the generic type argument sits
     // between `query` and the paren, so a literal `query(` search misses it.
-    const src = readFileSync(new URL('../src/actions/analyze.ts', import.meta.url), 'utf8');
+    const src = readFileSync(new URL('../src/actions.ts', import.meta.url), 'utf8');
     for (const stmt of [
       "client.query(ownSql('BEGIN'))",
       'client.query(ownSql(`SET LOCAL lock_timeout = ${lockMs}`))',

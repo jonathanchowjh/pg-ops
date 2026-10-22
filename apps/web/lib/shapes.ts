@@ -2,17 +2,14 @@ import {
   MAX_STATEMENT_LENGTH, OWN_SQL_MARKER, deltas, messageOf, planStatements, readEvents, readWindowStats, relationsOf,
   type StoredShape,
 } from '@pgops/checks';
+import { remembered, type Kept } from './catalog';
 import { contextFor, storePool } from './pools';
 import type { Shape } from './tree';
 
-/** A window's snapshots are read at most this often: they change every five minutes. */
-const FRESH_MS = 60_000;
 /** The costliest this many shapes of a window. */
 const SHAPES_READ = 500;
 /** Two captures at the five-minute cadence, with room for one that was skipped. */
 const MIN_SPAN_MS = 11 * 60_000;
-/** Windows remembered: a past window's end is part of its key. */
-const KEPT = 50;
 
 /** Planning: a few a tick, never queued behind a lock, and never long. */
 export const PLACE_PER_TICK = 5;
@@ -49,7 +46,8 @@ interface Placed {
   again: number;
 }
 interface Memory {
-  reads: Map<string, { at: number; value: Shapes }>;
+  /** Read at most once a minute, whatever the page polls: the snapshots change every five minutes. */
+  reads: Map<string, Kept<Shapes>>;
   placed: Map<string, Map<string, Placed>>;
 }
 
@@ -98,9 +96,7 @@ export async function shapesFor(
   const store = storePool(process.env);
   if (store === null) return NONE;
   const key = `${name}\n${grid.winSecs}\n${grid.live ? 'live' : grid.to}`;
-  let entry = MEMORY.reads.get(key);
-  if (entry === undefined || Date.now() - entry.at >= FRESH_MS) {
-    let value = entry?.value ?? NONE;
+  const value = await remembered(MEMORY.reads, key, async (last) => {
     try {
       const from = new Date(Math.min(grid.from, grid.to - MIN_SPAN_MS));
       const [read, events] = await Promise.all([
@@ -108,21 +104,18 @@ export async function shapesFor(
         readEvents(store, name, from, new Date(grid.to)),
       ]);
       const resets = events.filter((e) => e.kind === 'reset').map((e) => e.at);
-      value = { shapes: read.shapes.flatMap((s) => shapeOf(s, resets)), allMs: read.allMs };
+      return { shapes: read.shapes.flatMap((s) => shapeOf(s, resets)), allMs: read.allMs };
     } catch {
       // lib/samples.ts logs a store that is down; the last numbers stand.
+      return last ?? NONE;
     }
-    entry = { at: Date.now(), value };
-    MEMORY.reads.delete(key);
-    MEMORY.reads.set(key, entry);
-    if (MEMORY.reads.size > KEPT) MEMORY.reads.delete(MEMORY.reads.keys().next().value!);
-  }
+  });
   // Placement is read now, not when the numbers were: the scheduler may have planned since.
   // `get`, not a map made on demand: a name in a URL must not grow the memory.
   const placed = MEMORY.placed.get(name);
   return {
-    allMs: entry.value.allMs,
-    shapes: entry.value.shapes.map((s) => ({ ...s, relations: placed?.get(s.key)?.relations ?? null })),
+    allMs: value.allMs,
+    shapes: value.shapes.map((s) => ({ ...s, relations: placed?.get(s.key)?.relations ?? null })),
   };
 }
 

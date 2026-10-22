@@ -1,4 +1,4 @@
-// `node`, not jsdom, for the reason given in scaffold.test.ts.
+// `node`, not jsdom, for the reason given in guards.test.ts.
 // @vitest-environment node
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

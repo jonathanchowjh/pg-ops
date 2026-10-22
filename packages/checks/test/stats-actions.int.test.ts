@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { resetQueryStats, resetStats } from '../src/actions/stats.js';
-import { defaultAuditPath } from '../src/actions/audit.js';
+import { resetQueryStats, resetStats } from '../src/actions.js';
+import { defaultAuditPath } from '../src/audit.js';
 import { withPostgres } from './harness.js';
 
 describe('resetQueryStats', () => {

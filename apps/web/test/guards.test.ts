@@ -3,11 +3,14 @@
 // `new URL('../app', import.meta.url)` into a server-relative asset URL, and
 // `readFileSync`/`readdirSync` then throw.
 // @vitest-environment node
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { CHECKS } from '@pgops/checks';
+import { BUCKET_MS as OF_THE_CHECKS_MS, CHECKS, CLASSES as OF_THE_CHECKS, HOMES, type Home } from '@pgops/checks';
+import { PAGES as SIDEBAR } from '@/components/sidebar';
+import { BUCKET_MS, CLASSES } from '@/lib/clock';
+import { NEXT_BIN } from './harness.js';
 
 const APP = fileURLToPath(new URL('../app', import.meta.url));
 const COMPONENTS = fileURLToPath(new URL('../components', import.meta.url));
@@ -17,6 +20,7 @@ const LIB = fileURLToPath(new URL('../lib', import.meta.url));
 // re-walking the roots above or `test/`, which does not ship.
 const WEB_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SQL_COMPONENT = join(COMPONENTS, 'sql.tsx');
+const DB = join(APP, 'db', '[name]');
 
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((entry) => {
@@ -62,7 +66,7 @@ describe('dynamic rendering', () => {
    * talk to the build machine's database. Each such file must call
    * `connection()` itself or go through a seam of lib/check.ts, each of which
    * awaits it: a table's page reads `process.env` and reaches the database
-   * through `readStore` and `runSeriesFor`, never `runCheckFor`.
+   * through `readStore`, never `runCheckFor`.
    */
   it('every page or layout touching configuration is explicitly dynamic', () => {
     const offenders: string[] = [];
@@ -72,7 +76,7 @@ describe('dynamic rendering', () => {
       const readsConfig = /databaseNames\s*\(|process\.env/.test(code);
       if (!readsConfig) continue;
       const isDynamic = /await\s+connection\s*\(\s*\)/.test(code)
-        || /\b(?:runCheckFor|runSeriesFor|runToolFor|readStore)\s*\(/.test(code);
+        || /\b(?:runCheckFor|runToolFor|readStore)\s*\(/.test(code);
       if (!isDynamic) offenders.push(file);
     }
     expect(offenders).toEqual([]);
@@ -301,6 +305,16 @@ describe('one home per setting', () => {
   });
 });
 
+describe('the class list the browser draws with', () => {
+  it('is the checks package\'s, in the same stacking order', () => {
+    expect([...CLASSES]).toEqual([...OF_THE_CHECKS]);
+  });
+
+  it('steps the cursor by the bucket the sampler writes', () => {
+    expect(BUCKET_MS).toBe(OF_THE_CHECKS_MS);
+  });
+});
+
 describe('the kill gate', () => {
   /**
    * Catches a second caller of an action (a Server Action, a helper) that
@@ -390,10 +404,70 @@ describe('the poll boundary', () => {
   });
 });
 
+/**
+ * The pages a node kind is drawn on: the tree, or that node's own page and
+ * its population. The server's reads are on the layout's identity line, the
+ * tree's findings and `/server`.
+ */
+const HOME_PAGES: Record<Home, string[]> = {
+  database: ['page.tsx'],
+  session: ['page.tsx'],
+  table: ['tables/page.tsx', 'tables/[relation]/page.tsx'],
+  query: ['queries/page.tsx', 'queries/[queryid]/page.tsx'],
+  index: ['indexes/page.tsx', 'tables/[relation]/page.tsx'],
+  sequence: ['tables/page.tsx', 'tables/[relation]/page.tsx'],
+  server: ['layout.tsx', 'page.tsx', 'server/page.tsx'],
+};
+
+/** A page's source and the source of each `@/lib` module it imports. */
+function reach(page: string): string {
+  const file = join(DB, page);
+  if (!existsSync(file)) throw new Error(`no page at ${page}`);
+  const code = strip(readFileSync(file, 'utf8'));
+  const libs = [...code.matchAll(/from\s+'@\/lib\/([\w-]+)'/g)].map((m) => join(LIB, `${m[1]!}.ts`));
+  return [code, ...libs.filter((f) => existsSync(f)).map((f) => strip(readFileSync(f, 'utf8')))].join('\n');
+}
+const names = (code: string, id: string): boolean => new RegExp(`CHECKS\\.${id}\\b`).test(code);
+
+describe('every check has a home that draws it', () => {
+  it('names a page that exists for every node kind', () => {
+    expect(Object.keys(HOME_PAGES).sort()).toEqual([...HOMES].sort());
+    for (const pages of Object.values(HOME_PAGES)) for (const p of pages) expect(existsSync(join(DB, p)), p).toBe(true);
+  });
+
+  it('reads each check from the tree or from its node\'s own page', () => {
+    const orphans: string[] = [];
+    for (const [id, check] of Object.entries(CHECKS)) {
+      if (!HOME_PAGES[check.home].some((p) => names(reach(p), id))) orphans.push(`${id} (${check.home})`);
+    }
+    expect(orphans).toEqual([]);
+  });
+});
+
+const pageFor = (segment: string | null): string =>
+  (segment === null ? join(DB, 'page.tsx') : join(DB, segment, 'page.tsx'));
+
+describe('the sidebar\'s pages', () => {
+  it('names a page that exists, for every entry', () => {
+    for (const p of SIDEBAR) expect(existsSync(pageFor(p.segment)), `${p.label || 'the tree'} points at no page`).toBe(true);
+  });
+
+  it('declares that a page polls for exactly the pages that do', () => {
+    for (const p of SIDEBAR) {
+      const polls = /<Refresh\b/.test(strip(readFileSync(pageFor(p.segment), 'utf8')));
+      expect(polls, `${p.label || 'the tree'}: polls is declared ${p.polls}`).toBe(p.polls);
+    }
+  });
+
+  it('puts the database first, with no label of its own', () => {
+    expect(SIDEBAR[0]).toMatchObject({ segment: null, href: '', label: '' });
+  });
+});
+
 const CHECKS_SRC = fileURLToPath(new URL('../../../packages/checks/src', import.meta.url));
 
 describe('the DDL boundary', () => {
-  it('confines every DDL statement to store/migrations/', () => {
+  it('confines every DDL statement to store/migrate.ts', () => {
     // Catches DDL anywhere but the migration runner, which runs only when
     // PGOPS_STORE_URL is set and only against that URL. pgops issues no DDL
     // against a monitored database. apps/web is scanned too: it holds the
@@ -413,7 +487,7 @@ describe('the DDL boundary', () => {
     ];
     const matched = roots.flatMap(([files, root, label]) =>
       files
-        .filter((p) => !p.includes(join('store', 'migrations')))
+        .filter((p) => !p.endsWith(join('store', 'migrate.ts')))
         .filter((p) => DDL.test(strip(readFileSync(p, 'utf8'))))
         // Relative path, not basename: two `page.tsx` files must not report
         // as the same offender.
@@ -466,7 +540,7 @@ describe('capture', () => {
       .filter((p) => p.endsWith('.ts'))
       .filter((p) => RESET.test(strip(readFileSync(p, 'utf8'))))
       .map((p) => p.slice(CHECKS_SRC.length + 1));
-    expect(offenders).toEqual([join('actions', 'stats.ts')]);
+    expect(offenders).toEqual(['actions.ts']);
   });
 
   /** The allowlist above could be edited; this names the files that may never reset. */
@@ -475,7 +549,7 @@ describe('capture', () => {
       'capture.ts',
       join('store', 'write.ts'),
       join('store', 'read.ts'),
-      join('series', 'query-stats.ts'),
+      'deltas.ts',
     ]) {
       expect(RESET.test(strip(readFileSync(join(CHECKS_SRC, f), 'utf8'))), f).toBe(false);
     }
@@ -535,5 +609,46 @@ describe('the README route table', () => {
   it('names no page the app does not serve', () => {
     const actual = new Set(actualRoutes());
     expect(documentedRoutes().filter((r) => !actual.has(r)).sort()).toEqual([]);
+  });
+});
+
+/**
+ * `withConsole` spawns NEXT_BIN first, so a wrong path fails every
+ * integration test late in `npm run gate` with a bare `MODULE_NOT_FOUND`.
+ * npm hoisting can move `next` between apps/web/node_modules and the repo
+ * root without notice; this names the problem in the fast suite.
+ */
+describe('the integration harness', () => {
+  it('spawns a next binary that exists', () => {
+    expect(existsSync(NEXT_BIN), `NEXT_BIN does not exist: ${NEXT_BIN}`).toBe(true);
+  });
+});
+
+describe('the web manifest', () => {
+  const pkg = JSON.parse(readFileSync(join(WEB_ROOT, 'package.json'), 'utf8'));
+  const declared = { ...pkg.dependencies, ...pkg.devDependencies };
+
+  // Next 16's App Router needs react 19; the root workspace still has 18.
+  it('declares react 19 rather than inheriting the root react 18', () => {
+    expect(pkg.dependencies.react).toMatch(/^\^?19\./);
+    expect(pkg.dependencies['react-dom']).toMatch(/^\^?19\./);
+  });
+
+  it('depends on the checks package by workspace protocol', () => {
+    expect(pkg.dependencies['@pgops/checks']).toBe('*');
+  });
+
+  it('declares pg, which lib/pools.ts imports, at the range the checks package does', () => {
+    const checks = JSON.parse(readFileSync(join(WEB_ROOT, '..', '..', 'packages', 'checks', 'package.json'), 'utf8'));
+    expect(pkg.dependencies.pg).toBeDefined();
+    expect(pkg.dependencies.pg).toBe(checks.dependencies.pg);
+  });
+
+  // test/render.tsx is the testing seam, and shadcn is a code generator
+  // that drags the MCP SDK and express into the production tree.
+  it('declares none of the packages this app has decided against', () => {
+    for (const trap of ['@testing-library/react', '@testing-library/dom', 'lucide-react', 'shadcn', 'class-variance-authority', 'tw-animate-css']) {
+      expect(Object.keys(declared)).not.toContain(trap);
+    }
   });
 });

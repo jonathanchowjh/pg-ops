@@ -1,27 +1,28 @@
 'use client';
 
-import { useMemo, type KeyboardEvent, type MouseEvent } from 'react';
+import { useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Axis, ClockLines, Readout, Track, useClock, useWidth } from '@/components/clock';
+import { Readout, Track, useClock, useWidth } from '@/components/clock';
 import { EntityLink } from '@/components/entity-link';
 import { KillButton } from '@/components/actions';
+import { Frame } from '@/components/frame';
 import {
-  CLASS_BG, ClassKey, MoreRow, QuietRow, QuietTableRow, ROW_PX, SessionRow, StatementRow, StripSvg, TableRow, Ties, Unseen, reading,
+  CLASS_BG, MoreRow, QuietRow, QuietTableRow, SessionRow, StatementRow, StripSvg, TableRow, Unseen, contextOf, reading,
   type RowContext,
 } from '@/components/tree-rows';
-import { CLASS_NAMES, CLASSES, clockTime, columnAt, EVENT_NAMES, fractionAt, keepQuery, labelMarks, toggled, windowQuery } from '@/lib/clock';
+import { CLASS_NAMES, CLASSES, clockTime, EVENT_NAMES, fractionAt, keepQuery, labelMarks, toggled, windowQuery } from '@/lib/clock';
 import { formatDuration } from '@/lib/format';
 import { flatten, listRows, readingAt, tiesOf, type Show } from '@/lib/rows';
 import {
   FOLD_NONE, FOLD_QUIET, NONE, UNSEEN, findingsAt, scaleSteps, unseenAt, type HealthKind, type Pointer, type Ranked, type Tree,
 } from '@/lib/tree';
+import { cn } from '@/lib/utils';
 
 /** What the answer calls a server finding. The figure follows in mono. */
 const HEALTH_LABEL: Record<HealthKind, string> = {
   connections: 'connections', replication: 'replication', xid: 'transaction ID age', deadlock: 'deadlock',
 };
-import { cn } from '@/lib/utils';
 
 /**
  * The tree on the clock: the answer, the band, then the rows.
@@ -52,11 +53,7 @@ export function TreeView({ database, tree, find, pointers, catalog, grant, kept,
   const rows = useMemo(() => flatten(tree), [tree]);
   const ties = useMemo(() => tiesOf(rows, tree), [rows, tree]);
   const ranked = findingsAt(tree, clock.at);
-  const ctx: RowContext = {
-    database, from: tree.from, to: tree.to, scale: tree.scale,
-    at: clock.at, col: columnAt(tree, clock.at), canAct: actions && clock.live, offset: clock.offset,
-    blocked: new Set(ranked.filter((r) => r.finding.kind === 'chain').map((r) => r.finding.table)), seen: tree.seen,
-  };
+  const ctx = contextOf(database, tree, clock, actions);
   const nothingSampled = tree.seen.every((k) => k < UNSEEN);
 
   const openNow = [
@@ -89,55 +86,29 @@ export function TreeView({ database, tree, find, pointers, catalog, grant, kept,
   return (
     <>
       <Answer database={database} ranked={ranked} pointers={clock.live ? pointers : []} ctx={ctx} pidHref={pidHref} />
-      <div
+      <Frame
         role="treegrid"
-        tabIndex={0}
-        onKeyDown={onTreeKey}
-        onMouseDown={onTreeMouseDown}
-        aria-label={`${database}: tables, statements and sessions`}
-        className="relative mb-4 overflow-hidden rounded-md border bg-card select-none [--lab:max(240px,40%)] max-md:[--lab:max(132px,42%)]"
-      >
-        <Band tree={tree} ctx={ctx} />
-        <div className="grid h-[26px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t text-xs text-muted-foreground">
-          <div className="flex items-center px-2.5">
-            <span suppressHydrationWarning className="max-md:hidden">at {clockTime(clock.at, clock.offset(clock.at))}</span>
-            <span className="ml-auto">sessions not idle</span>
-          </div>
-          <div className="self-stretch border-l" />
-        </div>
-        <div className="relative">
-          {rows.map((r) => {
-            if (r.kind === 'table') return <TableRow key={r.id} table={r.table} none={r.none} ctx={ctx} onFold={() => fold(r.none ? FOLD_NONE : r.table.name)} />;
-            if (r.kind === 'statement') return <StatementRow key={r.id} statement={r.statement} table={r.table} ctx={ctx} />;
-            if (r.kind === 'session') {
-              const first = !seenPids.has(r.session.pid);
-              seenPids.add(r.session.pid);
-              return <SessionRow key={r.id} session={r.session} first={first} ctx={ctx} />;
-            }
-            if (r.kind === 'more') return <MoreRow key={r.id} level={r.level} count={r.count} what={r.what} statement={r.statement} ctx={ctx} />;
-            if (r.kind === 'quiet') return <QuietRow key={r.id} count={r.count} open={r.open} onFold={() => fold(FOLD_QUIET)} />;
-            return <QuietTableRow key={r.id} fact={r.fact} ctx={ctx} />;
-          })}
-          {rows.length === 0 ? (
-            <div className="grid h-[34px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t">
-              <div className="px-2.5 text-muted-foreground">
-                {find !== '' ? `nothing named “${find}”` : nothingSampled ? 'nothing was sampled in this window' : 'nothing ran in this window'}
-              </div>
-              <div className="self-stretch border-l" />
-            </div>
-          ) : null}
-          <div className="pointer-events-none absolute inset-y-0 right-0 left-(--lab)" style={{ height: rows.length * ROW_PX }}>
-            <Ties ties={ties} />
-          </div>
-        </div>
-        <div className="grid grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t">
-          <div className="px-2.5 text-right text-xs text-muted-foreground">
-            each row 0 – {tree.scale} · sampled every 15 s
-          </div>
-          <Axis grid={tree} offset={clock.offset} className="border-l" />
-        </div>
-        <ClockLines className="right-0 left-(--lab)" />
-      </div>
+        label={`${database}: tables, statements and sessions`}
+        top={<Band tree={tree} ctx={ctx} />}
+        keyEnd="sessions not idle"
+        rows={rows.map((r) => {
+          if (r.kind === 'table') return <TableRow key={r.id} table={r.table} none={r.none} ctx={ctx} onFold={() => fold(r.none ? FOLD_NONE : r.table.name)} />;
+          if (r.kind === 'statement') return <StatementRow key={r.id} statement={r.statement} table={r.table} ctx={ctx} />;
+          if (r.kind === 'session') {
+            const first = !seenPids.has(r.session.pid);
+            seenPids.add(r.session.pid);
+            return <SessionRow key={r.id} session={r.session} first={first} ctx={ctx} />;
+          }
+          if (r.kind === 'more') return <MoreRow key={r.id} level={r.level} count={r.count} what={r.what} statement={r.statement} ctx={ctx} />;
+          if (r.kind === 'quiet') return <QuietRow key={r.id} count={r.count} open={r.open} onFold={() => fold(FOLD_QUIET)} />;
+          return <QuietTableRow key={r.id} fact={r.fact} ctx={ctx} />;
+        })}
+        rowCount={rows.length}
+        ties={ties}
+        empty={find !== '' ? `nothing named “${find}”` : nothingSampled ? 'nothing was sampled in this window' : 'nothing ran in this window'}
+        foot={`each row 0 – ${tree.scale} · sampled every 15 s`}
+        grid={tree}
+      />
       {tree.hidden ? (
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
           <i aria-hidden className="size-2 flex-none rounded-full shadow-[inset_0_0_0_1.5px_var(--muted-foreground)]" />
@@ -326,113 +297,36 @@ export function RowsView({ database, tree, show, actions, moreHref }: {
   const clock = useClock();
   const rows = useMemo(() => listRows(tree, show), [tree, show]);
   const ties = useMemo(() => tiesOf(rows, tree), [rows, tree]);
-  const ranked = findingsAt(tree, clock.at);
-  const ctx: RowContext = {
-    database, from: tree.from, to: tree.to, scale: tree.scale,
-    at: clock.at, col: columnAt(tree, clock.at), canAct: actions && clock.live, offset: clock.offset,
-    blocked: new Set(ranked.filter((r) => r.finding.kind === 'chain').map((r) => r.finding.table)), seen: tree.seen,
-  };
+  const ctx = contextOf(database, tree, clock, actions);
   const sessionsOnly = show.kind === 'sessions';
   const seenPids = new Set<number>();
   return (
     <>
-      <div
+      <Frame
         role="treegrid"
-        tabIndex={0}
-        onKeyDown={onTreeKey}
-        onMouseDown={onTreeMouseDown}
-        aria-label={sessionsOnly ? 'Sessions' : 'Statements and sessions'}
-        className="relative mb-4 overflow-hidden rounded-md border bg-card select-none [--lab:max(300px,46%)] max-md:[--lab:max(132px,42%)]"
-      >
-        {/* No band stands above these rows, so this row is their key. */}
-        <div className="grid min-h-[26px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center text-xs text-muted-foreground">
-          <div className="flex items-center px-2.5">
-            <span suppressHydrationWarning className="max-md:hidden">at {clockTime(clock.at, clock.offset(clock.at))}</span>
-            <span className="ml-auto">{sessionsOnly ? 'in this state for' : 'sessions not idle'}</span>
-          </div>
-          <ClassKey />
-        </div>
-        <div className="relative">
-          {rows.map((r) => {
-            if (r.kind === 'statement') return <StatementRow key={r.id} statement={r.statement} table={r.table} level={r.level} ctx={ctx} />;
-            if (r.kind === 'session') {
-              const first = !seenPids.has(r.session.pid);
-              seenPids.add(r.session.pid);
-              return <SessionRow key={r.id} session={r.session} first={first} level={r.level} ctx={ctx} />;
-            }
-            if (r.kind === 'more') {
-              return <MoreRow key={r.id} level={r.level} count={r.count} what={r.what} statement={r.statement} ctx={ctx} href={r.what === 'statements' ? moreHref : undefined} />;
-            }
-            return null;
-          })}
-          {rows.length === 0 ? (
-            <div className="grid h-[34px] grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t">
-              <div className="px-2.5 text-muted-foreground">
-                {!tree.sessionsShown && sessionsOnly ? 'a window wider than two hours lists no sessions'
-                  : tree.seen.every((k) => k < UNSEEN) ? 'nothing was sampled in this window' : 'nothing in this window'}
-              </div>
-              <div className="self-stretch border-l" />
-            </div>
-          ) : null}
-          <div className="pointer-events-none absolute inset-y-0 right-0 left-(--lab)" style={{ height: rows.length * ROW_PX }}>
-            <Ties ties={ties} />
-          </div>
-        </div>
-        <div className="grid grid-cols-[var(--lab)_minmax(0,1fr)] items-center border-t">
-          <div className="px-2.5 text-right text-xs text-muted-foreground">{sessionsOnly ? null : `each row 0 – ${tree.scale}`}</div>
-          <Axis grid={tree} offset={clock.offset} className="border-l" />
-        </div>
-        <ClockLines className="right-0 left-(--lab)" />
-      </div>
+        label={sessionsOnly ? 'Sessions' : 'Statements and sessions'}
+        wide
+        keyEnd={sessionsOnly ? 'in this state for' : 'sessions not idle'}
+        rows={rows.map((r) => {
+          if (r.kind === 'statement') return <StatementRow key={r.id} statement={r.statement} table={r.table} level={r.level} ctx={ctx} />;
+          if (r.kind === 'session') {
+            const first = !seenPids.has(r.session.pid);
+            seenPids.add(r.session.pid);
+            return <SessionRow key={r.id} session={r.session} first={first} level={r.level} ctx={ctx} />;
+          }
+          if (r.kind === 'more') {
+            return <MoreRow key={r.id} level={r.level} count={r.count} what={r.what} statement={r.statement} ctx={ctx} href={r.what === 'statements' ? moreHref : undefined} />;
+          }
+          return null;
+        })}
+        rowCount={rows.length}
+        ties={ties}
+        empty={!tree.sessionsShown && sessionsOnly ? 'a window wider than two hours lists no sessions'
+          : tree.seen.every((k) => k < UNSEEN) ? 'nothing was sampled in this window' : 'nothing in this window'}
+        foot={sessionsOnly ? null : `each row 0 – ${tree.scale}`}
+        grid={tree}
+      />
       <Readout />
     </>
   );
-}
-
-/**
- * The treegrid's keys. The arrows walk the rows, Home and End jump; right
- * opens a fold, left closes it or climbs to the row above it; Enter follows
- * the row's link. A key in a row's own control is the control's, and with no
- * row focused only the keys that reach one are taken: the rest step the clock.
- * A key with a modifier is the browser's, as it is the clock's.
- */
-function onTreeKey(e: KeyboardEvent<HTMLDivElement>): void {
-  const target = e.target as HTMLElement;
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (target.matches('button, a, input, textarea')) return;
-  const rows = [...e.currentTarget.querySelectorAll<HTMLElement>('[role=row]')];
-  const row = target.closest<HTMLElement>('[role=row]');
-  const i = row === null ? -1 : rows.indexOf(row);
-  if (i < 0 && !['ArrowDown', 'Home', 'End'].includes(e.key)) return;
-  const fold = row?.querySelector<HTMLElement>('[role=rowheader] button[aria-expanded]');
-  const level = Number(row?.getAttribute('aria-level') ?? 1);
-  switch (e.key) {
-    case 'ArrowDown': rows[Math.min(rows.length - 1, i + 1)]?.focus(); break;
-    case 'ArrowUp': rows[Math.max(0, i - 1)]?.focus(); break;
-    case 'Home': rows[0]?.focus(); break;
-    case 'End': rows.at(-1)?.focus(); break;
-    case 'ArrowRight': if (fold?.getAttribute('aria-expanded') === 'false') fold.click(); break;
-    case 'ArrowLeft':
-      if (fold?.getAttribute('aria-expanded') === 'true') fold.click();
-      else rows.slice(0, i).reverse().find((r) => Number(r.getAttribute('aria-level') ?? 1) < level)?.focus();
-      break;
-    case 'Enter': row?.querySelector<HTMLElement>('[role=rowheader] a')?.click(); break;
-    default: return;
-  }
-  e.preventDefault();
-  e.stopPropagation();
-}
-
-/**
- * A click in the tree is for the clock: it pins, or drags a window. A row it
- * focused would keep the arrows, and a pinned page could not step, so the
- * click focuses nothing and lets go of whatever the keys had: a row, or the
- * find box, which the prevented default would otherwise leave focused. A
- * row's own controls take focus as usual.
- */
-function onTreeMouseDown(e: MouseEvent<HTMLDivElement>): void {
-  if ((e.target as HTMLElement).closest('button, a, input, textarea, select') !== null) return;
-  e.preventDefault();
-  const held = document.activeElement;
-  if (held instanceof HTMLElement) held.blur();
 }
