@@ -1,6 +1,13 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { defineConfig } from 'vitest/config';
+
+// The integration suite's saved databases: none. PGOPS_CONFIG_FILE must name
+// a file that exists, so it is made here. See the env block below.
+const INTEGRATION = join(tmpdir(), 'pgops-integration-tests');
+mkdirSync(INTEGRATION, { recursive: true });
+writeFileSync(join(INTEGRATION, 'databases.json'), '[]\n');
 
 export default defineConfig({
   test: {
@@ -29,7 +36,12 @@ export default defineConfig({
           // integration path forgot. kill.int.test.ts asserts the resolved
           // path is outside the real home directory, so deleting this line
           // is a red test rather than a silent leak back into a real log.
-          env: { PGOPS_AUDIT_LOG: join(tmpdir(), 'pgops-integration-tests', 'audit.log') },
+          // The same holds for the saved databases: unset, every console the
+          // suite starts would read the developer's ~/.pgops/databases.json.
+          env: {
+            PGOPS_AUDIT_LOG: join(INTEGRATION, 'audit.log'),
+            PGOPS_CONFIG_FILE: join(INTEGRATION, 'databases.json'),
+          },
           // Starts the one Postgres container for the whole run, once, in
           // Vitest's main process — see global-setup.ts for why module-scope
           // state in a test file can't give that guarantee under isolate:true.

@@ -29,7 +29,9 @@ describe('isMissingRequestStore', () => {
 
 // Every input `readDatabases` looks at, in precedence order. Cleared rather
 // than assumed absent, in case the developer's shell exports a DATABASE_URL.
-const CONFIG_VARS = ['PGOPS_CONFIG_FILE', 'PGOPS_DATABASES', 'DATABASE_URL'];
+// PGOPS_CONFIG_FILE is left as vitest.config.ts sets it: unset, the saved
+// databases would be the developer's own ~/.pgops/databases.json.
+const CONFIG_VARS = ['PGOPS_DATABASES', 'DATABASE_URL'];
 
 describe('runCheckFor when the console itself is misconfigured', () => {
   afterEach(() => vi.unstubAllEnvs());
@@ -41,13 +43,14 @@ describe('runCheckFor when the console itself is misconfigured', () => {
    */
   it('reports a configuration fault as a console error, not the database being unreachable', async () => {
     for (const v of CONFIG_VARS) vi.stubEnv(v, undefined);
+    vi.stubEnv('PGOPS_DATABASES', '[{');
 
     const r = await runCheckFor('primary', CHECKS.connections);
 
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.reason).not.toBe('unreachable');
-    expect(r.message).toContain('No database configured');
+    expect(r.message).toContain('PGOPS_DATABASES is not valid JSON');
     expect(r.message).toMatch(/pgops/);
   });
 
@@ -77,8 +80,9 @@ describe('runToolFor', () => {
 
   it('reports a configuration fault as a console error, not the database being unreachable', async () => {
     for (const v of CONFIG_VARS) vi.stubEnv(v, undefined);
+    vi.stubEnv('PGOPS_DATABASES', '[{');
     const r = await runToolFor('primary', TOOLS.explain, { sql: 'SELECT 1' });
-    expect(r).toMatchObject({ ok: false, reason: 'error', message: expect.stringContaining('No database configured') });
+    expect(r).toMatchObject({ ok: false, reason: 'error', message: expect.stringContaining('PGOPS_DATABASES is not valid JSON') });
   });
 
   it('still reports a real connection failure as unreachable', async () => {

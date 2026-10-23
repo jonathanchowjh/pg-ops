@@ -1,5 +1,5 @@
 import { Pool, type PoolClient } from 'pg';
-import { PGOPS_APP, messageOf, ownSql, type CheckContext } from '@pgops/checks';
+import { CHECKS, PGOPS_APP, messageOf, ownSql, type CheckContext, type IdentityData, type IdentityRow } from '@pgops/checks';
 // Extensionless — see the comment on the equivalent import in lib/check.ts.
 import { readDatabases, storeUrl, type DatabaseConfig } from './config';
 
@@ -23,7 +23,7 @@ export class UnknownDatabaseError extends Error {
 /** What this process holds for one monitored database. */
 interface Target {
   pool: Pool;
-  /** Probed on first use; cannot change without a restart, which drops the pool. */
+  /** Probed on first use; cannot change without a restart or a remove, each of which drops the pool. */
   serverVersion?: number;
 }
 
@@ -47,6 +47,11 @@ export function databaseNames(): string[] {
   return configured().map((d) => d.name);
 }
 
+/** Every configured database by name and where it is set: what the fleet's database list may show. Never the URL. */
+export function databaseList(): { name: string; source: DatabaseConfig['source'] }[] {
+  return configured().map(({ name, source }) => ({ name, source }));
+}
+
 /** The longest any statement to a monitored database runs, and waits on a lock, unless its check says otherwise. */
 const TARGET_STATEMENT_MS = 15_000;
 const TARGET_LOCK_MS = 1_000;
@@ -54,8 +59,15 @@ const TARGET_LOCK_MS = 1_000;
 function targetFor(db: DatabaseConfig): Target {
   const existing = HELD.targets.get(db.url);
   if (existing) return existing;
+  const target: Target = { pool: targetPool(db.url, 10) };
+  HELD.targets.set(db.url, target);
+  return target;
+}
+
+/** A pool on a monitored database, connected the one way pgops ever connects to one. */
+function targetPool(url: string, max: number): Pool {
   const pool = new Pool({
-    connectionString: db.url,
+    connectionString: url,
     // So pgops can recognise its own backends on the Sessions page.
     //
     // `pg`'s ConnectionParameters assigns the parsed connection string over
@@ -65,7 +77,7 @@ function targetFor(db: DatabaseConfig): Target {
     // show as anyone's. It over-shows; it never hides a real session.
     application_name: PGOPS_APP,
     // A diagnostic tool must not be the reason connections run out.
-    max: 10,
+    max,
     // Fail visibly rather than hanging a page render forever.
     connectionTimeoutMillis: 5_000,
     // A backstop for every statement no check bounds itself, and a lock it
@@ -79,17 +91,57 @@ function targetFor(db: DatabaseConfig): Target {
     // still the server's. pg-pool awaits `onConnect` before it hands the
     // client out, and ends a client whose hook failed rather than hand it out
     // unbounded.
+    //
     onConnect: async (client) => {
       await client.query(ownSql(`SET statement_timeout = ${TARGET_STATEMENT_MS}`));
       await client.query(ownSql(`SET lock_timeout = ${TARGET_LOCK_MS}`));
     },
+    // Read only, so pgops cannot change a row or the schema: the server
+    // refuses with 25006. What the actions do is still allowed in a read-only
+    // transaction (pg_terminate_backend, ANALYZE, the statistics resets), and
+    // those routes exist only with PGOPS_ALLOW_ACTIONS.
+    //
+    // In the startup packet, not a `SET`. It is the session's reset value,
+    // so RESET cannot undo it. And a SET on a server connection a
+    // transaction-mode pooler shares stays there for the next client, on a
+    // pooler that does not restore settings between clients (PgBouncer 1.26
+    // does); that next client could be the application, and its writes would
+    // fail. A pooler refuses, honours or ignores a startup option, and
+    // `probe` reads back "off" for one that ignores it. A URL
+    // carrying its own `?options=` replaces this one, which `probe` catches
+    // for a database added in the console.
+    options: '-c default_transaction_read_only=on',
   });
   // A pool-level error with no listener is an unhandled 'error' event, which
   // terminates the Node process.
   pool.on('error', () => {});
-  const target: Target = { pool };
-  HELD.targets.set(db.url, target);
-  return target;
+  return pool;
+}
+
+/**
+ * Close the pool on a URL no configured database uses any more: the database
+ * was removed. Two names can share one URL, and so one pool.
+ */
+export function retireTarget(url: string): void {
+  if (configured().some((d) => d.url === url)) return;
+  HELD.targets.get(url)?.pool.end().catch(() => {});
+  HELD.targets.delete(url);
+}
+
+/**
+ * Connect to a database not yet configured, the way `targetFor` would, and
+ * say what the server answers: who it is, and whether the session is read
+ * only. The pool is closed before this returns.
+ */
+export async function probe(url: string): Promise<{ identity: IdentityData; readOnly: boolean }> {
+  const pool = targetPool(url, 1);
+  try {
+    const { rows } = await pool.query<IdentityRow>(ownSql(CHECKS.identity.sql as string));
+    const ro = await pool.query<{ transaction_read_only: string }>(ownSql('SHOW transaction_read_only'));
+    return { identity: CHECKS.identity.map(rows), readOnly: ro.rows[0]?.transaction_read_only === 'on' };
+  } finally {
+    await pool.end().catch(() => {});
+  }
 }
 
 export async function contextFor(name: string): Promise<CheckContext> {

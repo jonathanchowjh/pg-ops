@@ -61,9 +61,13 @@ ENV HOSTNAME=0.0.0.0
 COPY --from=build /repo/apps/web/.next/standalone ./
 COPY --from=build /repo/apps/web/.next/static ./apps/web/.next/static
 
-# The base image's own uid 1000. Nothing here writes to the filesystem except
-# the audit log's local convenience copy, which fails loudly to stderr and does
-# not stop the kill — stdout is that record's real home in a container.
+# The base image's own uid 1000. It writes to ~/.pgops only: the databases
+# added in the console, and the audit log's local convenience copy, which
+# fails loudly to stderr and does not stop the kill — stdout is that record's
+# real home in a container. Made here, owned by node, because a named volume
+# mounted on it copies this directory's owner; on a directory the image lacks,
+# Docker makes it root's and the console cannot save.
+RUN mkdir -p /home/node/.pgops && chown node:node /home/node/.pgops
 USER node
 
 EXPOSE 8080

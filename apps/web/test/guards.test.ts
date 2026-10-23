@@ -73,7 +73,7 @@ describe('dynamic rendering', () => {
     for (const file of walk(APP)) {
       if (!RENDERABLE.test(file)) continue;
       const code = strip(readFileSync(file, 'utf8'));
-      const readsConfig = /databaseNames\s*\(|process\.env/.test(code);
+      const readsConfig = /database(?:Names|List)\s*\(|process\.env/.test(code);
       if (!readsConfig) continue;
       const isDynamic = /await\s+connection\s*\(\s*\)/.test(code)
         || /\b(?:runCheckFor|runToolFor|readStore)\s*\(/.test(code);

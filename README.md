@@ -72,10 +72,10 @@ git clone https://github.com/jonathanchowjh/pg-ops.git
 cd pg-ops
 docker build -t pgops .
 
-docker run -e DATABASE_URL=postgres://user:pass@host:5432/db -p 8080:8080 pgops
+docker run -p 8080:8080 -v pgops:/home/node/.pgops pgops
 ```
 
-Open http://localhost:8080.
+Open http://localhost:8080 and add a database. The volume keeps it.
 
 Several databases behind basic auth, with history enabled:
 
@@ -92,13 +92,13 @@ To enable the terminate, analyze and statistics-reset actions, add
 
 ## Configuration
 
-Configuration comes from environment variables, read on every request.
+Configuration is read on every request.
 
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | One database, named `default`. |
 | `PGOPS_DATABASES` | JSON array of `{"name","url"}`. `name` becomes a URL path segment and must match `[A-Za-z0-9_-]+` and be unique. |
-| `PGOPS_CONFIG_FILE` | Path to a file containing that same JSON array. The only form that keeps connection strings out of the process environment. |
+| `PGOPS_CONFIG_FILE` | An existing file the console saves databases to, as that array. Defaults to `~/.pgops/databases.json`. |
 | `PGOPS_STORE_URL` | A Postgres database pgops may create its own `pgops` schema in. Enables history. |
 | `PGOPS_USERNAME`, `PGOPS_PASSWORD` | HTTP basic auth over every route. Set both or neither. Setting exactly one is a 503 on every request. |
 | `PGOPS_ALLOW_ACTIONS` | `true` enables the action routes. Any other value leaves them absent. |
@@ -106,10 +106,8 @@ Configuration comes from environment variables, read on every request.
 | `PGOPS_AUDIT_LOG` | Path of the local audit log copy. Defaults to `~/.pgops/audit.log`. |
 | `PORT` | Listen port. `8080` in the image. |
 
-Database sources take precedence in the order `PGOPS_CONFIG_FILE`, then
-`PGOPS_DATABASES`, then `DATABASE_URL`. If none is set, or the value cannot be
-parsed, the server starts and every page reports that pgops is not configured,
-along with the input it read and the exact parse error.
+The databases are `PGOPS_DATABASES` (else `DATABASE_URL`), then the saved
+file's. A parse error is reported on every page.
 
 **Requirements.** Postgres 14 or newer. The `pg_stat_statements` extension
 for the Queries page; every other page works without it and the Queries page
@@ -182,7 +180,10 @@ it.
 - **Explain plans a statement and never runs it.** No `ANALYZE`; read-only
   transaction, always rolled back; a `;` cannot smuggle a second command.
 - **Every rendered query and every audit line is redacted.**
-- **No DDL against a monitored database.**
+- **Every connection to a monitored database is read only**, so the server
+  refuses any write. Poolers may ignore this.
+- **Adding a database needs auth**, or anyone reaching the console can
+  point it at any host.
 - **Actions on with auth off is an unauthenticated kill endpoint.** pgops
   warns on stderr and keeps serving, because some deployments authenticate at
   a proxy. If yours does not, set `PGOPS_USERNAME` and `PGOPS_PASSWORD`

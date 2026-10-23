@@ -9,7 +9,7 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn(), replace: 
 
 const state = vi.hoisted(() => ({ names: ['prod', 'analytics'] as string[] }));
 // No store: every row comes from this process's memory, which the test fills through the real sampler path.
-vi.mock('@/lib/pools', async (orig) => ({ ...(await orig<typeof import('@/lib/pools')>()), storePool: () => null, databaseNames: () => state.names }));
+vi.mock('@/lib/pools', async (orig) => ({ ...(await orig<typeof import('@/lib/pools')>()), storePool: () => null, databaseList: () => state.names.map((name) => ({ name, source: 'env' as const })) }));
 vi.mock('@/lib/check', () => ({
   runCheckFor: vi.fn(async () => { throw new Error('the fleet contacts no database'); }),
   readStore: async () => ({ ok: false, kind: 'off', message: 'History is off.' }),
@@ -121,9 +121,24 @@ describe('the fleet', () => {
     expect(html).not.toContain('public.users');
   });
 
-  it('says so when no database is configured', async () => {
+  it('offers to add one when no database is connected, and draws no clock', async () => {
     state.names = [];
     await mount();
-    expect(view.text()).toContain('No database is configured.');
+    expect(view.text()).toContain('No database is connected yet.');
+    expect(view.container.querySelector('button')?.textContent).toBe('Add a database');
+    expect(view.container.querySelector('[role=row]')).toBeNull();
+  });
+
+  /** A URL carries its password, and props reach the HTML. */
+  it('sends the database list names and where each is set, never a URL', async () => {
+    const { databaseList } = await vi.importActual<typeof import('@/lib/pools')>('@/lib/pools');
+    vi.stubEnv('PGOPS_DATABASES', '[{"name":"prod","url":"postgres://u:hunter2@h/p"}]');
+    try {
+      expect(databaseList()).toEqual([{ name: 'prod', source: 'env' }]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    await mount();
+    expect(view.container.querySelector('button')?.textContent).toBe('Databases');
   });
 });

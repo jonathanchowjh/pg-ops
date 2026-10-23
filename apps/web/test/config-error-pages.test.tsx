@@ -14,7 +14,9 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ refresh: () => {} }),
 }));
 
-const CONFIG_VARS = ['PGOPS_CONFIG_FILE', 'PGOPS_DATABASES', 'DATABASE_URL'];
+// PGOPS_CONFIG_FILE is left as vitest.config.ts sets it: unset, the saved
+// databases would be the developer's own ~/.pgops/databases.json.
+const CONFIG_VARS = ['PGOPS_DATABASES', 'DATABASE_URL'];
 
 /**
  * A `ConfigError` escaping `databaseNames()` uncaught would give Next's
@@ -26,17 +28,19 @@ describe('a misconfigured console', () => {
 
   it('renders the configuration error on the overview instead of a generic 500', async () => {
     for (const v of CONFIG_VARS) vi.stubEnv(v, undefined);
+    vi.stubEnv('PGOPS_DATABASES', '[{');
     const { default: Overview } = await import('@/app/page');
 
     const r = await render(await Overview({ searchParams: Promise.resolve({}) }));
 
-    expect(r.text()).toContain('No database configured');
+    expect(r.text()).toContain('PGOPS_DATABASES is not valid JSON');
     // The operator's own inputs, named.
     expect(r.text()).toContain('PGOPS_DATABASES');
   });
 
   it('renders the configuration error on a database page instead of a 404 or a 500', async () => {
     for (const v of CONFIG_VARS) vi.stubEnv(v, undefined);
+    vi.stubEnv('PGOPS_DATABASES', '[{');
     const { default: DbLayout } = await import('@/app/db/[name]/layout');
 
     const r = await render(
@@ -45,6 +49,6 @@ describe('a misconfigured console', () => {
 
     // Not a 404: that sends the operator to check the URL when the deployment
     // is what is broken.
-    expect(r.text()).toContain('No database configured');
+    expect(r.text()).toContain('PGOPS_DATABASES is not valid JSON');
   });
 });

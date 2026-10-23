@@ -1,6 +1,16 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
+
+// Unset, the saved databases are read from the developer's own
+// ~/.pgops/databases.json. Set, the file must exist, so it is made empty here;
+// a test that saves one points this at its own directory.
+const SAVED = join(tmpdir(), 'pgops-web-tests', 'databases.json');
+mkdirSync(join(tmpdir(), 'pgops-web-tests'), { recursive: true });
+writeFileSync(SAVED, '[]\n');
 
 /**
  * This app has its own vitest config rather than being a project defined in
@@ -21,5 +31,6 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['test/**/*.test.{ts,tsx}'],
     exclude: ['test/**/*.int.test.ts'],
+    env: { PGOPS_CONFIG_FILE: SAVED },
   },
 });

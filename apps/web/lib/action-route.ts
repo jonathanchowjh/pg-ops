@@ -84,7 +84,7 @@ export async function openAction(
 }
 
 /** The header as proxy.ts encoded it. Only proxy.ts sets it, so a malformed one is not expected; it is kept as sent. */
-function actorOf(header: string | null): string {
+export function actorOf(header: string | null): string {
   if (header === null) return 'anonymous';
   try { return decodeURIComponent(header); } catch { return header; }
 }

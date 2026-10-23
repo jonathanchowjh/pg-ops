@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Adding databases from the console
+
+`docker run -p 8080:8080 pgops` with no database starts on an empty fleet
+with **Add a database**. The modal tests the connection the way pgops will
+always connect, shows the server's identity and `transaction_read_only = on`,
+and saves on a second click; **Databases** on the fleet adds more and removes
+saved ones.
+
+- **Read only, enforced.** Every connection to a monitored database starts
+  with `default_transaction_read_only=on` in its startup options, so a write
+  is refused with 25006 and RESET cannot undo it. Not a `SET`, which a
+  transaction-mode pooler that does not restore settings between clients
+  would leave on a connection it shares with the application. The actions still work: Postgres allows terminate, ANALYZE
+  and the statistics resets in a read-only transaction.
+- **Configuration merges.** `PGOPS_DATABASES` or `DATABASE_URL`, then the
+  saved file (`PGOPS_CONFIG_FILE`, defaulting to `~/.pgops/databases.json`).
+  `PGOPS_CONFIG_FILE` no longer overrides the environment and must exist;
+  the default path may be missing. No configuration is an empty fleet rather
+  than an error page. The file is written owner-only, beside and renamed
+  over, so a cut-short write cannot leave every page failing to parse it.
+- **The image** creates `/home/node/.pgops` owned by `node`, so a named
+  volume mounted there is writable.
+
 ### The entity console, Stages 1 and 2
 
 The console is one tree per database on one clock: tables the trunk, the

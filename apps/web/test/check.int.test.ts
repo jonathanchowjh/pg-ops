@@ -101,3 +101,78 @@ describe('catalogFor', () => {
     }
   });
 });
+
+/**
+ * The promise the add-database modal makes, held at the server: every
+ * connection pgops opens to a monitored database is read only, and what the
+ * actions do is still allowed there.
+ */
+describe('a monitored database', () => {
+  it('refuses a write over pgops\'s own connection with 25006', async () => {
+    const { contextFor } = await import('../lib/pools.js');
+    const { target } = await contextFor('primary');
+    await expect(target.query('CREATE TABLE pgops_wrote (id int)')).rejects.toMatchObject({ code: '25006' });
+    // Set at startup, so it is the session's reset value: RESET cannot undo it.
+    const client = await target.connect();
+    try {
+      await client.query('RESET ALL');
+      await expect(client.query('CREATE TABLE pgops_wrote (id int)')).rejects.toMatchObject({ code: '25006' });
+    } finally {
+      client.release();
+    }
+  });
+
+  /** A SET there would outlive pgops's session on a pooler's shared connection. */
+  it('is read only from the startup packet, not a SET', async () => {
+    const { contextFor } = await import('../lib/pools.js');
+    const { target } = await contextFor('primary');
+    const { rows: [s] } = await target.query<{ reset_val: string; source: string }>(
+      "SELECT reset_val, source FROM pg_settings WHERE name = 'default_transaction_read_only'");
+    expect(s).toEqual({ reset_val: 'on', source: 'client' });
+  });
+
+  it('closes the pool of a removed database, and keeps one another name still uses', async () => {
+    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { removeDatabase } = await import('../lib/config.js');
+    const { contextFor, retireTarget } = await import('../lib/pools.js');
+    const file = join(mkdtempSync(join(tmpdir(), 'pgops-retire-')), 'databases.json');
+    const url = `${pg.getConnectionUri()}?retire=1`;
+    writeFileSync(file, JSON.stringify([{ name: 'a', url }, { name: 'b', url }]));
+    const before = process.env.PGOPS_CONFIG_FILE;
+    process.env.PGOPS_CONFIG_FILE = file;
+    try {
+      const { target } = await contextFor('a');
+      retireTarget(removeDatabase(process.env, 'a').url);
+      expect((target as unknown as { ending: boolean }).ending).toBe(false);
+      retireTarget(removeDatabase(process.env, 'b').url);
+      expect((target as unknown as { ending: boolean }).ending).toBe(true);
+    } finally {
+      process.env.PGOPS_CONFIG_FILE = before;
+    }
+  });
+
+  it('still allows ANALYZE, a statistics reset and a terminate', async () => {
+    const { Client } = await import('pg');
+    const { contextFor } = await import('../lib/pools.js');
+    const { target } = await contextFor('primary');
+    const victim = new Client({ connectionString: pg.getConnectionUri() });
+    await victim.connect();
+    victim.on('error', () => {});
+    const { rows: [me] } = await victim.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    await target.query('ANALYZE pg_catalog.pg_class');
+    await target.query('SELECT pg_stat_reset()');
+    const { rows: [killed] } = await target.query<{ ok: boolean }>('SELECT pg_terminate_backend($1) AS ok', [me!.pid]);
+    expect(killed!.ok).toBe(true);
+    await victim.end().catch(() => {});
+  });
+
+  it('is probed the way it is connected: who it is, and read only', async () => {
+    const { probe } = await import('../lib/pools.js');
+    const r = await probe(pg.getConnectionUri());
+    expect(r.readOnly).toBe(true);
+    expect(r.identity.database).toBe(pg.getDatabase());
+    await expect(probe('postgres://u:p@127.0.0.1:1/nope')).rejects.toThrow();
+  });
+});
